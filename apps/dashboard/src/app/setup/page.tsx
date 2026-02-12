@@ -20,6 +20,7 @@ import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 // ---------------------------------------------------------------------------
 
 const steps = [
+  'Domain',
   'Database',
   'Redis',
   'Initialize',
@@ -91,6 +92,16 @@ export default function SetupPage() {
   const [initStatus, setInitStatus] = useState<'idle' | 'running' | 'restarting' | 'done' | 'error'>('idle');
   const [initMessage, setInitMessage] = useState('');
 
+  // -- Domain / Cloudflare state --
+  const [cfApiToken, setCfApiToken] = useState('');
+  const [cfAccountId, setCfAccountId] = useState('');
+  const [cfZones, setCfZones] = useState<Array<{ id: string; name: string }>>([]);
+  const [cfSelectedZone, setCfSelectedZone] = useState('');
+  const [cfHostname, setCfHostname] = useState('');
+  const [cfStatus, setCfStatus] = useState<'idle' | 'fetching_zones' | 'zones_loaded' | 'configuring' | 'done' | 'error'>('idle');
+  const [cfMessage, setCfMessage] = useState('');
+  const [cfPermanentUrl, setCfPermanentUrl] = useState<string | null>(null);
+
   // -- Worker install command --
   const [copied, setCopied] = useState(false);
 
@@ -104,12 +115,23 @@ export default function SetupPage() {
     localStorage.setItem('ai-engine-setup-form', JSON.stringify(formData));
   }, [activeStep, formData]);
 
-  // Poll tunnel status for the remote access banner
+  // Poll tunnel status for the remote access banner.
+  // If a named tunnel is already configured, skip the Domain step.
   useEffect(() => {
+    let skipped = false;
     const poll = () => {
       fetch('/api/tunnel/status')
         .then((r) => r.json())
-        .then((d) => { if (d.url) setTunnelUrl(d.url); })
+        .then((d) => {
+          if (d.url) setTunnelUrl(d.url);
+          if (d.mode === 'named' && d.url && !skipped) {
+            skipped = true;
+            setCfPermanentUrl(d.url);
+            setCfStatus('done');
+            // If user is still on Domain step, advance past it
+            setActiveStep((prev) => (prev === 0 ? 1 : prev));
+          }
+        })
         .catch(() => {});
     };
     poll();
@@ -219,6 +241,64 @@ export default function SetupPage() {
     }
   }, []);
 
+  // ── Cloudflare: Fetch zones ──
+  const fetchZones = useCallback(async () => {
+    setCfStatus('fetching_zones');
+    setCfMessage('');
+    setCfZones([]);
+    try {
+      const res = await fetch('/api/tunnel/zones', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiToken: cfApiToken, accountId: cfAccountId }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setCfStatus('error');
+        setCfMessage(data.error);
+      } else {
+        setCfZones(data.zones ?? []);
+        setCfStatus('zones_loaded');
+        if (data.zones?.length === 1) {
+          setCfSelectedZone(data.zones[0].id);
+        }
+      }
+    } catch (err: any) {
+      setCfStatus('error');
+      setCfMessage(err.message);
+    }
+  }, [cfApiToken, cfAccountId]);
+
+  // ── Cloudflare: Configure named tunnel ──
+  const configureTunnel = useCallback(async () => {
+    setCfStatus('configuring');
+    setCfMessage('Setting up Cloudflare Tunnel and DNS record...');
+    try {
+      const res = await fetch('/api/tunnel/configure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiToken: cfApiToken,
+          accountId: cfAccountId,
+          zoneId: cfSelectedZone,
+          hostname: cfHostname,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.url) {
+        setCfStatus('done');
+        setCfPermanentUrl(data.url);
+        setCfMessage(`Tunnel configured! Your permanent URL is ${data.url}`);
+      } else {
+        setCfStatus('error');
+        setCfMessage(data.error ?? 'Failed to configure tunnel');
+      }
+    } catch (err: any) {
+      setCfStatus('error');
+      setCfMessage(err.message);
+    }
+  }, [cfApiToken, cfAccountId, cfSelectedZone, cfHostname]);
+
   // ── Initialize ──
   const runInitialize = useCallback(async () => {
     setInitStatus('running');
@@ -278,17 +358,19 @@ export default function SetupPage() {
 
   // ── Helpers ──
   const isNextDisabled = () => {
-    if (activeStep === 0) return pgStatus !== 'success';
-    if (activeStep === 1) return redisStatus !== 'success';
-    if (activeStep === 2) return initStatus !== 'done';
-    if (activeStep === 3) return !formData.email || !formData.password || !formData.displayName;
-    if (activeStep === 6) return !formData.passphrase;
+    if (activeStep === 0) return false; // Domain step always allows skip/next
+    if (activeStep === 1) return pgStatus !== 'success';
+    if (activeStep === 2) return redisStatus !== 'success';
+    if (activeStep === 3) return initStatus !== 'done';
+    if (activeStep === 4) return !formData.email || !formData.password || !formData.displayName;
+    if (activeStep === 7) return !formData.passphrase;
     return false;
   };
 
   const getNextLabel = () => {
     if (activeStep === steps.length - 1) return 'Go to Dashboard';
-    if (activeStep === 4) return 'Skip / Next';
+    if (activeStep === 0) return cfPermanentUrl ? 'Next' : 'Skip (use temporary URL)';
+    if (activeStep === 5) return 'Skip / Next';
     return 'Next';
   };
 
@@ -319,21 +401,23 @@ export default function SetupPage() {
   };
 
   return (
-    <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: 'background.default', p: 2 }}>
-      <Container maxWidth="sm">
-        <Stack alignItems="center" spacing={2} mb={4}>
-          <SmartToyIcon sx={{ fontSize: 48, color: 'primary.main' }} />
-          <Typography variant="h4" fontWeight={700}>AI Engine Setup</Typography>
-          <Typography color="text.secondary">Let&apos;s get your system configured</Typography>
-        </Stack>
+    <Box sx={{ minHeight: '100vh', bgcolor: 'background.default', p: 2, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+      {/* Header */}
+      <Stack alignItems="center" spacing={2} mt={4} mb={4}>
+        <SmartToyIcon sx={{ fontSize: 48, color: 'primary.main' }} />
+        <Typography variant="h4" fontWeight={700}>AI Engine Setup</Typography>
+        <Typography color="text.secondary">Let&apos;s get your system configured</Typography>
+      </Stack>
 
+      {/* Stepper — full width so labels don't stack */}
+      <Container maxWidth="lg" sx={{ mb: 4 }}>
         {/* Tunnel remote access banner */}
         {tunnelUrl && (
           <Paper
             variant="outlined"
             sx={{
               p: 1.5, mb: 3, display: 'flex', alignItems: 'center', gap: 1.5,
-              bgcolor: 'action.hover', borderColor: 'primary.main',
+              bgcolor: 'action.hover', borderColor: 'primary.main', maxWidth: 600, mx: 'auto',
             }}
           >
             <LanguageIcon color="primary" sx={{ fontSize: 20 }} />
@@ -363,16 +447,158 @@ export default function SetupPage() {
           </Paper>
         )}
 
-        <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 4 }}>
+        <Stepper activeStep={activeStep} alternativeLabel>
           {steps.map((label) => (
             <Step key={label}><StepLabel>{label}</StepLabel></Step>
           ))}
         </Stepper>
+      </Container>
 
+      {/* Form content — narrower for readability */}
+      <Container maxWidth="sm">
         <Paper sx={{ p: 4 }}>
 
-          {/* ── Step 0: PostgreSQL ─────────────────────────────── */}
+          {/* ── Step 0: Domain / Cloudflare Tunnel ─────────────── */}
           {activeStep === 0 && (
+            <Stack spacing={2}>
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <LanguageIcon color="primary" />
+                <Typography variant="h6" fontWeight={600}>Set Up Your Domain</Typography>
+              </Stack>
+
+              {!cfPermanentUrl && (
+                <>
+                  <Alert severity="warning" variant="outlined">
+                    You&apos;re currently using a <strong>temporary URL</strong> that changes every time the server restarts.
+                    Set up a Cloudflare Tunnel to get a <strong>permanent domain</strong> so you don&apos;t lose access.
+                  </Alert>
+
+                  {tunnelUrl && (
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: 'action.hover' }}>
+                      <Typography variant="caption" color="text.secondary">Current temporary URL</Typography>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>{tunnelUrl}</Typography>
+                    </Paper>
+                  )}
+
+                  <Divider />
+
+                  <Typography variant="body2" color="text.secondary">
+                    You&apos;ll need a <strong>Cloudflare account</strong> with at least one domain.
+                    Create an API token at{' '}
+                    <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">
+                      dash.cloudflare.com/profile/api-tokens
+                    </a>{' '}
+                    with <strong>Zone:DNS:Edit</strong> and <strong>Account:Cloudflare Tunnel:Edit</strong> permissions.
+                  </Typography>
+
+                  <TextField
+                    label="Cloudflare API Token"
+                    fullWidth
+                    value={cfApiToken}
+                    onChange={(e) => { setCfApiToken(e.target.value); setCfStatus('idle'); }}
+                    placeholder="Bearer token with Zone:DNS:Edit + Tunnel:Edit"
+                    type="password"
+                    inputProps={{ spellCheck: false }}
+                  />
+
+                  <TextField
+                    label="Account ID"
+                    fullWidth
+                    value={cfAccountId}
+                    onChange={(e) => { setCfAccountId(e.target.value); setCfStatus('idle'); }}
+                    placeholder="Found in the Cloudflare dashboard sidebar"
+                    inputProps={{ spellCheck: false }}
+                  />
+
+                  {cfStatus !== 'zones_loaded' && cfStatus !== 'configuring' && cfStatus !== 'done' && (
+                    <Button
+                      variant="outlined"
+                      onClick={fetchZones}
+                      disabled={!cfApiToken || !cfAccountId || cfStatus === 'fetching_zones'}
+                    >
+                      {cfStatus === 'fetching_zones' ? 'Loading domains...' : 'Load My Domains'}
+                    </Button>
+                  )}
+
+                  {cfStatus === 'fetching_zones' && <LinearProgress />}
+
+                  {cfStatus === 'zones_loaded' && cfZones.length > 0 && (
+                    <>
+                      <TextField
+                        select
+                        label="Domain (Zone)"
+                        fullWidth
+                        value={cfSelectedZone}
+                        onChange={(e) => setCfSelectedZone(e.target.value)}
+                        SelectProps={{ native: true }}
+                      >
+                        <option value="">Select a domain...</option>
+                        {cfZones.map((z) => (
+                          <option key={z.id} value={z.id}>{z.name}</option>
+                        ))}
+                      </TextField>
+
+                      <TextField
+                        label="Hostname"
+                        fullWidth
+                        value={cfHostname}
+                        onChange={(e) => setCfHostname(e.target.value)}
+                        placeholder={`ai.${cfZones.find((z) => z.id === cfSelectedZone)?.name ?? 'yourdomain.com'}`}
+                        helperText="The full hostname for your dashboard (e.g. ai.yourdomain.com)"
+                        inputProps={{ spellCheck: false }}
+                      />
+
+                      <Button
+                        variant="contained"
+                        onClick={configureTunnel}
+                        disabled={!cfSelectedZone || !cfHostname || cfStatus === 'configuring'}
+                        size="large"
+                      >
+                        {cfStatus === 'configuring' ? 'Configuring...' : 'Set Up Permanent Domain'}
+                      </Button>
+                    </>
+                  )}
+
+                  {cfStatus === 'zones_loaded' && cfZones.length === 0 && (
+                    <Alert severity="warning">No active zones found for this account. Add a domain to Cloudflare first.</Alert>
+                  )}
+
+                  {cfStatus === 'configuring' && <LinearProgress />}
+
+                  {cfStatus === 'error' && (
+                    <Alert severity="error">{cfMessage}</Alert>
+                  )}
+                </>
+              )}
+
+              {cfPermanentUrl && (
+                <>
+                  <Alert severity="success">
+                    Permanent domain configured! Your dashboard is now available at:
+                  </Alert>
+                  <Paper variant="outlined" sx={{ p: 2, bgcolor: 'action.hover', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                    <LanguageIcon color="success" sx={{ fontSize: 20 }} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography variant="body1" sx={{ fontFamily: 'monospace', fontWeight: 600, wordBreak: 'break-all' }}>
+                        {cfPermanentUrl}
+                      </Typography>
+                    </Box>
+                    <Tooltip title="Open permanent URL">
+                      <IconButton size="small" component="a" href={`${cfPermanentUrl}/setup`} target="_blank" rel="noopener">
+                        <OpenInNewIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Paper>
+                  <Alert severity="info" variant="outlined">
+                    Bookmark the URL above. You can continue setup here or open the permanent URL — your progress is saved.
+                  </Alert>
+                </>
+              )}
+            </Stack>
+          )}
+
+          {/* ── Step 1: PostgreSQL ─────────────────────────────── */}
+          {activeStep === 1 && (
             <Stack spacing={2}>
               <Stack direction="row" alignItems="center" spacing={1}>
                 <StorageIcon color="primary" />
@@ -445,8 +671,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 1: Redis ─────────────────────────────────── */}
-          {activeStep === 1 && (
+          {/* ── Step 2: Redis ─────────────────────────────────── */}
+          {activeStep === 2 && (
             <Stack spacing={2}>
               <Stack direction="row" alignItems="center" spacing={1}>
                 <StorageIcon color="primary" />
@@ -519,8 +745,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 2: Initialize ────────────────────────────── */}
-          {activeStep === 2 && (
+          {/* ── Step 3: Initialize ────────────────────────────── */}
+          {activeStep === 3 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Initialize Database</Typography>
               <Typography variant="body2" color="text.secondary">
@@ -557,8 +783,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 3: Admin Account ─────────────────────────── */}
-          {activeStep === 3 && (
+          {/* ── Step 4: Admin Account ─────────────────────────── */}
+          {activeStep === 4 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Create Admin Account</Typography>
               <TextField label="Display Name" fullWidth value={formData.displayName} onChange={(e) => updateField('displayName', e.target.value)} />
@@ -567,8 +793,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 4: Create Team ───────────────────────────── */}
-          {activeStep === 4 && (
+          {/* ── Step 5: Create Team ───────────────────────────── */}
+          {activeStep === 5 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Create Your First Team</Typography>
               <Typography variant="body2" color="text.secondary">Optional. You can skip this and create teams later.</Typography>
@@ -576,8 +802,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 5: API Keys ──────────────────────────────── */}
-          {activeStep === 5 && (
+          {/* ── Step 6: API Keys ──────────────────────────────── */}
+          {activeStep === 6 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Add Claude API Keys</Typography>
               <Typography variant="body2" color="text.secondary">Add one or more Claude API keys. More keys = better load distribution.</Typography>
@@ -586,8 +812,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 6: Vault Passphrase ──────────────────────── */}
-          {activeStep === 6 && (
+          {/* ── Step 7: Vault Passphrase ──────────────────────── */}
+          {activeStep === 7 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Vault Passphrase</Typography>
               <Typography variant="body2" color="text.secondary">This encrypts all stored credentials. Keep it safe — it cannot be recovered.</Typography>
@@ -595,8 +821,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 7: Add Worker ────────────────────────────── */}
-          {activeStep === 7 && (
+          {/* ── Step 8: Add Worker ────────────────────────────── */}
+          {activeStep === 8 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Add Your First Worker</Typography>
               <Typography variant="body2" color="text.secondary">
@@ -637,8 +863,8 @@ export default function SetupPage() {
             </Stack>
           )}
 
-          {/* ── Step 8: Done ──────────────────────────────────── */}
-          {activeStep === 8 && (
+          {/* ── Step 9: Done ──────────────────────────────────── */}
+          {activeStep === 9 && (
             <Stack spacing={2} alignItems="center">
               <Typography variant="h6" fontWeight={600}>All Set!</Typography>
               <Chip label="Setup Complete" color="success" />
@@ -649,9 +875,9 @@ export default function SetupPage() {
           )}
 
           {/* ── Navigation ────────────────────────────────────── */}
-          {!(activeStep === 2 && (initStatus === 'running' || initStatus === 'restarting')) && (
+          {!(activeStep === 3 && (initStatus === 'running' || initStatus === 'restarting')) && (
             <Stack direction="row" justifyContent="space-between" sx={{ mt: 4 }}>
-              <Button onClick={handleBack} disabled={activeStep === 0 || activeStep === 2}>Back</Button>
+              <Button onClick={handleBack} disabled={activeStep === 0 || activeStep === 3}>Back</Button>
               <Button variant="contained" onClick={handleNextClick} disabled={isNextDisabled()}>
                 {getNextLabel()}
               </Button>
