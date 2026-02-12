@@ -14,13 +14,13 @@
 #   --port <number>    Dashboard port (default: 3000)
 #   --dir  <path>      Install directory (default: /opt/ai-engine)
 # ─────────────────────────────────────────────────────────────────────────────
-set -eo pipefail
-
 # ── Ensure we're running under bash ──────────────────────────────────────────
 # If someone runs "sh install.sh", re-exec under bash automatically.
 if [ -z "$BASH_VERSION" ]; then
   exec bash "$0" "$@"
 fi
+
+set -eo pipefail
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
