@@ -1,0 +1,536 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector")]
+}
+
+// ============================================================
+// Users & Teams
+// ============================================================
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  avatarUrl    String?  @map("avatar_url")
+  role         String   @default("member") // admin | member | viewer
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  teamMembers   TeamMember[]
+  chatMessages  ChatMessage[]
+  chatSessions  ChatSession[]
+  teamInvites   TeamInvite[]
+  userProfiles  UserProfile[]
+  userGoals     UserGoal[]
+
+  @@map("users")
+}
+
+model Team {
+  id                     String   @id @default(uuid())
+  name                   String
+  description            String?
+  aiSensitivity          Float    @default(0.5) @map("ai_sensitivity")
+  alwaysRespondKeywords  Json     @default("[]") @map("always_respond_keywords")
+  quietHours             Json?    @map("quiet_hours")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  members     TeamMember[]
+  invites     TeamInvite[]
+  workflows   Workflow[]
+  chatSessions ChatSession[]
+
+  @@map("teams")
+}
+
+model TeamMember {
+  id       String   @id @default(uuid())
+  teamId   String   @map("team_id")
+  userId   String   @map("user_id")
+  teamRole String   @default("member") @map("team_role") // owner | member | viewer
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+model TeamInvite {
+  id            String    @id @default(uuid())
+  teamId        String    @map("team_id")
+  email         String
+  token         String    @unique
+  invitedByUserId String  @map("invited_by_user_id")
+  expiresAt     DateTime  @map("expires_at")
+  acceptedAt    DateTime? @map("accepted_at")
+
+  team      Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  invitedBy User @relation(fields: [invitedByUserId], references: [id])
+
+  @@map("team_invites")
+}
+
+// ============================================================
+// Chat
+// ============================================================
+model ChatSession {
+  id              String   @id @default(uuid())
+  type            String   // personal | team
+  ownerId         String   @map("owner_id")
+  title           String?
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  createdBy  User          @relation(fields: [createdByUserId], references: [id])
+  team       Team?         @relation(fields: [ownerId], references: [id], map: "chat_sessions_team_fk")
+  messages   ChatMessage[]
+  planning   PlanningSession[]
+
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id                   String   @id @default(uuid())
+  sessionId            String   @map("session_id")
+  senderType           String   @map("sender_type") // user | ai
+  senderUserId         String?  @map("sender_user_id")
+  content              String
+  embedsJson           Json?    @map("embeds_json")
+  aiResponded          Boolean  @default(false) @map("ai_responded")
+  classifierConfidence Float?   @map("classifier_confidence")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  senderUser User?       @relation(fields: [senderUserId], references: [id])
+
+  @@index([sessionId, createdAt])
+  @@map("chat_messages")
+}
+
+// ============================================================
+// Cluster & Config
+// ============================================================
+model Node {
+  id              String   @id @default(uuid())
+  hostname        String
+  ip              String
+  os              String   // darwin | linux | win32
+  environment     String   // cloud | local
+  capabilities    Json     @default("{}")
+  lastHeartbeat   DateTime @default(now()) @map("last_heartbeat")
+  isLeader        Boolean  @default(false) @map("is_leader")
+
+  @@map("nodes")
+}
+
+model Config {
+  key       String   @id
+  valueJson Json     @map("value_json")
+  version   Int      @default(1)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("config")
+}
+
+model ApiKey {
+  id             String   @id @default(uuid())
+  keyEncrypted   String   @map("key_encrypted")
+  label          String
+  isActive       Boolean  @default(true) @map("is_active")
+  tierMapping    Json     @default("{}") @map("tier_mapping")
+  usageStats     Json     @default("{}") @map("usage_stats")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@map("api_keys")
+}
+
+// ============================================================
+// Workflows & Tasks
+// ============================================================
+model Workflow {
+  id        String   @id @default(uuid())
+  name      String
+  teamId    String?  @map("team_id")
+  stages    Json     // WorkflowStage[]
+  createdAt DateTime @default(now()) @map("created_at")
+
+  team      Team?      @relation(fields: [teamId], references: [id])
+  workItems WorkItem[]
+
+  @@map("workflows")
+}
+
+model WorkItem {
+  id                     String   @id @default(uuid())
+  workflowId             String   @map("workflow_id")
+  currentStage           String   @map("current_stage")
+  dataJson               Json     @default("{}") @map("data_json")
+  status                 String   @default("waiting") // waiting | ready | in_progress | completed | failed | cancelled
+  requiredCapabilities   Json?    @map("required_capabilities")
+  nodeAffinity           String?  @map("node_affinity")
+  assignedNode           String?  @map("assigned_node")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at")
+
+  workflow    Workflow             @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  transitions WorkItemTransition[]
+  dependsOn   TaskDependency[]    @relation("DependentTask")
+  dependedBy  TaskDependency[]    @relation("DependencyTask")
+  execLogs    ExecutionLog[]
+
+  @@index([workflowId, status])
+  @@map("work_items")
+}
+
+model WorkItemTransition {
+  id         String   @id @default(uuid())
+  workItemId String   @map("work_item_id")
+  fromStage  String   @map("from_stage")
+  toStage    String   @map("to_stage")
+  agentId    String?  @map("agent_id")
+  timestamp  DateTime @default(now())
+
+  workItem WorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+
+  @@index([workItemId])
+  @@map("work_item_transitions")
+}
+
+model TaskDependency {
+  id              String @id @default(uuid())
+  taskId          String @map("task_id")
+  dependsOnTaskId String @map("depends_on_task_id")
+  dependencyType  String @map("dependency_type") // blocks | informs
+
+  task      WorkItem @relation("DependentTask", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOn WorkItem @relation("DependencyTask", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, dependsOnTaskId])
+  @@map("task_dependencies")
+}
+
+// ============================================================
+// Agents & Skills
+// ============================================================
+model Agent {
+  id                   String @id @default(uuid())
+  name                 String
+  rolePrompt           String @map("role_prompt")
+  toolConfig           Json   @default("{}") @map("tool_config")
+  requiredCapabilities Json?  @map("required_capabilities")
+  workflowStageIds     Json   @default("[]") @map("workflow_stage_ids")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  pinnedSkills   AgentPinnedSkill[]
+  executionLogs  ExecutionLog[]
+  scheduledTasks ScheduledTask[]
+
+  @@map("agents")
+}
+
+model Skill {
+  id                   String   @id @default(uuid())
+  name                 String
+  description          String
+  category             String
+  instructions         String
+  toolSequenceJson     Json?    @map("tool_sequence_json")
+  codeSnippet          String?  @map("code_snippet")
+  requiredCapabilities Json     @default("[]") @map("required_capabilities")
+  version              Int      @default(1)
+  isActive             Boolean  @default(true) @map("is_active")
+  usageCount           Int      @default(0) @map("usage_count")
+  createdBy            String   @map("created_by") // user | agent:<id>
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  versions    SkillVersion[]
+  pinnedBy    AgentPinnedSkill[]
+
+  @@map("skills")
+}
+
+model SkillVersion {
+  id              String   @id @default(uuid())
+  skillId         String   @map("skill_id")
+  version         Int
+  contentSnapshot Json     @map("content_snapshot")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([skillId, version])
+  @@map("skill_versions")
+}
+
+model AgentPinnedSkill {
+  id              String   @id @default(uuid())
+  agentId         String   @map("agent_id")
+  skillId         String   @map("skill_id")
+  workflowStageId String?  @map("workflow_stage_id")
+  pinnedAt        DateTime @default(now()) @map("pinned_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, skillId])
+  @@map("agent_pinned_skills")
+}
+
+// ============================================================
+// Memory
+// ============================================================
+model MemoryEntry {
+  id           String   @id @default(uuid())
+  scope        String   // global | team | personal
+  scopeOwnerId String?  @map("scope_owner_id")
+  type         String   // conversation | knowledge | reflection | observation
+  content      String
+  importance   Float    @default(0.5)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  embeddings MemoryEmbedding[]
+
+  @@index([scope, scopeOwnerId])
+  @@map("memory_entries")
+}
+
+model MemoryEmbedding {
+  id        String                     @id @default(uuid())
+  entryId   String                     @map("entry_id")
+  entryType String                     @map("entry_type") // memory | skill
+  embedding Unsupported("vector(1536)")
+
+  memoryEntry MemoryEntry? @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  @@map("memory_embeddings")
+}
+
+model UserProfile {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  key        String
+  value      String
+  confidence Float    @default(0.5)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@map("user_profile")
+}
+
+// ============================================================
+// Goals
+// ============================================================
+model UserGoal {
+  id              String   @id @default(uuid())
+  scope           String   // personal | team
+  scopeOwnerId    String   @map("scope_owner_id")
+  description     String
+  priority        String   @default("medium") // high | medium | low
+  status          String   @default("active") // active | paused | completed
+  sourceSessionId String?  @map("source_session_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user    User?        @relation(fields: [scopeOwnerId], references: [id])
+  updates GoalUpdate[]
+
+  @@index([scope, scopeOwnerId, status])
+  @@map("user_goals")
+}
+
+model GoalUpdate {
+  id                  String   @id @default(uuid())
+  goalId              String   @map("goal_id")
+  previousDescription String   @map("previous_description")
+  newDescription      String   @map("new_description")
+  sourceSessionId     String?  @map("source_session_id")
+  updatedAt           DateTime @default(now()) @map("updated_at")
+
+  goal UserGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@map("goal_updates")
+}
+
+// ============================================================
+// Vault
+// ============================================================
+model VaultCredential {
+  id             String   @id @default(uuid())
+  name           String   @unique
+  type           String   // api_key | login | oauth | generic
+  encryptedData  Bytes    @map("encrypted_data")
+  iv             Bytes
+  authTag        Bytes    @map("auth_tag")
+  urlPattern     String?  @map("url_pattern")
+  createdBy      String   @map("created_by")
+  approvalStatus String   @default("approved") @map("approval_status") // approved | pending | rejected
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  accessPolicies VaultAccessPolicy[]
+  auditLog       VaultAuditLog[]
+
+  @@map("vault_credentials")
+}
+
+model VaultAccessPolicy {
+  id           String   @id @default(uuid())
+  credentialId String   @map("credential_id")
+  agentId      String?  @map("agent_id")
+  workflowId   String?  @map("workflow_id")
+  permissions  String   @default("read") // read | write | admin
+  grantedAt    DateTime @default(now()) @map("granted_at")
+
+  credential VaultCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+
+  @@map("vault_access_policies")
+}
+
+model VaultAuditLog {
+  id           String   @id @default(uuid())
+  credentialId String   @map("credential_id")
+  agentId      String?  @map("agent_id")
+  action       String   // read | create | update | delete | denied
+  timestamp    DateTime @default(now())
+
+  credential VaultCredential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+
+  @@index([credentialId, timestamp])
+  @@map("vault_audit_log")
+}
+
+// ============================================================
+// Planning
+// ============================================================
+model PlanningSession {
+  id            String   @id @default(uuid())
+  chatSessionId String   @map("chat_session_id")
+  title         String
+  status        String   @default("active") // active | completed | archived
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  chatSession ChatSession       @relation(fields: [chatSessionId], references: [id])
+  taskGraphs  PlanningTaskGraph[]
+
+  @@map("planning_sessions")
+}
+
+model PlanningTaskGraph {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  graphJson Json     @map("graph_json")
+  status    String   @default("draft") // draft | confirmed | executing
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session PlanningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("planning_task_graphs")
+}
+
+// ============================================================
+// File Sync
+// ============================================================
+model NodeFile {
+  id           String   @id @default(uuid())
+  nodeId       String   @map("node_id")
+  filePath     String   @map("file_path")
+  fileHash     String   @map("file_hash")
+  sizeBytes    BigInt   @map("size_bytes")
+  lastModified DateTime @map("last_modified")
+
+  @@unique([nodeId, filePath])
+  @@map("node_files")
+}
+
+model FileTransferLog {
+  id         String   @id @default(uuid())
+  sourceNode String   @map("source_node")
+  targetNode String   @map("target_node")
+  filePath   String   @map("file_path")
+  sizeBytes  BigInt   @map("size_bytes")
+  durationMs Int      @map("duration_ms")
+  timestamp  DateTime @default(now())
+
+  @@map("file_transfer_log")
+}
+
+// ============================================================
+// Scheduling
+// ============================================================
+model ScheduledTask {
+  id                   String   @id @default(uuid())
+  name                 String
+  cronExpr             String   @map("cron_expr")
+  scheduleType         String   @map("schedule_type") // cron | once | interval
+  agentId              String?  @map("agent_id")
+  workflowId           String?  @map("workflow_id")
+  goalContextId        String?  @map("goal_context_id")
+  configJson           Json     @default("{}") @map("config_json")
+  nextRunAt            DateTime @map("next_run_at")
+  isActive             Boolean  @default(true) @map("is_active")
+  createdFromSessionId String?  @map("created_from_session_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  agent Agent? @relation(fields: [agentId], references: [id])
+  runs  ScheduledTaskRun[]
+
+  @@index([isActive, nextRunAt])
+  @@map("scheduled_tasks")
+}
+
+model ScheduledTaskRun {
+  id             String    @id @default(uuid())
+  taskId         String    @map("task_id")
+  scheduledAt    DateTime  @map("scheduled_at")
+  triggeredBy    String    @map("triggered_by") // tick | recovery | manual
+  executedByNode String?   @map("executed_by_node")
+  status         String    @default("running") // running | completed | failed
+  startedAt      DateTime  @default(now()) @map("started_at")
+  finishedAt     DateTime? @map("finished_at")
+  resultSummary  String?   @map("result_summary")
+
+  task         ScheduledTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  executionLog ExecutionLog[]
+
+  @@unique([taskId, scheduledAt])
+  @@index([taskId, status])
+  @@map("scheduled_task_runs")
+}
+
+model SchedulerHeartbeat {
+  id       String   @id @default(uuid())
+  nodeId   String   @map("node_id")
+  tickedAt DateTime @default(now()) @map("ticked_at")
+
+  @@map("scheduler_heartbeat")
+}
+
+// ============================================================
+// Execution Logs
+// ============================================================
+model ExecutionLog {
+  id             String   @id @default(uuid())
+  agentId        String   @map("agent_id")
+  workItemId     String?  @map("work_item_id")
+  scheduledRunId String?  @map("scheduled_run_id")
+  input          String
+  output         String
+  tokensUsed     Int      @map("tokens_used")
+  durationMs     Int      @map("duration_ms")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  agent        Agent             @relation(fields: [agentId], references: [id])
+  workItem     WorkItem?         @relation(fields: [workItemId], references: [id])
+  scheduledRun ScheduledTaskRun? @relation(fields: [scheduledRunId], references: [id])
+
+  @@index([agentId, createdAt])
+  @@map("execution_logs")
+}

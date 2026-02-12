@@ -1,0 +1,16 @@
+{
+  "name": "@ai-engine/planner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc", "clean": "rm -rf dist", "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@ai-engine/shared": "workspace:*",
+    "@ai-engine/db": "workspace:*",
+    "@ai-engine/llm": "workspace:*",
+    "@ai-engine/workflow-engine": "workspace:*"
+  },
+  "devDependencies": { "typescript": "^5.7.0" }
+}

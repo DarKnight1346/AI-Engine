@@ -1,0 +1,14 @@
+{
+  "name": "AI Engine",
+  "short_name": "AI Engine",
+  "description": "24/7 Autonomous AI Agent Orchestration System",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#1976d2",
+  "orientation": "any",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

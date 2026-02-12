@@ -1,0 +1,41 @@
+{
+  "name": "@ai-engine/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "@mui/material": "^7.0.0",
+    "@mui/icons-material": "^7.0.0",
+    "@emotion/react": "^11.13.0",
+    "@emotion/styled": "^11.13.0",
+    "@emotion/cache": "^11.13.0",
+    "@ai-engine/shared": "workspace:*",
+    "@ai-engine/db": "workspace:*",
+    "@ai-engine/auth": "workspace:*",
+    "@ai-engine/cluster": "workspace:*",
+    "@ai-engine/llm": "workspace:*",
+    "@ai-engine/memory": "workspace:*",
+    "@ai-engine/workflow-engine": "workspace:*",
+    "@ai-engine/scheduler": "workspace:*",
+    "@ai-engine/skills": "workspace:*",
+    "@ai-engine/vault": "workspace:*",
+    "@ai-engine/planner": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

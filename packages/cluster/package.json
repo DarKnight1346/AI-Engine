@@ -1,0 +1,23 @@
+{
+  "name": "@ai-engine/cluster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-engine/shared": "workspace:*",
+    "@ai-engine/db": "workspace:*",
+    "ioredis": "^5.4.0",
+    "jsonwebtoken": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@ai-engine/web-search",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-engine/shared": "workspace:*",
+    "@mozilla/readability": "^0.5.0",
+    "jsdom": "^25.0.0",
+    "ioredis": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.0",
+    "typescript": "^5.7.0"
+  }
+}

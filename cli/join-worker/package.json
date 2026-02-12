@@ -1,0 +1,20 @@
+{
+  "name": "@ai-engine/join-worker",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "join-worker": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "prompts": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/prompts": "^2.4.0",
+    "typescript": "^5.7.0"
+  }
+}

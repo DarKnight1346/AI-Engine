@@ -1,0 +1,25 @@
+{
+  "name": "@ai-engine/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.3.0",
+    "@ai-engine/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "prisma": "^6.3.0",
+    "typescript": "^5.7.0"
+  }
+}

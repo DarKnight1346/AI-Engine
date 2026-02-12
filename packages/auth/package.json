@@ -1,0 +1,25 @@
+{
+  "name": "@ai-engine/auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-engine/shared": "workspace:*",
+    "@ai-engine/db": "workspace:*",
+    "@ai-engine/llm": "workspace:*",
+    "bcrypt": "^5.1.0",
+    "jsonwebtoken": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.0",
+    "typescript": "^5.7.0"
+  }
+}
