@@ -1,22 +1,20 @@
-/**
- * bundle-worker.ts
- *
- * Creates a self-contained worker bundle (tar.gz) that can be served by the
- * dashboard. Workers download this bundle to install or update — no git repo
- * needed on the worker machine.
- *
- * The bundle contains:
- *   - apps/worker/dist/         (compiled worker code)
- *   - packages/*/dist/          (compiled workspace packages)
- *   - packages/*/package.json   (for workspace resolution)
- *   - packages/db/prisma/       (Prisma schema + migrations)
- *   - package.json              (root — external dependencies)
- *   - pnpm-workspace.yaml       (workspace config)
- *   - pnpm-lock.yaml            (lockfile for reproducible installs)
- *   - start-worker.sh           (entry point)
- *
- * Run: npx tsx scripts/bundle-worker.ts
- */
+// bundle-worker.ts
+//
+// Creates a self-contained worker bundle (tar.gz) that can be served by the
+// dashboard. Workers download this bundle to install or update — no git repo
+// needed on the worker machine.
+//
+// The bundle contains:
+//   - apps/worker/dist/            (compiled worker code)
+//   - packages/<name>/dist/        (compiled workspace packages)
+//   - packages/<name>/package.json (for workspace resolution)
+//   - packages/db/prisma/          (Prisma schema + migrations)
+//   - package.json                 (root — external dependencies)
+//   - pnpm-workspace.yaml          (workspace config)
+//   - pnpm-lock.yaml               (lockfile for reproducible installs)
+//   - start-worker.sh              (entry point)
+//
+// Run: npx tsx scripts/bundle-worker.ts
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
@@ -72,7 +70,11 @@ function main() {
   const workerDest = join(BUNDLE_DIR, 'apps', 'worker');
   mkdirSync(workerDest, { recursive: true });
 
-  cpSync(join(workerSrc, 'dist'), join(workerDest, 'dist'), { recursive: true });
+  const workerDist = join(workerSrc, 'dist');
+  if (!existsSync(workerDist)) {
+    throw new Error(`Worker dist not found at ${workerDist}. Run "pnpm build" first.`);
+  }
+  cpSync(workerDist, join(workerDest, 'dist'), { recursive: true });
   cpSync(join(workerSrc, 'package.json'), join(workerDest, 'package.json'));
   if (existsSync(join(workerSrc, 'tsconfig.json'))) {
     cpSync(join(workerSrc, 'tsconfig.json'), join(workerDest, 'tsconfig.json'));
