@@ -105,11 +105,38 @@ export interface WorkerConfig {
   workerId: string;
   workerSecret: string;
   serverUrl: string;
-  postgresUrl: string;
-  redisUrl: string;
+  /** @deprecated Workers now connect through the dashboard WebSocket — direct DB access is no longer required */
+  postgresUrl?: string;
+  /** @deprecated Workers now connect through the dashboard WebSocket — direct Redis access is no longer required */
+  redisUrl?: string;
   environment: NodeEnvironment;
   customTags: string[];
 }
+
+// ============================================================
+// WebSocket Protocol  (Dashboard ↔ Worker)
+// ============================================================
+
+/** Messages a worker sends to the dashboard. */
+export type WorkerWsMessage =
+  | { type: 'auth'; token: string }
+  | { type: 'heartbeat'; load: number; activeTasks: number; capabilities: NodeCapabilities }
+  | { type: 'task:complete'; taskId: string; output: string; tokensUsed: number; durationMs: number }
+  | { type: 'task:failed'; taskId: string; error: string }
+  | { type: 'agent:call'; callId: string; fromAgentId: string; targetAgentId: string; input: string }
+  | { type: 'agent:response'; callId: string; output: string; error?: string }
+  | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; taskId?: string };
+
+/** Messages the dashboard sends to a worker. */
+export type DashboardWsMessage =
+  | { type: 'auth:ok'; workerId: string; config: Record<string, unknown> }
+  | { type: 'auth:error'; message: string }
+  | { type: 'task:assign'; taskId: string; agentId: string; input: string; agentConfig: Record<string, unknown> }
+  | { type: 'task:cancel'; taskId: string }
+  | { type: 'agent:call'; callId: string; fromAgentId: string; input: string; agentConfig: Record<string, unknown> }
+  | { type: 'agent:response'; callId: string; output: string; error?: string }
+  | { type: 'config:update'; config: Record<string, unknown> }
+  | { type: 'update:available'; version: string; bundleUrl: string };
 
 // ============================================================
 // Config

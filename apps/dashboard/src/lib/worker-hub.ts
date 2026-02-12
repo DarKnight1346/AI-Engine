@@ -1,0 +1,481 @@
+/**
+ * WorkerHub — manages all WebSocket connections from workers.
+ *
+ * Responsibilities:
+ *   - Authenticate workers via JWT
+ *   - Track connected workers and their capabilities
+ *   - Dispatch tasks to workers (choose best worker based on load/capabilities)
+ *   - Route agent-to-agent calls between workers
+ *   - Broadcast config updates
+ *   - Record heartbeats in the DB
+ */
+
+import type { IncomingMessage } from 'http';
+import type WebSocket from 'ws';
+import type {
+  WorkerWsMessage,
+  DashboardWsMessage,
+  NodeCapabilities,
+} from '@ai-engine/shared';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface ConnectedWorker {
+  ws: WebSocket;
+  workerId: string;
+  hostname: string;
+  capabilities: NodeCapabilities | null;
+  load: number;
+  activeTasks: number;
+  connectedAt: Date;
+  lastHeartbeat: Date;
+  authenticated: boolean;
+}
+
+interface PendingAgentCall {
+  callId: string;
+  sourceWorkerId: string;
+  targetWorkerId: string;
+  timestamp: number;
+}
+
+// ---------------------------------------------------------------------------
+// Singleton
+// ---------------------------------------------------------------------------
+
+export class WorkerHub {
+  private static instance: WorkerHub;
+  private workers = new Map<string, ConnectedWorker>();
+  private pendingAgentCalls = new Map<string, PendingAgentCall>();
+
+  static getInstance(): WorkerHub {
+    if (!WorkerHub.instance) {
+      WorkerHub.instance = new WorkerHub();
+    }
+    return WorkerHub.instance;
+  }
+
+  // -----------------------------------------------------------------------
+  // Connection handling
+  // -----------------------------------------------------------------------
+
+  handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    const entry: ConnectedWorker = {
+      ws,
+      workerId: '',
+      hostname: req.headers.host ?? 'unknown',
+      capabilities: null,
+      load: 0,
+      activeTasks: 0,
+      connectedAt: new Date(),
+      lastHeartbeat: new Date(),
+      authenticated: false,
+    };
+
+    // Must authenticate within 10 seconds
+    const authTimeout = setTimeout(() => {
+      if (!entry.authenticated) {
+        this.send(ws, { type: 'auth:error', message: 'Authentication timeout' });
+        ws.close(4001, 'auth_timeout');
+      }
+    }, 10_000);
+
+    ws.on('message', async (raw: Buffer | string) => {
+      try {
+        const msg: WorkerWsMessage = JSON.parse(
+          typeof raw === 'string' ? raw : raw.toString('utf-8'),
+        );
+        await this.handleMessage(entry, msg);
+      } catch (err: any) {
+        console.error('[hub] Message parse error:', err.message);
+      }
+    });
+
+    ws.on('close', () => {
+      clearTimeout(authTimeout);
+      if (entry.workerId) {
+        console.log(`[hub] Worker disconnected: ${entry.workerId}`);
+        this.workers.delete(entry.workerId);
+        this.updateNodeStatus(entry.workerId, false).catch(() => {});
+      }
+    });
+
+    ws.on('error', (err) => {
+      console.error(`[hub] WebSocket error (${entry.workerId || 'unauthenticated'}):`, err.message);
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Message router
+  // -----------------------------------------------------------------------
+
+  private async handleMessage(worker: ConnectedWorker, msg: WorkerWsMessage): Promise<void> {
+    // Pre-auth: only 'auth' is allowed
+    if (!worker.authenticated && msg.type !== 'auth') {
+      this.send(worker.ws, { type: 'auth:error', message: 'Not authenticated' });
+      return;
+    }
+
+    switch (msg.type) {
+      case 'auth':
+        await this.handleAuth(worker, msg.token);
+        break;
+
+      case 'heartbeat':
+        worker.load = msg.load;
+        worker.activeTasks = msg.activeTasks;
+        worker.capabilities = msg.capabilities;
+        worker.lastHeartbeat = new Date();
+        this.updateNodeHeartbeat(worker.workerId).catch(() => {});
+        break;
+
+      case 'task:complete':
+        await this.handleTaskComplete(worker.workerId, msg);
+        break;
+
+      case 'task:failed':
+        await this.handleTaskFailed(worker.workerId, msg);
+        break;
+
+      case 'agent:call':
+        await this.routeAgentCall(worker, msg);
+        break;
+
+      case 'agent:response':
+        this.routeAgentResponse(msg);
+        break;
+
+      case 'log':
+        this.handleWorkerLog(worker.workerId, msg);
+        break;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Auth
+  // -----------------------------------------------------------------------
+
+  private async handleAuth(worker: ConnectedWorker, token: string): Promise<void> {
+    try {
+      const jwt = await import('jsonwebtoken');
+      const secret = process.env.INSTANCE_SECRET ?? 'dev-secret';
+      const decoded = jwt.default.verify(token, secret) as { workerId: string; [k: string]: unknown };
+
+      worker.workerId = decoded.workerId;
+      worker.authenticated = true;
+      this.workers.set(decoded.workerId, worker);
+
+      // Load config from DB to send to the worker
+      let config: Record<string, unknown> = {};
+      try {
+        const { getDb } = await import('@ai-engine/db');
+        const db = getDb();
+        const configs = await db.config.findMany();
+        configs.forEach((c) => { config[c.key] = c.valueJson; });
+      } catch { /* DB may not be ready */ }
+
+      this.send(worker.ws, { type: 'auth:ok', workerId: decoded.workerId, config });
+      this.updateNodeStatus(decoded.workerId, true).catch(() => {});
+      console.log(`[hub] Worker authenticated: ${decoded.workerId} (${this.workers.size} total)`);
+    } catch (err: any) {
+      this.send(worker.ws, { type: 'auth:error', message: 'Invalid token: ' + err.message });
+      worker.ws.close(4001, 'auth_failed');
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Task dispatch
+  // -----------------------------------------------------------------------
+
+  /**
+   * Dispatch a task to the best available worker.
+   * Called by API routes / scheduler.
+   */
+  async dispatchTask(opts: {
+    taskId: string;
+    agentId: string;
+    input: string;
+    agentConfig: Record<string, unknown>;
+    requiredCapabilities?: Partial<NodeCapabilities>;
+  }): Promise<{ dispatched: boolean; workerId?: string; error?: string }> {
+    const worker = this.pickWorker(opts.requiredCapabilities);
+    if (!worker) {
+      return { dispatched: false, error: 'No available workers' };
+    }
+
+    this.send(worker.ws, {
+      type: 'task:assign',
+      taskId: opts.taskId,
+      agentId: opts.agentId,
+      input: opts.input,
+      agentConfig: opts.agentConfig,
+    });
+
+    worker.activeTasks += 1;
+    return { dispatched: true, workerId: worker.workerId };
+  }
+
+  private pickWorker(required?: Partial<NodeCapabilities>): ConnectedWorker | null {
+    let best: ConnectedWorker | null = null;
+    let bestScore = Infinity;
+
+    for (const worker of this.workers.values()) {
+      if (!worker.authenticated) continue;
+
+      // Check required capabilities
+      if (required) {
+        const caps = worker.capabilities;
+        if (!caps) continue;
+        if (required.browserCapable && !caps.browserCapable) continue;
+        if (required.hasDisplay && !caps.hasDisplay) continue;
+        if (required.os && caps.os !== required.os) continue;
+      }
+
+      // Score: lower is better (based on load and active tasks)
+      const score = worker.load + worker.activeTasks * 10;
+      if (score < bestScore) {
+        bestScore = score;
+        best = worker;
+      }
+    }
+
+    return best;
+  }
+
+  // -----------------------------------------------------------------------
+  // Task results
+  // -----------------------------------------------------------------------
+
+  private async handleTaskComplete(
+    workerId: string,
+    msg: Extract<WorkerWsMessage, { type: 'task:complete' }>,
+  ): Promise<void> {
+    try {
+      const { getDb } = await import('@ai-engine/db');
+      const db = getDb();
+
+      await db.workItem.update({
+        where: { id: msg.taskId },
+        data: { status: 'completed' },
+      });
+
+      // Find the agent for this work item to create an execution log
+      const workItem = await db.workItem.findUnique({ where: { id: msg.taskId } });
+      if (workItem) {
+        const agentId = (workItem.dataJson as any)?.agentId;
+        if (agentId) {
+          await db.executionLog.create({
+            data: {
+              agentId,
+              workItemId: msg.taskId,
+              input: '',
+              output: msg.output,
+              tokensUsed: msg.tokensUsed,
+              durationMs: msg.durationMs,
+            },
+          });
+        }
+      }
+
+      console.log(`[hub] Task ${msg.taskId} completed by ${workerId}`);
+    } catch (err: any) {
+      console.error('[hub] Failed to record task completion:', err.message);
+    }
+  }
+
+  private async handleTaskFailed(
+    workerId: string,
+    msg: Extract<WorkerWsMessage, { type: 'task:failed' }>,
+  ): Promise<void> {
+    try {
+      const { getDb } = await import('@ai-engine/db');
+      const db = getDb();
+
+      await db.workItem.update({
+        where: { id: msg.taskId },
+        data: { status: 'failed' },
+      });
+
+      console.error(`[hub] Task ${msg.taskId} failed on ${workerId}: ${msg.error}`);
+    } catch (err: any) {
+      console.error('[hub] Failed to record task failure:', err.message);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Agent-to-agent routing
+  // -----------------------------------------------------------------------
+
+  private async routeAgentCall(
+    source: ConnectedWorker,
+    msg: Extract<WorkerWsMessage, { type: 'agent:call' }>,
+  ): Promise<void> {
+    // Find a worker that can run the target agent
+    // For now, pick the least-loaded worker (could be the same one)
+    const target = this.pickWorker();
+    if (!target) {
+      this.send(source.ws, {
+        type: 'agent:response',
+        callId: msg.callId,
+        output: '',
+        error: 'No available worker to handle agent call',
+      });
+      return;
+    }
+
+    // Track the pending call so we can route the response back
+    this.pendingAgentCalls.set(msg.callId, {
+      callId: msg.callId,
+      sourceWorkerId: source.workerId,
+      targetWorkerId: target.workerId,
+      timestamp: Date.now(),
+    });
+
+    // Load agent config from DB
+    let agentConfig: Record<string, unknown> = {};
+    try {
+      const { getDb } = await import('@ai-engine/db');
+      const db = getDb();
+      const agent = await db.agent.findUnique({ where: { id: msg.targetAgentId } });
+      if (agent) {
+        agentConfig = {
+          name: agent.name,
+          rolePrompt: agent.rolePrompt,
+          toolConfig: agent.toolConfig,
+        };
+      }
+    } catch { /* ignore */ }
+
+    this.send(target.ws, {
+      type: 'agent:call',
+      callId: msg.callId,
+      fromAgentId: msg.fromAgentId,
+      input: msg.input,
+      agentConfig,
+    });
+
+    console.log(`[hub] Agent call ${msg.callId}: ${msg.fromAgentId} → ${msg.targetAgentId} (${source.workerId} → ${target.workerId})`);
+  }
+
+  private routeAgentResponse(msg: Extract<WorkerWsMessage, { type: 'agent:response' }>): void {
+    const pending = this.pendingAgentCalls.get(msg.callId);
+    if (!pending) {
+      console.warn(`[hub] Agent response for unknown call: ${msg.callId}`);
+      return;
+    }
+
+    const source = this.workers.get(pending.sourceWorkerId);
+    if (source) {
+      this.send(source.ws, {
+        type: 'agent:response',
+        callId: msg.callId,
+        output: msg.output,
+        error: msg.error,
+      });
+    }
+
+    this.pendingAgentCalls.delete(msg.callId);
+  }
+
+  // -----------------------------------------------------------------------
+  // Worker log forwarding
+  // -----------------------------------------------------------------------
+
+  private handleWorkerLog(
+    workerId: string,
+    msg: Extract<WorkerWsMessage, { type: 'log' }>,
+  ): void {
+    const prefix = `[worker:${workerId}]`;
+    switch (msg.level) {
+      case 'error': console.error(prefix, msg.message); break;
+      case 'warn': console.warn(prefix, msg.message); break;
+      default: console.log(prefix, msg.message);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // DB updates
+  // -----------------------------------------------------------------------
+
+  private async updateNodeHeartbeat(workerId: string): Promise<void> {
+    try {
+      const { getDb } = await import('@ai-engine/db');
+      const db = getDb();
+      await db.node.update({
+        where: { id: workerId },
+        data: { lastHeartbeat: new Date() },
+      }).catch(() => {});
+    } catch { /* ignore */ }
+  }
+
+  private async updateNodeStatus(workerId: string, online: boolean): Promise<void> {
+    try {
+      const { getDb } = await import('@ai-engine/db');
+      const db = getDb();
+      if (online) {
+        await db.node.update({
+          where: { id: workerId },
+          data: { lastHeartbeat: new Date() },
+        }).catch(() => {});
+      }
+    } catch { /* ignore */ }
+  }
+
+  // -----------------------------------------------------------------------
+  // Broadcast / query
+  // -----------------------------------------------------------------------
+
+  broadcastConfig(config: Record<string, unknown>): void {
+    this.broadcast({ type: 'config:update', config });
+  }
+
+  broadcastUpdate(version: string, bundleUrl: string): void {
+    this.broadcast({ type: 'update:available', version, bundleUrl });
+  }
+
+  getConnectedWorkers(): Array<{
+    workerId: string;
+    hostname: string;
+    capabilities: NodeCapabilities | null;
+    load: number;
+    activeTasks: number;
+    connectedAt: string;
+    lastHeartbeat: string;
+  }> {
+    return Array.from(this.workers.values())
+      .filter((w) => w.authenticated)
+      .map((w) => ({
+        workerId: w.workerId,
+        hostname: w.hostname,
+        capabilities: w.capabilities,
+        load: w.load,
+        activeTasks: w.activeTasks,
+        connectedAt: w.connectedAt.toISOString(),
+        lastHeartbeat: w.lastHeartbeat.toISOString(),
+      }));
+  }
+
+  getWorkerCount(): number {
+    return Array.from(this.workers.values()).filter((w) => w.authenticated).length;
+  }
+
+  // -----------------------------------------------------------------------
+  // Helpers
+  // -----------------------------------------------------------------------
+
+  private send(ws: WebSocket, msg: DashboardWsMessage): void {
+    if (ws.readyState === 1) { // WebSocket.OPEN
+      ws.send(JSON.stringify(msg));
+    }
+  }
+
+  private broadcast(msg: DashboardWsMessage): void {
+    for (const worker of this.workers.values()) {
+      if (worker.authenticated) {
+        this.send(worker.ws, msg);
+      }
+    }
+  }
+}

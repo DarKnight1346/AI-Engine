@@ -12,6 +12,17 @@ export interface AgentTaskInput {
   userId?: string;
   teamId?: string;
   sessionId?: string;
+  /**
+   * Per-execution tools that augment (and override) the global ToolRegistry.
+   * Use this for task-scoped tools like browser sessions that must be isolated
+   * between concurrent tasks.
+   */
+  additionalTools?: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    execute: (input: Record<string, unknown>, context: ToolContext) => Promise<{ success: boolean; output: string }>;
+  }>;
 }
 
 export interface AgentRunResult {
@@ -60,8 +71,27 @@ export class AgentRunner {
       capabilities: this.options.capabilities,
     };
 
-    // Build tool definitions for Claude
-    const tools = this.toolRegistry.getToolDefinitions();
+    // Build tool definitions for Claude.
+    // Merge global tools with per-execution additional tools.
+    // Additional tools override global ones if names collide, ensuring
+    // per-task browser sessions don't leak across concurrent executions.
+    const globalTools = this.toolRegistry.getAll();
+    const additionalTools = input.additionalTools ?? [];
+
+    // Build a per-run tool lookup (global + overrides)
+    const perRunTools = new Map<string, { name: string; description: string; inputSchema: Record<string, unknown>; execute: (input: Record<string, unknown>, context: ToolContext) => Promise<{ success: boolean; output: string }> }>();
+    for (const t of globalTools) {
+      perRunTools.set(t.name, t);
+    }
+    for (const t of additionalTools) {
+      perRunTools.set(t.name, t);
+    }
+
+    const tools = Array.from(perRunTools.values()).map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }));
 
     const messages: LLMMessage[] = [
       { role: 'user', content: input.taskDetails },
@@ -107,7 +137,7 @@ export class AgentRunner {
 
       for (const toolCall of response.toolCalls) {
         toolCallsCount++;
-        const tool = this.toolRegistry.get(toolCall.name);
+        const tool = perRunTools.get(toolCall.name);
 
         await this.emitThinkingStatus(input.sessionId, 'thinking', `Using tool: ${toolCall.name}...`);
 

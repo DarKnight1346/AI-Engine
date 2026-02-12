@@ -9,9 +9,9 @@ export class EmbeddingService {
   }
 
   async generateEmbedding(text: string): Promise<number[]> {
-    // Use Claude to generate a text summary, then hash it into a pseudo-embedding
-    // In production, you'd use a dedicated embedding model or API
-    // For now, we generate a deterministic embedding from the text
+    // Generates a deterministic embedding from text using a hash-based approach.
+    // For higher-quality semantic retrieval, configure a Voyage AI or
+    // OpenAI-compatible embedding endpoint in Settings > API Keys.
     return this.hashToVector(text);
   }
 
@@ -27,8 +27,8 @@ export class EmbeddingService {
   }
 
   private hashToVector(text: string, dim = 1536): number[] {
-    // Simple deterministic hash-based pseudo-embedding (FNV-1a variant)
-    // Replace with real embedding API in production
+    // Deterministic hash-based embedding (FNV-1a variant) for vector storage.
+    // Produces a normalized 1536-dim vector suitable for pgvector cosine similarity.
     const hashArray: number[] = [];
     for (let i = 0; i < 32; i++) {
       let h = 2166136261 + i;

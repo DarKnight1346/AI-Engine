@@ -2,24 +2,81 @@ import type { Page, ElementHandle } from 'puppeteer';
 import type { BrowserPool, BrowserSession } from './browser-pool.js';
 import type { AccessibilityNode, ConsoleLogEntry, NetworkRequestLog } from '@ai-engine/shared';
 
+/**
+ * Per-task browser automation tools.
+ *
+ * Each task that needs a browser gets its own `BrowserTools` instance backed by
+ * its own isolated `BrowserSession`. Console and network logs are scoped to
+ * this instance so tasks don't leak state to one another.
+ *
+ * Lifecycle:
+ *   1. `await tools.acquire(taskId)`  — checks out a session from the pool
+ *   2. Use any tool methods (navigate, click, type, …)
+ *   3. `await tools.release()`        — checks the session back in (closes context)
+ *
+ * If `release()` is never called (e.g. the task crashes), the pool's idle
+ * reaper will eventually reclaim the session.
+ */
 export class BrowserTools {
   private session: BrowserSession | null = null;
+  private taskId: string | null = null;
   private consoleLogs: ConsoleLogEntry[] = [];
   private networkLogs: NetworkRequestLog[] = [];
   private requestCounter = 0;
+  private released = false;
 
   constructor(private pool: BrowserPool) {}
 
-  async getOrCreateSession(name?: string): Promise<BrowserSession> {
-    if (!this.session) {
-      this.session = await this.pool.createSession(name);
-      this.attachListeners(this.session.page);
-    }
-    return this.session;
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Acquire a browser session from the pool for the given task.
+   * Blocks if the pool is at capacity until a slot opens.
+   */
+  async acquire(taskId: string, options?: { persistentName?: string; timeoutMs?: number }): Promise<void> {
+    if (this.session) throw new Error(`BrowserTools already acquired for task ${this.taskId}`);
+    this.taskId = taskId;
+    this.released = false;
+    this.session = await this.pool.checkout(taskId, options);
+    this.attachListeners(this.session.page);
   }
 
+  /** Whether this instance currently holds a session. */
+  get isAcquired(): boolean {
+    return this.session !== null && !this.released;
+  }
+
+  /**
+   * Release the browser session back to the pool.
+   * For non-persistent sessions this closes the context entirely.
+   * Safe to call multiple times (idempotent).
+   */
+  async release(): Promise<void> {
+    if (this.released || !this.session) return;
+    this.released = true;
+
+    const sessionId = this.session.id;
+    this.session = null;
+    this.taskId = null;
+    this.consoleLogs = [];
+    this.networkLogs = [];
+    this.requestCounter = 0;
+
+    await this.pool.checkin(sessionId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal helpers
+  // ---------------------------------------------------------------------------
+
   private get page(): Page {
-    if (!this.session) throw new Error('No browser session. Call getOrCreateSession first.');
+    if (!this.session || this.released) {
+      throw new Error('No active browser session. Call acquire() first.');
+    }
+    // Touch the pool to prevent idle reaping
+    this.pool.touchSession(this.session.id);
     return this.session.page;
   }
 
@@ -46,7 +103,10 @@ export class BrowserTools {
     });
   }
 
+  // ---------------------------------------------------------------------------
   // Navigation
+  // ---------------------------------------------------------------------------
+
   async navigate(url: string): Promise<string> {
     await this.page.goto(url, { waitUntil: 'networkidle2' });
     return this.page.url();
@@ -58,7 +118,10 @@ export class BrowserTools {
   async getUrl(): Promise<string> { return this.page.url(); }
   async getTitle(): Promise<string> { return this.page.title(); }
 
+  // ---------------------------------------------------------------------------
   // Reading
+  // ---------------------------------------------------------------------------
+
   async getAccessibilityTree(): Promise<AccessibilityNode> {
     const snapshot = await this.page.accessibility.snapshot();
     return (snapshot as AccessibilityNode) ?? { role: 'document', name: 'empty' };
@@ -84,7 +147,10 @@ export class BrowserTools {
     return this.page.content();
   }
 
+  // ---------------------------------------------------------------------------
   // Visual
+  // ---------------------------------------------------------------------------
+
   async screenshot(fullPage = false): Promise<string> {
     const buffer = await this.page.screenshot({ fullPage, encoding: 'base64' });
     return typeof buffer === 'string' ? buffer : Buffer.from(buffer as ArrayBuffer).toString('base64');
@@ -102,14 +168,20 @@ export class BrowserTools {
     return el ? el.boundingBox() : null;
   }
 
+  // ---------------------------------------------------------------------------
   // Clicking
+  // ---------------------------------------------------------------------------
+
   async click(selector: string): Promise<void> { await this.page.click(selector); }
   async doubleClick(selector: string): Promise<void> { await this.page.click(selector, { count: 2 }); }
   async rightClick(selector: string): Promise<void> { await this.page.click(selector, { button: 'right' }); }
   async clickAtPosition(x: number, y: number): Promise<void> { await this.page.mouse.click(x, y); }
   async hover(selector: string): Promise<void> { await this.page.hover(selector); }
 
+  // ---------------------------------------------------------------------------
   // Typing
+  // ---------------------------------------------------------------------------
+
   async type(selector: string, text: string): Promise<void> {
     await this.page.click(selector);
     await this.page.type(selector, text);
@@ -136,7 +208,10 @@ export class BrowserTools {
     for (const key of parts.slice(0, -1).reverse()) await this.page.keyboard.up(key as any);
   }
 
+  // ---------------------------------------------------------------------------
   // Scrolling
+  // ---------------------------------------------------------------------------
+
   async scroll(direction: 'up' | 'down' | 'left' | 'right', amount = 500): Promise<void> {
     const dx = direction === 'left' ? -amount : direction === 'right' ? amount : 0;
     const dy = direction === 'up' ? -amount : direction === 'down' ? amount : 0;
@@ -155,7 +230,10 @@ export class BrowserTools {
     await this.page.evaluate(() => window.scrollTo(0, 0));
   }
 
+  // ---------------------------------------------------------------------------
   // Forms
+  // ---------------------------------------------------------------------------
+
   async selectOption(selector: string, value: string): Promise<void> {
     await this.page.select(selector, value);
   }
@@ -176,12 +254,18 @@ export class BrowserTools {
     await (input as ElementHandle<HTMLInputElement>).uploadFile(filePath);
   }
 
+  // ---------------------------------------------------------------------------
   // JavaScript
+  // ---------------------------------------------------------------------------
+
   async evaluate(script: string): Promise<unknown> {
     return this.page.evaluate(script);
   }
 
+  // ---------------------------------------------------------------------------
   // Console & Network
+  // ---------------------------------------------------------------------------
+
   getConsoleLogs(filter?: string): ConsoleLogEntry[] {
     if (!filter) return [...this.consoleLogs];
     return this.consoleLogs.filter((l) => l.level === filter);
@@ -207,7 +291,10 @@ export class BrowserTools {
     await this.page.setCookie(cookie as any);
   }
 
+  // ---------------------------------------------------------------------------
   // Storage
+  // ---------------------------------------------------------------------------
+
   async getLocalStorage(): Promise<Record<string, string>> {
     return this.page.evaluate(() => {
       const items: Record<string, string> = {};
@@ -223,7 +310,10 @@ export class BrowserTools {
     await this.page.evaluate((k, v) => localStorage.setItem(k, v), key, value);
   }
 
+  // ---------------------------------------------------------------------------
   // Tabs
+  // ---------------------------------------------------------------------------
+
   async getOpenTabs(): Promise<Array<{ id: string; url: string; title: string }>> {
     const pages = this.session ? await this.session.context.pages() : [];
     return Promise.all(pages.map(async (p: Page, i: number) => ({
@@ -238,7 +328,10 @@ export class BrowserTools {
     if (url) await page.goto(url);
   }
 
+  // ---------------------------------------------------------------------------
   // Waiting
+  // ---------------------------------------------------------------------------
+
   async waitForSelector(selector: string, timeout?: number): Promise<void> {
     await this.page.waitForSelector(selector, { timeout });
   }
@@ -251,15 +344,17 @@ export class BrowserTools {
     await this.page.waitForNetworkIdle();
   }
 
-  // Cleanup
+  // ---------------------------------------------------------------------------
+  // Cleanup (alias for release)
+  // ---------------------------------------------------------------------------
+
   async close(): Promise<void> {
-    if (this.session) {
-      await this.pool.destroySession(this.session.id);
-      this.session = null;
-    }
-    this.consoleLogs = [];
-    this.networkLogs = [];
+    await this.release();
   }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
 
   private flattenAccessibilityTree(node: AccessibilityNode, depth = 0): string {
     const indent = '  '.repeat(depth);

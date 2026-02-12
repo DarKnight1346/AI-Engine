@@ -1,7 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'standalone',
+  // Standalone output bundles all deps for deployment. Disabled on Windows
+  // where symlink creation requires elevated privileges.
+  ...(process.platform !== 'win32' ? { output: 'standalone' } : {}),
   reactStrictMode: true,
+  experimental: {
+    instrumentationHook: true,
+  },
   transpilePackages: [
     '@ai-engine/shared',
     '@ai-engine/db',

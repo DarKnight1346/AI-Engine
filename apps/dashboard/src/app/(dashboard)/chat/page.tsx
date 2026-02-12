@@ -1,9 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Box, TextField, IconButton, Typography, Paper, List, ListItemButton,
   ListItemText, Divider, Avatar, Chip, InputAdornment, Stack,
+  CircularProgress,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import AddIcon from '@mui/icons-material/Add';
@@ -19,46 +20,87 @@ interface Message {
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [thinkingStatus, setThinkingStatus] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
-    const newMsg: Message = {
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!input.trim() || sending) return;
+
+    const userMsg: Message = {
       id: crypto.randomUUID(),
       role: 'user',
       content: input,
       timestamp: new Date(),
     };
-    setMessages((prev) => [...prev, newMsg]);
+    setMessages((prev) => [...prev, userMsg]);
+    const currentInput = input;
     setInput('');
-    setThinkingStatus('Thinking...');
+    setSending(true);
 
-    // Simulate AI response
-    setTimeout(() => {
+    try {
+      const res = await fetch('/api/chat/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: currentInput,
+          sessionId,
+        }),
+      });
+      const data = await res.json();
+
+      if (data.sessionId) setSessionId(data.sessionId);
+
+      if (data.aiMessage) {
+        setMessages((prev) => [...prev, {
+          id: data.aiMessage.id,
+          role: 'ai',
+          content: data.aiMessage.content,
+          timestamp: new Date(data.aiMessage.createdAt),
+        }]);
+      } else if (data.error) {
+        setMessages((prev) => [...prev, {
+          id: crypto.randomUUID(),
+          role: 'ai',
+          content: `Error: ${data.error}`,
+          timestamp: new Date(),
+        }]);
+      }
+    } catch (err: any) {
       setMessages((prev) => [...prev, {
         id: crypto.randomUUID(),
         role: 'ai',
-        content: 'This is a placeholder response. Connect to the backend to enable real AI responses.',
+        content: `Failed to connect to the server: ${err.message}`,
         timestamp: new Date(),
       }]);
-      setThinkingStatus(null);
-    }, 1500);
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
     <Box sx={{ display: 'flex', height: 'calc(100vh - 80px)', gap: 2 }}>
-      {/* Sidebar - chat list */}
-      <Paper
-        sx={{ width: 280, flexShrink: 0, display: { xs: 'none', md: 'flex' }, flexDirection: 'column', overflow: 'auto' }}
-      >
+      {/* Sidebar */}
+      <Paper sx={{ width: 280, flexShrink: 0, display: { xs: 'none', md: 'flex' }, flexDirection: 'column', overflow: 'auto' }}>
         <Box sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Typography variant="subtitle2" color="text.secondary">Personal</Typography>
-          <IconButton size="small"><AddIcon /></IconButton>
+          <Typography variant="subtitle2" color="text.secondary">Conversations</Typography>
+          <IconButton size="small" onClick={() => { setSessionId(null); setMessages([]); }}><AddIcon /></IconButton>
         </Box>
         <List dense>
-          <ListItemButton selected>
-            <ListItemText primary="New conversation" secondary="Just now" />
-          </ListItemButton>
+          {sessionId && (
+            <ListItemButton selected>
+              <ListItemText
+                primary={messages[0]?.content.slice(0, 40) ?? 'New conversation'}
+                secondary={messages[0]?.timestamp.toLocaleTimeString() ?? 'Now'}
+              />
+            </ListItemButton>
+          )}
         </List>
         <Divider />
         <Box sx={{ p: 2 }}>
@@ -66,10 +108,9 @@ export default function ChatPage() {
         </Box>
       </Paper>
 
-      {/* Main chat area */}
+      {/* Main chat */}
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-        {/* Messages */}
-        <Box sx={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 2, py: 2 }}>
+        <Box ref={scrollRef} sx={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 2, py: 2 }}>
           {messages.length === 0 && (
             <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 2 }}>
               <SmartToyIcon sx={{ fontSize: 64, color: 'text.disabled' }} />
@@ -82,43 +123,25 @@ export default function ChatPage() {
             </Box>
           )}
           {messages.map((msg) => (
-            <Box
-              key={msg.id}
-              sx={{
-                display: 'flex',
-                gap: 1.5,
-                px: 2,
-                alignItems: 'flex-start',
-                ...(msg.role === 'user' ? { flexDirection: 'row-reverse' } : {}),
-              }}
-            >
+            <Box key={msg.id} sx={{ display: 'flex', gap: 1.5, px: 2, alignItems: 'flex-start', ...(msg.role === 'user' ? { flexDirection: 'row-reverse' } : {}) }}>
               <Avatar sx={{ width: 32, height: 32, bgcolor: msg.role === 'ai' ? 'primary.main' : 'secondary.main' }}>
                 {msg.role === 'ai' ? <SmartToyIcon sx={{ fontSize: 18 }} /> : 'U'}
               </Avatar>
-              <Paper
-                elevation={0}
-                sx={{
-                  p: 2, maxWidth: '70%', borderRadius: 3,
-                  bgcolor: msg.role === 'user' ? 'primary.main' : 'action.hover',
-                  color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary',
-                }}
-              >
+              <Paper elevation={0} sx={{ p: 2, maxWidth: '70%', borderRadius: 3, bgcolor: msg.role === 'user' ? 'primary.main' : 'action.hover', color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary' }}>
                 <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>{msg.content}</Typography>
               </Paper>
             </Box>
           ))}
+          {sending && (
+            <Box sx={{ display: 'flex', gap: 1.5, px: 2, alignItems: 'center' }}>
+              <Avatar sx={{ width: 32, height: 32, bgcolor: 'primary.main' }}>
+                <SmartToyIcon sx={{ fontSize: 18 }} />
+              </Avatar>
+              <CircularProgress size={20} />
+            </Box>
+          )}
         </Box>
 
-        {/* Thinking indicator */}
-        {thinkingStatus && (
-          <Box sx={{ px: 2, py: 0.5 }}>
-            <Typography variant="caption" color="primary" sx={{ fontStyle: 'italic' }}>
-              {thinkingStatus}
-            </Typography>
-          </Box>
-        )}
-
-        {/* Input */}
         <Box sx={{ p: 2 }}>
           <TextField
             fullWidth
@@ -128,10 +151,11 @@ export default function ChatPage() {
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
             multiline
             maxRows={4}
+            disabled={sending}
             InputProps={{
               endAdornment: (
                 <InputAdornment position="end">
-                  <IconButton onClick={handleSend} color="primary" disabled={!input.trim()}>
+                  <IconButton onClick={handleSend} color="primary" disabled={!input.trim() || sending}>
                     <SendIcon />
                   </IconButton>
                 </InputAdornment>

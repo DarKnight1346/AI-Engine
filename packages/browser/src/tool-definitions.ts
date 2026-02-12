@@ -1,4 +1,5 @@
 import type { BrowserTools } from './browser-tools.js';
+import type { BrowserPool } from './browser-pool.js';
 
 interface ToolDef {
   name: string;
@@ -7,7 +8,90 @@ interface ToolDef {
   execute: (input: Record<string, unknown>) => Promise<{ success: boolean; output: string }>;
 }
 
+/**
+ * @deprecated Use `createPerTaskBrowserTools` instead. This binds all tools
+ * to a single `BrowserTools` instance which causes conflicts when multiple
+ * tasks run on the same node.
+ */
 export function createBrowserToolDefinitions(bt: BrowserTools): ToolDef[] {
+  return buildToolDefs(bt);
+}
+
+/**
+ * Creates a per-task set of browser tool definitions.
+ *
+ * Returns:
+ * - `tools`: the tool definitions to register on the agent
+ * - `acquire()`: call before the agent's first tool invocation to claim a
+ *   browser session from the pool
+ * - `release()`: call after the task finishes (success or failure) to return
+ *   the session and free the slot for other tasks
+ *
+ * Usage in the worker:
+ * ```ts
+ * const { tools, acquire, release } = createPerTaskBrowserTools(pool, taskId);
+ * agentRunner.getToolRegistry().registerAll(tools);
+ * try {
+ *   await acquire();
+ *   await agentRunner.run(/* ... *\/);
+ * } finally {
+ *   await release();
+ * }
+ * ```
+ */
+export function createPerTaskBrowserTools(
+  pool: BrowserPool,
+  taskId: string,
+  options?: { persistentName?: string; timeoutMs?: number },
+): {
+  tools: ToolDef[];
+  acquire: () => Promise<void>;
+  release: () => Promise<void>;
+  browserTools: BrowserTools;
+} {
+  // Lazy-import to avoid circular deps at module level (BrowserTools is in the
+  // same package, so this is fine)
+  const { BrowserTools } = require('./browser-tools.js');
+  const bt = new BrowserTools(pool) as InstanceType<typeof BrowserTools>;
+
+  // Wrap every tool so it auto-acquires on first use (lazy checkout)
+  let acquired = false;
+  const ensureAcquired = async () => {
+    if (!acquired) {
+      await bt.acquire(taskId, options);
+      acquired = true;
+    }
+  };
+
+  const rawDefs = buildToolDefs(bt);
+
+  // Wrap each tool's execute to ensure session exists
+  const tools: ToolDef[] = rawDefs.map((def) => ({
+    ...def,
+    execute: async (input: Record<string, unknown>) => {
+      await ensureAcquired();
+      return def.execute(input);
+    },
+  }));
+
+  return {
+    tools,
+    acquire: ensureAcquired,
+    release: async () => {
+      if (acquired) {
+        await bt.release();
+        acquired = false;
+      }
+    },
+    browserTools: bt,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared tool definition builder
+// ---------------------------------------------------------------------------
+
+function buildToolDefs(bt: BrowserTools): ToolDef[] {
   return [
     {
       name: 'browser_navigate',
@@ -151,6 +235,60 @@ export function createBrowserToolDefinitions(bt: BrowserTools): ToolDef[] {
       execute: async () => {
         await bt.goBack();
         return { success: true, output: 'Navigated back' };
+      },
+    },
+    {
+      name: 'browser_fill',
+      description: 'Fill an input element with text (replaces existing value).',
+      inputSchema: { type: 'object', properties: { selector: { type: 'string' }, text: { type: 'string' } }, required: ['selector', 'text'] },
+      execute: async (input) => {
+        await bt.fill(input.selector as string, input.text as string);
+        return { success: true, output: `Filled ${input.selector}` };
+      },
+    },
+    {
+      name: 'browser_hover',
+      description: 'Hover over an element on the page.',
+      inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'] },
+      execute: async (input) => {
+        await bt.hover(input.selector as string);
+        return { success: true, output: `Hovered over ${input.selector}` };
+      },
+    },
+    {
+      name: 'browser_getOpenTabs',
+      description: 'Get a list of all open browser tabs in this session.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => {
+        const tabs = await bt.getOpenTabs();
+        return { success: true, output: JSON.stringify(tabs) };
+      },
+    },
+    {
+      name: 'browser_newTab',
+      description: 'Open a new browser tab, optionally navigating to a URL.',
+      inputSchema: { type: 'object', properties: { url: { type: 'string' } } },
+      execute: async (input) => {
+        await bt.newTab(input.url as string | undefined);
+        return { success: true, output: `Opened new tab${input.url ? ` at ${input.url}` : ''}` };
+      },
+    },
+    {
+      name: 'browser_uploadFile',
+      description: 'Upload a file using a file input element.',
+      inputSchema: { type: 'object', properties: { selector: { type: 'string' }, filePath: { type: 'string' } }, required: ['selector', 'filePath'] },
+      execute: async (input) => {
+        await bt.uploadFile(input.selector as string, input.filePath as string);
+        return { success: true, output: `Uploaded file to ${input.selector}` };
+      },
+    },
+    {
+      name: 'browser_close',
+      description: 'Close the browser session and release the slot for other tasks.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => {
+        await bt.release();
+        return { success: true, output: 'Browser session closed' };
       },
     },
   ];

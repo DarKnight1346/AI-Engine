@@ -12,22 +12,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-engine/shared": "workspace:*",
-    "@ai-engine/db": "workspace:*",
-    "@ai-engine/cluster": "workspace:*",
+    "@ai-engine/agent-runtime": "workspace:*",
+    "@ai-engine/browser": "workspace:*",
     "@ai-engine/llm": "workspace:*",
     "@ai-engine/memory": "workspace:*",
-    "@ai-engine/workflow-engine": "workspace:*",
-    "@ai-engine/agent-runtime": "workspace:*",
-    "@ai-engine/scheduler": "workspace:*",
-    "@ai-engine/browser": "workspace:*",
-    "@ai-engine/web-search": "workspace:*",
-    "@ai-engine/skills": "workspace:*",
-    "@ai-engine/vault": "workspace:*",
-    "@ai-engine/file-sync": "workspace:*",
-    "ioredis": "^5.4.0"
+    "@ai-engine/shared": "workspace:*",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0"
   }

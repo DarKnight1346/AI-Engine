@@ -1,57 +1,97 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import {
-  Box, Typography, List, ListItem, ListItemText, Switch, Chip, Button,
-  Paper, Stack,
+  Box, Typography, Button, Chip, Stack, CircularProgress,
+  Table, TableHead, TableRow, TableCell, TableBody, Paper, Switch,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import ScheduleIcon from '@mui/icons-material/Schedule';
 
-const DEMO_SCHEDULES = [
-  { id: '1', name: 'Portfolio Check', schedule: 'Every weekday at 3:30 PM', nextRun: '2h 15m', lastStatus: 'success' as const, active: true },
-  { id: '2', name: 'Email Summary', schedule: 'Every day at 8:00 AM', nextRun: '18h 30m', lastStatus: 'success' as const, active: true },
-  { id: '3', name: 'Health Check', schedule: 'Every 5 minutes', nextRun: '2m 30s', lastStatus: 'failed' as const, active: true },
-  { id: '4', name: 'Weekly Report', schedule: 'Every Monday at 9:00 AM', nextRun: '5d 4h', lastStatus: 'success' as const, active: false },
-];
+interface Schedule {
+  id: string;
+  name: string;
+  cronExpr: string;
+  agentName: string | null;
+  isActive: boolean;
+  nextRunAt: string;
+  lastStatus: string | null;
+  lastRunAt: string | null;
+}
 
 export default function SchedulesPage() {
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch('/api/schedules')
+      .then((res) => res.json())
+      .then((data) => setSchedules(data.schedules ?? []))
+      .catch(() => setSchedules([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const statusColor = (s: string | null) => {
+    if (s === 'completed') return 'success';
+    if (s === 'failed') return 'error';
+    if (s === 'running') return 'info';
+    return 'default';
+  };
+
   return (
     <Box>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
-        <Typography variant="h2">Schedules</Typography>
+        <Typography variant="h2">Scheduled Tasks</Typography>
         <Button variant="contained" startIcon={<AddIcon />}>New Schedule</Button>
       </Box>
-      <Paper>
-        <List>
-          {DEMO_SCHEDULES.map((s, i) => (
-            <ListItem
-              key={s.id}
-              divider={i < DEMO_SCHEDULES.length - 1}
-              sx={{ cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' }, py: 2 }}
-              secondaryAction={<Switch checked={s.active} />}
-            >
-              <ListItemText
-                primary={
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography fontWeight={600}>{s.name}</Typography>
-                    <Chip
-                      size="small"
-                      label={s.lastStatus === 'success' ? '✓' : '✗'}
-                      color={s.lastStatus === 'success' ? 'success' : 'error'}
-                      sx={{ minWidth: 28 }}
-                    />
-                  </Stack>
-                }
-                secondary={
-                  <Stack direction="row" spacing={2} sx={{ mt: 0.5 }}>
-                    <Typography variant="caption">{s.schedule}</Typography>
-                    <Typography variant="caption" color="primary">Next: {s.nextRun}</Typography>
-                  </Stack>
-                }
-              />
-            </ListItem>
-          ))}
-        </List>
-      </Paper>
+
+      {loading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
+          <CircularProgress />
+        </Box>
+      )}
+
+      {!loading && schedules.length === 0 && (
+        <Box sx={{ textAlign: 'center', py: 8, color: 'text.secondary' }}>
+          <ScheduleIcon sx={{ fontSize: 64, mb: 2, opacity: 0.3 }} />
+          <Typography variant="h6">No scheduled tasks</Typography>
+          <Typography variant="body2">Create a schedule to run tasks automatically on a recurring basis.</Typography>
+        </Box>
+      )}
+
+      {schedules.length > 0 && (
+        <Paper>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Name</TableCell>
+                <TableCell>Schedule</TableCell>
+                <TableCell>Agent</TableCell>
+                <TableCell>Next Run</TableCell>
+                <TableCell>Last Status</TableCell>
+                <TableCell>Active</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {schedules.map((s) => (
+                <TableRow key={s.id} hover sx={{ cursor: 'pointer' }}>
+                  <TableCell><Typography fontWeight={600}>{s.name}</Typography></TableCell>
+                  <TableCell><Chip label={s.cronExpr} size="small" variant="outlined" sx={{ fontFamily: 'monospace' }} /></TableCell>
+                  <TableCell>{s.agentName ?? '—'}</TableCell>
+                  <TableCell>{new Date(s.nextRunAt).toLocaleString()}</TableCell>
+                  <TableCell>
+                    {s.lastStatus
+                      ? <Chip label={s.lastStatus} size="small" color={statusColor(s.lastStatus) as any} />
+                      : '—'
+                    }
+                  </TableCell>
+                  <TableCell><Switch checked={s.isActive} size="small" /></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
     </Box>
   );
 }

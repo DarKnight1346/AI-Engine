@@ -5,6 +5,7 @@
   "packageManager": "pnpm@9.15.4",
   "scripts": {
     "build": "turbo build",
+    "bundle:worker": "npx tsx scripts/bundle-worker.ts",
     "dev": "turbo dev",
     "lint": "turbo lint",
     "test": "turbo test",
