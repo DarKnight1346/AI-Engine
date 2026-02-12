@@ -262,27 +262,64 @@ class TunnelManager {
       writeFileSync(configPath, configYaml, 'utf-8');
       console.log(`[tunnel] Wrote config to ${configPath}`);
 
-      // --- 3. Create DNS CNAME record ---
-      const dnsRes = await fetch(
-        `https://api.cloudflare.com/client/v4/zones/${opts.zoneId}/dns_records`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${opts.apiToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            type: 'CNAME',
-            name: opts.hostname,
-            content: `${tunnelId}.cfargotunnel.com`,
-            proxied: true,
-          }),
-        },
+      // --- 3. Create or update DNS CNAME record ---
+      const cnameTarget = `${tunnelId}.cfargotunnel.com`;
+
+      // Check if a record for this hostname already exists
+      const existingRes = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${opts.zoneId}/dns_records?type=CNAME&name=${opts.hostname}`,
+        { headers: { Authorization: `Bearer ${opts.apiToken}` } },
       );
-      const dnsData = await dnsRes.json() as any;
-      if (!dnsData.success) {
-        // Non-fatal — the record may already exist
-        console.warn('[tunnel] DNS record creation note:', dnsData.errors?.[0]?.message);
+      const existingData = await existingRes.json() as any;
+      const existingRecord = existingData.success && existingData.result?.length > 0
+        ? existingData.result[0]
+        : null;
+
+      if (existingRecord) {
+        // Update the existing record to point to the new tunnel
+        console.log(`[tunnel] Updating existing DNS record ${existingRecord.id} → ${cnameTarget}`);
+        const updateRes = await fetch(
+          `https://api.cloudflare.com/client/v4/zones/${opts.zoneId}/dns_records/${existingRecord.id}`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${opts.apiToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              type: 'CNAME',
+              name: opts.hostname,
+              content: cnameTarget,
+              proxied: true,
+            }),
+          },
+        );
+        const updateData = await updateRes.json() as any;
+        if (!updateData.success) {
+          console.warn('[tunnel] DNS record update failed:', updateData.errors?.[0]?.message);
+        }
+      } else {
+        // Create a new record
+        const dnsRes = await fetch(
+          `https://api.cloudflare.com/client/v4/zones/${opts.zoneId}/dns_records`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${opts.apiToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              type: 'CNAME',
+              name: opts.hostname,
+              content: cnameTarget,
+              proxied: true,
+            }),
+          },
+        );
+        const dnsData = await dnsRes.json() as any;
+        if (!dnsData.success) {
+          console.warn('[tunnel] DNS record creation failed:', dnsData.errors?.[0]?.message);
+        }
       }
 
       // --- 4. Persist to .env file ---
