@@ -94,8 +94,7 @@ export default function SetupPage() {
 
   // -- Domain / Cloudflare state --
   const [cfApiToken, setCfApiToken] = useState('');
-  const [cfAccountId, setCfAccountId] = useState('');
-  const [cfZones, setCfZones] = useState<Array<{ id: string; name: string }>>([]);
+  const [cfZones, setCfZones] = useState<Array<{ id: string; name: string; accountId?: string }>>([]);
   const [cfSelectedZone, setCfSelectedZone] = useState('');
   const [cfHostname, setCfHostname] = useState('');
   const [cfStatus, setCfStatus] = useState<'idle' | 'fetching_zones' | 'zones_loaded' | 'configuring' | 'done' | 'error'>('idle');
@@ -250,7 +249,7 @@ export default function SetupPage() {
       const res = await fetch('/api/tunnel/zones', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiToken: cfApiToken, accountId: cfAccountId }),
+        body: JSON.stringify({ apiToken: cfApiToken }),
       });
       const data = await res.json();
       if (data.error) {
@@ -267,10 +266,17 @@ export default function SetupPage() {
       setCfStatus('error');
       setCfMessage(err.message);
     }
-  }, [cfApiToken, cfAccountId]);
+  }, [cfApiToken]);
 
   // ── Cloudflare: Configure named tunnel ──
   const configureTunnel = useCallback(async () => {
+    const selectedZone = cfZones.find((z) => z.id === cfSelectedZone);
+    const accountId = selectedZone?.accountId;
+    if (!accountId) {
+      setCfStatus('error');
+      setCfMessage('Could not determine the account ID for the selected zone.');
+      return;
+    }
     setCfStatus('configuring');
     setCfMessage('Setting up Cloudflare Tunnel and DNS record...');
     try {
@@ -279,7 +285,7 @@ export default function SetupPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiToken: cfApiToken,
-          accountId: cfAccountId,
+          accountId,
           zoneId: cfSelectedZone,
           hostname: cfHostname,
         }),
@@ -297,7 +303,7 @@ export default function SetupPage() {
       setCfStatus('error');
       setCfMessage(err.message);
     }
-  }, [cfApiToken, cfAccountId, cfSelectedZone, cfHostname]);
+  }, [cfApiToken, cfZones, cfSelectedZone, cfHostname]);
 
   // ── Initialize ──
   const runInitialize = useCallback(async () => {
@@ -501,20 +507,11 @@ export default function SetupPage() {
                     inputProps={{ spellCheck: false }}
                   />
 
-                  <TextField
-                    label="Account ID"
-                    fullWidth
-                    value={cfAccountId}
-                    onChange={(e) => { setCfAccountId(e.target.value); setCfStatus('idle'); }}
-                    placeholder="Found in the Cloudflare dashboard sidebar"
-                    inputProps={{ spellCheck: false }}
-                  />
-
                   {cfStatus !== 'zones_loaded' && cfStatus !== 'configuring' && cfStatus !== 'done' && (
                     <Button
                       variant="outlined"
                       onClick={fetchZones}
-                      disabled={!cfApiToken || !cfAccountId || cfStatus === 'fetching_zones'}
+                      disabled={!cfApiToken || cfStatus === 'fetching_zones'}
                     >
                       {cfStatus === 'fetching_zones' ? 'Loading domains...' : 'Load My Domains'}
                     </Button>
