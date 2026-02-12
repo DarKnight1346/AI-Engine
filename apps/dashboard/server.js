@@ -74,15 +74,17 @@ app.prepare().then(() => {
   // ── Start the Cloudflare tunnel ──
   (async () => {
     try {
-      (globalThis).__tunnelStarted = true;
       const tunnelMod = require('./src/lib/tunnel-manager');
+      (globalThis).__tunnelStarted = true;
       const manager = tunnelMod.TunnelManager.getInstance();
       await manager.start();
 
       // Poll for the tunnel URL and print a prominent banner once connected
       waitForTunnelAndPrintBanner(manager);
     } catch (err) {
-      console.warn('[tunnel] Auto-start skipped:', err.message);
+      // require() can't load .ts files in plain Node — the instrumentation
+      // hook (which runs through Next.js compilation) will start the tunnel.
+      console.warn('[tunnel] Deferring to instrumentation hook:', err.message);
     }
   })();
 
