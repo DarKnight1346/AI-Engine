@@ -110,7 +110,7 @@ class TunnelManager {
         console.log(`[tunnel] Named tunnel config: ${tunnelConfigPath}`);
         console.log(`[tunnel] Hostname: ${tunnelHostname}, Tunnel ID: ${tunnelId}`);
         this.spawnProcess(cloudflaredPath, [
-          'tunnel', '--config', tunnelConfigPath, 'run',
+          '--config', tunnelConfigPath, 'tunnel', 'run',
         ]);
       } else {
         if (tunnelConfigPath) {
