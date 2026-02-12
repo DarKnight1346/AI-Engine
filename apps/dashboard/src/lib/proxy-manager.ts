@@ -223,7 +223,8 @@ export class ProxyManager {
 
     // Resolve the proxy binary.
     // claude-max-api-proxy installs a `claude-max-api` binary.
-    // It does NOT accept a --port flag; it reads the PORT env var instead.
+    // Port is passed as a positional argument: `claude-max-api <port>`
+    // (see standalone.ts: parseInt(process.argv[2] || "3456", 10))
     let binPath: string;
     let args: string[];
     try {
@@ -231,21 +232,19 @@ export class ProxyManager {
       binPath = execSync('which claude-max-api 2>/dev/null || which claude-max-api-proxy 2>/dev/null', {
         encoding: 'utf-8',
       }).trim();
-      args = [];
+      args = [String(port)];
     } catch {
       // Fall back to npx
       binPath = 'npx';
-      args = ['claude-max-api-proxy'];
+      args = ['claude-max-api-proxy', String(port)];
     }
 
     // The proxy spawns the Claude CLI as a subprocess.
     // By setting HOME to our isolated config dir, the CLI will read
     // .credentials.json from <configDir>/.claude/.credentials.json.
-    // PORT env var controls which port the proxy listens on.
     const env = {
       ...process.env,
       HOME: configDir,
-      PORT: String(port),
     };
 
     console.log(`[proxy-manager] Starting proxy "${account.label}" on port ${port} (HOME=${configDir})`);
