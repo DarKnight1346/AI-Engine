@@ -39,13 +39,24 @@ export async function POST(_request: NextRequest) {
     // 2. Install any new dependencies
     run('pnpm install --frozen-lockfile', 'Installing dependencies', 180000);
 
-    // 3. Build everything
+    // 3. Regenerate Prisma client (ensures engine binaries for this platform)
+    run('pnpm --filter @ai-engine/db exec prisma generate', 'Generating Prisma client');
+
+    // 4. Build everything
     run('pnpm build', 'Building all packages', 300000);
 
-    // 4. Re-bundle the worker
+    // 5. Copy Prisma engine to Next.js server dir
+    try {
+      run(
+        'cp $(find node_modules -name "libquery_engine-debian*" -o -name "libquery_engine-linux*" 2>/dev/null | head -1) apps/dashboard/.next/server/ 2>/dev/null',
+        'Copying Prisma engine to Next.js server',
+      );
+    } catch { /* non-critical — may already be in the right place */ }
+
+    // 6. Re-bundle the worker
     run('npx tsx scripts/bundle-worker.ts', 'Creating worker bundle', 60000);
 
-    // 5. Get new version info
+    // 7. Get new version info
     let newVersion = '0.1.0';
     try {
       const pkg = JSON.parse(

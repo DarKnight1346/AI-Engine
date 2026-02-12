@@ -230,6 +230,25 @@ info "Building all packages (this may take a minute)..."
 pnpm build
 ok "Build complete"
 
+# ── 8b. Copy Prisma engine to Next.js server dir ────────────────────────────
+
+info "Ensuring Prisma engine is available to the Next.js server..."
+PRISMA_ENGINE=$(find "$INSTALL_DIR/node_modules" -name "libquery_engine-debian*" -o -name "libquery_engine-linux*" 2>/dev/null | head -1)
+NEXT_SERVER_DIR="$INSTALL_DIR/apps/dashboard/.next/server"
+if [ -n "$PRISMA_ENGINE" ] && [ -d "$NEXT_SERVER_DIR" ]; then
+  cp "$PRISMA_ENGINE" "$NEXT_SERVER_DIR/" 2>/dev/null || true
+  ok "Prisma engine copied to Next.js server directory"
+elif [ -d "$NEXT_SERVER_DIR" ]; then
+  # Also try from the .prisma/client directory
+  PRISMA_CLIENT_DIR=$(find "$INSTALL_DIR/node_modules" -path "*/.prisma/client" -type d 2>/dev/null | head -1)
+  if [ -n "$PRISMA_CLIENT_DIR" ]; then
+    cp "$PRISMA_CLIENT_DIR"/libquery_engine-* "$NEXT_SERVER_DIR/" 2>/dev/null || true
+    ok "Prisma engine copied from .prisma/client"
+  fi
+else
+  warn "Next.js server directory not found — Prisma engine will load from node_modules"
+fi
+
 # ── 9. Bundle the worker (so the dashboard can serve it to workers) ─────────
 
 info "Creating worker bundle..."

@@ -6,7 +6,8 @@ import {
   List, ListItem, ListItemText, Switch, Chip, Select, MenuItem,
   FormControl, InputLabel, ToggleButtonGroup, ToggleButton,
   LinearProgress, Alert, CircularProgress, Divider, Skeleton,
-  IconButton, Tooltip,
+  IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions,
+  Snackbar,
 } from '@mui/material';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
@@ -17,6 +18,8 @@ import NewReleasesIcon from '@mui/icons-material/NewReleases';
 import LanguageIcon from '@mui/icons-material/Language';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import DeleteIcon from '@mui/icons-material/Delete';
+import SaveIcon from '@mui/icons-material/Save';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -86,6 +89,36 @@ export default function SettingsPage() {
   const [tab, setTab] = useState(0);
   const [data, setData] = useState<SettingsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
+
+  // ── API Key dialog ──
+  const [addKeyOpen, setAddKeyOpen] = useState(false);
+  const [newKeyLabel, setNewKeyLabel] = useState('');
+  const [newKeyValue, setNewKeyValue] = useState('');
+  const [addingKey, setAddingKey] = useState(false);
+  const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null);
+
+  // ── Config editing state ──
+  const [configEdits, setConfigEdits] = useState<Record<string, unknown>>({});
+  const [savingConfig, setSavingConfig] = useState(false);
+
+  // ── Account editing state ──
+  const [displayNameEdit, setDisplayNameEdit] = useState('');
+  const [savingAccount, setSavingAccount] = useState(false);
+
+  // ── Password dialog ──
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+
+  // ── Vault passphrase dialog ──
+  const [passphraseOpen, setPassphraseOpen] = useState(false);
+  const [currentPassphrase, setCurrentPassphrase] = useState('');
+  const [newPassphrase, setNewPassphrase] = useState('');
+  const [confirmPassphrase, setConfirmPassphrase] = useState('');
+  const [changingPassphrase, setChangingPassphrase] = useState(false);
 
   // ── Update state ──
   const [checkStatus, setCheckStatus] = useState<'idle' | 'checking' | 'done' | 'error'>('idle');
@@ -107,14 +140,20 @@ export default function SettingsPage() {
   const [configureMessage, setConfigureMessage] = useState('');
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     fetch('/api/settings')
       .then((res) => res.json())
-      .then((d) => setData(d))
+      .then((d) => {
+        setData(d);
+        setConfigEdits({});
+        setDisplayNameEdit(d?.user?.displayName ?? '');
+      })
       .catch(() => setData(null))
       .finally(() => setLoading(false));
+  }, []);
 
-    // Poll tunnel status
+  useEffect(() => {
+    reload();
     const loadTunnel = () => {
       fetch('/api/tunnel/status')
         .then((r) => r.json())
@@ -125,7 +164,194 @@ export default function SettingsPage() {
     loadTunnel();
     const tunnelInterval = setInterval(loadTunnel, 5000);
     return () => clearInterval(tunnelInterval);
-  }, []);
+  }, [reload]);
+
+  // Initialize edit states when data loads
+  useEffect(() => {
+    if (data?.user) {
+      setDisplayNameEdit(data.user.displayName ?? '');
+    }
+  }, [data]);
+
+  const getConfig = (key: string, fallback: string = '') => {
+    if (key in configEdits) return configEdits[key] as string;
+    return (data?.config?.[key] as string) ?? fallback;
+  };
+
+  const setConfig = (key: string, value: unknown) => {
+    setConfigEdits((prev) => ({ ...prev, [key]: value }));
+  };
+
+  // ── Save config ──
+  const saveConfig = useCallback(async (extraConfig?: Record<string, unknown>) => {
+    setSavingConfig(true);
+    try {
+      const payload: Record<string, unknown> = { config: { ...configEdits, ...extraConfig } };
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json();
+      if (result.success) {
+        setSnack({ open: true, message: 'Settings saved', severity: 'success' });
+        reload();
+      } else {
+        setSnack({ open: true, message: result.error ?? 'Failed to save', severity: 'error' });
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setSavingConfig(false);
+    }
+  }, [configEdits, reload]);
+
+  // ── Save account ──
+  const saveAccount = useCallback(async () => {
+    setSavingAccount(true);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName: displayNameEdit }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        setSnack({ open: true, message: 'Account updated', severity: 'success' });
+        reload();
+      } else {
+        setSnack({ open: true, message: result.error ?? 'Failed to save', severity: 'error' });
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setSavingAccount(false);
+    }
+  }, [displayNameEdit, reload]);
+
+  // ── Add API Key ──
+  const handleAddKey = useCallback(async () => {
+    if (!newKeyLabel.trim() || !newKeyValue.trim()) return;
+    setAddingKey(true);
+    try {
+      const res = await fetch('/api/settings/api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: newKeyLabel.trim(), key: newKeyValue.trim() }),
+      });
+      const result = await res.json();
+      if (result.error) {
+        setSnack({ open: true, message: result.error, severity: 'error' });
+      } else {
+        setSnack({ open: true, message: 'API key added successfully', severity: 'success' });
+        setAddKeyOpen(false);
+        setNewKeyLabel('');
+        setNewKeyValue('');
+        reload();
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setAddingKey(false);
+    }
+  }, [newKeyLabel, newKeyValue, reload]);
+
+  // ── Delete API Key ──
+  const handleDeleteKey = useCallback(async (keyId: string) => {
+    try {
+      const res = await fetch(`/api/settings/api-keys?id=${keyId}`, { method: 'DELETE' });
+      const result = await res.json();
+      if (result.error) {
+        setSnack({ open: true, message: result.error, severity: 'error' });
+      } else {
+        setSnack({ open: true, message: 'API key removed', severity: 'success' });
+        setDeleteKeyId(null);
+        reload();
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    }
+  }, [reload]);
+
+  // ── Toggle API Key ──
+  const handleToggleKey = useCallback(async (keyId: string, isActive: boolean) => {
+    try {
+      await fetch('/api/settings/api-keys', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: keyId, isActive }),
+      });
+      reload();
+    } catch { /* ignore */ }
+  }, [reload]);
+
+  // ── Change password ──
+  const handleChangePassword = useCallback(async () => {
+    if (newPassword !== confirmPassword) {
+      setSnack({ open: true, message: 'Passwords do not match', severity: 'error' });
+      return;
+    }
+    if (newPassword.length < 8) {
+      setSnack({ open: true, message: 'Password must be at least 8 characters', severity: 'error' });
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      const res = await fetch('/api/settings/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        setSnack({ open: true, message: 'Password changed', severity: 'success' });
+        setPasswordOpen(false);
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+      } else {
+        setSnack({ open: true, message: result.error ?? 'Failed to change password', severity: 'error' });
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setChangingPassword(false);
+    }
+  }, [currentPassword, newPassword, confirmPassword]);
+
+  // ── Change vault passphrase ──
+  const handleChangePassphrase = useCallback(async () => {
+    if (newPassphrase !== confirmPassphrase) {
+      setSnack({ open: true, message: 'Passphrases do not match', severity: 'error' });
+      return;
+    }
+    if (newPassphrase.length < 8) {
+      setSnack({ open: true, message: 'Passphrase must be at least 8 characters', severity: 'error' });
+      return;
+    }
+    setChangingPassphrase(true);
+    try {
+      const res = await fetch('/api/settings/vault-passphrase', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassphrase, newPassphrase }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        setSnack({ open: true, message: 'Vault passphrase changed', severity: 'success' });
+        setPassphraseOpen(false);
+        setCurrentPassphrase('');
+        setNewPassphrase('');
+        setConfirmPassphrase('');
+      } else {
+        setSnack({ open: true, message: result.error ?? 'Failed to change passphrase', severity: 'error' });
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setChangingPassphrase(false);
+    }
+  }, [currentPassphrase, newPassphrase, confirmPassphrase]);
 
   // ── Tunnel helpers ──
   const loadZones = useCallback(async () => {
@@ -159,12 +385,7 @@ export default function SettingsPage() {
       const res = await fetch('/api/tunnel/configure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiToken: cfToken,
-          accountId: cfAccountId,
-          zoneId: cfZoneId,
-          hostname: cfHostname,
-        }),
+        body: JSON.stringify({ apiToken: cfToken, accountId: cfAccountId, zoneId: cfZoneId, hostname: cfHostname }),
       });
       const data = await res.json();
       if (data.success) {
@@ -214,11 +435,9 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/updates/apply', { method: 'POST' });
       const result = await res.json();
-
       if (result.success) {
         setApplyStatus('restarting');
         setApplyMessage('Update applied! Server is restarting...');
-
         for (let i = 0; i < 60; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           try {
@@ -262,6 +481,8 @@ export default function SettingsPage() {
     return `Healthy (last tick ${(ms / 1000).toFixed(1)}s ago)`;
   };
 
+  const hasConfigChanges = Object.keys(configEdits).length > 0;
+
   return (
     <Box>
       <Typography variant="h2" sx={{ mb: 3 }}>Settings</Typography>
@@ -290,8 +511,24 @@ export default function SettingsPage() {
               data!.apiKeys.map((key) => (
                 <Box key={key.id} sx={{ mb: 2, p: 2, bgcolor: 'action.hover', borderRadius: 2 }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Typography fontWeight={600}>{key.label}</Typography>
-                    <Chip label={key.isActive ? 'Active' : 'Disabled'} size="small" color={key.isActive ? 'success' : 'default'} />
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography fontWeight={600}>{key.label}</Typography>
+                      <Chip label={key.isActive ? 'Active' : 'Disabled'} size="small" color={key.isActive ? 'success' : 'default'} />
+                    </Stack>
+                    <Stack direction="row" spacing={0.5}>
+                      <Tooltip title={key.isActive ? 'Disable' : 'Enable'}>
+                        <Switch
+                          size="small"
+                          checked={key.isActive}
+                          onChange={(e) => handleToggleKey(key.id, e.target.checked)}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Delete">
+                        <IconButton size="small" color="error" onClick={() => setDeleteKeyId(key.id)}>
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Stack>
                   </Stack>
                   {key.usageStats && (key.usageStats as any).tokensUsed != null && (
                     <Box sx={{ mt: 1 }}>
@@ -303,14 +540,18 @@ export default function SettingsPage() {
                 </Box>
               ))
             )}
-            <Button variant="outlined">Add API Key</Button>
+            <Button variant="outlined" onClick={() => setAddKeyOpen(true)}>Add API Key</Button>
           </Paper>
 
           <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>Load Balancing</Typography>
             <FormControl fullWidth size="small" sx={{ mb: 2 }}>
               <InputLabel>Strategy</InputLabel>
-              <Select label="Strategy" value={(data?.config?.loadBalancingStrategy as string) ?? 'round-robin'}>
+              <Select
+                label="Strategy"
+                value={getConfig('loadBalancingStrategy', 'round-robin')}
+                onChange={(e) => setConfig('loadBalancingStrategy', e.target.value)}
+              >
                 <MenuItem value="round-robin">Round Robin</MenuItem>
                 <MenuItem value="least-active">Least Active</MenuItem>
                 <MenuItem value="random">Random</MenuItem>
@@ -318,10 +559,21 @@ export default function SettingsPage() {
             </FormControl>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Model Tier Mapping</Typography>
             <Stack spacing={1}>
-              <TextField size="small" label="Fast (Haiku)" value={(data?.config?.modelFast as string) ?? ''} placeholder="claude-3-5-haiku-20241022" />
-              <TextField size="small" label="Standard (Sonnet)" value={(data?.config?.modelStandard as string) ?? ''} placeholder="claude-sonnet-4-20250514" />
-              <TextField size="small" label="Heavy (Opus)" value={(data?.config?.modelHeavy as string) ?? ''} placeholder="claude-opus-4-20250514" />
+              <TextField size="small" label="Fast (Haiku)" value={getConfig('modelFast')} onChange={(e) => setConfig('modelFast', e.target.value)} placeholder="claude-3-5-haiku-20241022" />
+              <TextField size="small" label="Standard (Sonnet)" value={getConfig('modelStandard')} onChange={(e) => setConfig('modelStandard', e.target.value)} placeholder="claude-sonnet-4-20250514" />
+              <TextField size="small" label="Heavy (Opus)" value={getConfig('modelHeavy')} onChange={(e) => setConfig('modelHeavy', e.target.value)} placeholder="claude-opus-4-20250514" />
             </Stack>
+            {hasConfigChanges && (
+              <Button
+                variant="contained"
+                startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
+                onClick={() => saveConfig()}
+                disabled={savingConfig}
+                sx={{ mt: 2 }}
+              >
+                Save Changes
+              </Button>
+            )}
           </Paper>
         </Stack>
       )}
@@ -330,10 +582,19 @@ export default function SettingsPage() {
       {tab === 1 && (
         <Paper sx={{ p: 3 }}>
           <Stack spacing={3}>
-            <TextField label="System Name" value={(data?.config?.systemName as string) ?? ''} placeholder="AI Engine" />
+            <TextField
+              label="System Name"
+              value={getConfig('systemName', '')}
+              onChange={(e) => setConfig('systemName', e.target.value)}
+              placeholder="AI Engine"
+            />
             <FormControl fullWidth>
               <InputLabel>Default Approval Mode</InputLabel>
-              <Select label="Default Approval Mode" value={(data?.config?.approvalMode as string) ?? 'notify'}>
+              <Select
+                label="Default Approval Mode"
+                value={getConfig('approvalMode', 'notify')}
+                onChange={(e) => setConfig('approvalMode', e.target.value)}
+              >
                 <MenuItem value="auto">Auto-approve</MenuItem>
                 <MenuItem value="notify">Notify on creation</MenuItem>
                 <MenuItem value="approve">Require approval</MenuItem>
@@ -341,12 +602,27 @@ export default function SettingsPage() {
             </FormControl>
             <Box>
               <Typography variant="subtitle2" sx={{ mb: 1 }}>Theme</Typography>
-              <ToggleButtonGroup exclusive value={(data?.config?.theme as string) ?? 'system'} sx={{ mb: 2 }}>
+              <ToggleButtonGroup
+                exclusive
+                value={getConfig('theme', 'system')}
+                onChange={(_, v) => { if (v) setConfig('theme', v); }}
+                sx={{ mb: 2 }}
+              >
                 <ToggleButton value="system"><SettingsBrightnessIcon sx={{ mr: 1 }} /> System</ToggleButton>
                 <ToggleButton value="light"><LightModeIcon sx={{ mr: 1 }} /> Light</ToggleButton>
                 <ToggleButton value="dark"><DarkModeIcon sx={{ mr: 1 }} /> Dark</ToggleButton>
               </ToggleButtonGroup>
             </Box>
+            {hasConfigChanges && (
+              <Button
+                variant="contained"
+                startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
+                onClick={() => saveConfig()}
+                disabled={savingConfig}
+              >
+                Save Changes
+              </Button>
+            )}
           </Stack>
         </Paper>
       )}
@@ -354,13 +630,11 @@ export default function SettingsPage() {
       {/* ── Tab 2: Domain & Tunnel ── */}
       {tab === 2 && (
         <Stack spacing={2}>
-          {/* Current tunnel status */}
           <Paper sx={{ p: 3 }}>
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
               <LanguageIcon color="primary" />
               <Typography variant="h3">Tunnel Status</Typography>
             </Stack>
-
             {tunnelLoading ? (
               <Stack spacing={1}><Skeleton width={300} /><Skeleton width={200} /></Stack>
             ) : !tunnel ? (
@@ -368,36 +642,15 @@ export default function SettingsPage() {
             ) : (
               <Stack spacing={1.5}>
                 <Stack direction="row" alignItems="center" spacing={1}>
-                  <Box sx={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: '50%',
-                    bgcolor: tunnel.status === 'connected' ? 'success.main'
-                      : tunnel.status === 'starting' ? 'warning.main'
-                      : 'grey.500',
-                  }} />
+                  <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: tunnel.status === 'connected' ? 'success.main' : tunnel.status === 'starting' ? 'warning.main' : 'grey.500' }} />
                   <Typography variant="body1" fontWeight={600}>
                     {tunnel.status === 'connected' ? 'Connected' : tunnel.status === 'starting' ? 'Starting...' : 'Disconnected'}
                   </Typography>
-                  <Chip
-                    label={tunnel.mode === 'named' ? 'Custom Domain' : 'Quick Tunnel'}
-                    size="small"
-                    color={tunnel.mode === 'named' ? 'primary' : 'default'}
-                    variant="outlined"
-                  />
+                  <Chip label={tunnel.mode === 'named' ? 'Custom Domain' : 'Quick Tunnel'} size="small" color={tunnel.mode === 'named' ? 'primary' : 'default'} variant="outlined" />
                 </Stack>
-
                 {tunnel.url && (
-                  <Paper
-                    variant="outlined"
-                    sx={{
-                      p: 1.5, display: 'flex', alignItems: 'center', gap: 1,
-                      bgcolor: 'action.hover', fontFamily: 'monospace',
-                    }}
-                  >
-                    <Typography variant="body2" sx={{ flex: 1, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                      {tunnel.url}
-                    </Typography>
+                  <Paper variant="outlined" sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1, bgcolor: 'action.hover', fontFamily: 'monospace' }}>
+                    <Typography variant="body2" sx={{ flex: 1, fontFamily: 'monospace', wordBreak: 'break-all' }}>{tunnel.url}</Typography>
                     <Tooltip title={copied ? 'Copied!' : 'Copy URL'}>
                       <IconButton size="small" onClick={() => copyToClipboard(tunnel.url!)}>
                         <ContentCopyIcon fontSize="small" />
@@ -410,122 +663,54 @@ export default function SettingsPage() {
                     </Tooltip>
                   </Paper>
                 )}
-
                 {tunnel.mode === 'quick' && tunnel.url && (
                   <Alert severity="info" variant="outlined" sx={{ fontSize: 13 }}>
-                    Quick tunnel URLs change each time the server restarts.
-                    Configure a custom domain below for a permanent, static URL.
+                    Quick tunnel URLs change each time the server restarts. Configure a custom domain below for a permanent, static URL.
                   </Alert>
                 )}
-
                 {tunnel.error && <Alert severity="error">{tunnel.error}</Alert>}
               </Stack>
             )}
           </Paper>
 
-          {/* Configure custom domain */}
           <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 1 }}>Custom Domain</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               Connect your Cloudflare account to get a permanent domain with automatic SSL.
-              This creates a named tunnel that persists across restarts.
             </Typography>
-
             {tunnel?.mode === 'named' && tunnel?.hostname ? (
-              /* Already configured */
               <Stack spacing={2}>
-                <Alert severity="success">
-                  Your dashboard is accessible at <strong>https://{tunnel.hostname}</strong>
-                </Alert>
+                <Alert severity="success">Your dashboard is accessible at <strong>https://{tunnel.hostname}</strong></Alert>
                 <Stack spacing={1}>
                   <Typography variant="body2"><strong>Tunnel ID:</strong> {tunnel.tunnelId}</Typography>
                   <Typography variant="body2"><strong>Hostname:</strong> {tunnel.hostname}</Typography>
                 </Stack>
                 <Divider />
-                <Button variant="outlined" color="warning" onClick={removeCustomDomain} sx={{ alignSelf: 'flex-start' }}>
-                  Remove Custom Domain
-                </Button>
-                <Typography variant="caption" color="text.secondary">
-                  This will revert to a quick tunnel with a random URL. The Cloudflare tunnel
-                  and DNS record will remain in your Cloudflare account for manual cleanup.
-                </Typography>
+                <Button variant="outlined" color="warning" onClick={removeCustomDomain} sx={{ alignSelf: 'flex-start' }}>Remove Custom Domain</Button>
               </Stack>
             ) : (
-              /* Not configured — show form */
               <Stack spacing={2}>
-                <TextField
-                  label="Cloudflare API Token"
-                  fullWidth
-                  type="password"
-                  value={cfToken}
-                  onChange={(e) => setCfToken(e.target.value)}
-                  helperText="Create a token at dash.cloudflare.com with Zone:DNS:Edit and Account:Cloudflare Tunnel:Edit permissions."
-                  inputProps={{ spellCheck: false }}
-                />
-                <TextField
-                  label="Account ID"
-                  fullWidth
-                  value={cfAccountId}
-                  onChange={(e) => setCfAccountId(e.target.value)}
-                  helperText="Found on the right sidebar of any zone's Overview page in the Cloudflare dashboard."
-                  inputProps={{ spellCheck: false }}
-                />
-
-                <Button
-                  variant="outlined"
-                  onClick={loadZones}
-                  disabled={!cfToken || zonesLoading}
-                  startIcon={zonesLoading ? <CircularProgress size={16} /> : undefined}
-                >
+                <TextField label="Cloudflare API Token" fullWidth type="password" value={cfToken} onChange={(e) => setCfToken(e.target.value)} helperText="Create a token at dash.cloudflare.com with Zone:DNS:Edit and Account:Cloudflare Tunnel:Edit permissions." inputProps={{ spellCheck: false }} />
+                <TextField label="Account ID" fullWidth value={cfAccountId} onChange={(e) => setCfAccountId(e.target.value)} helperText="Found on the right sidebar of any zone's Overview page." inputProps={{ spellCheck: false }} />
+                <Button variant="outlined" onClick={loadZones} disabled={!cfToken || zonesLoading} startIcon={zonesLoading ? <CircularProgress size={16} /> : undefined}>
                   {zonesLoading ? 'Loading...' : 'Load Domains'}
                 </Button>
-
                 {zonesError && <Alert severity="error">{zonesError}</Alert>}
-
                 {cfZones.length > 0 && (
                   <>
                     <FormControl fullWidth>
                       <InputLabel>Domain (Zone)</InputLabel>
-                      <Select
-                        label="Domain (Zone)"
-                        value={cfZoneId}
-                        onChange={(e) => setCfZoneId(e.target.value)}
-                      >
-                        {cfZones.map((z) => (
-                          <MenuItem key={z.id} value={z.id}>{z.name}</MenuItem>
-                        ))}
+                      <Select label="Domain (Zone)" value={cfZoneId} onChange={(e) => setCfZoneId(e.target.value)}>
+                        {cfZones.map((z) => <MenuItem key={z.id} value={z.id}>{z.name}</MenuItem>)}
                       </Select>
                     </FormControl>
-
-                    <TextField
-                      label="Hostname"
-                      fullWidth
-                      value={cfHostname}
-                      onChange={(e) => setCfHostname(e.target.value)}
-                      helperText={`e.g., dashboard.${cfZones.find((z) => z.id === cfZoneId)?.name ?? 'yourdomain.com'}`}
-                      inputProps={{ spellCheck: false }}
-                    />
-
-                    <Button
-                      variant="contained"
-                      onClick={configureCustomDomain}
-                      disabled={
-                        !cfToken || !cfAccountId || !cfZoneId || !cfHostname
-                        || configureStatus === 'configuring'
-                      }
-                      startIcon={configureStatus === 'configuring' ? <CircularProgress size={16} /> : undefined}
-                    >
+                    <TextField label="Hostname" fullWidth value={cfHostname} onChange={(e) => setCfHostname(e.target.value)} helperText={`e.g., dashboard.${cfZones.find((z) => z.id === cfZoneId)?.name ?? 'yourdomain.com'}`} inputProps={{ spellCheck: false }} />
+                    <Button variant="contained" onClick={configureCustomDomain} disabled={!cfToken || !cfAccountId || !cfZoneId || !cfHostname || configureStatus === 'configuring'} startIcon={configureStatus === 'configuring' ? <CircularProgress size={16} /> : undefined}>
                       {configureStatus === 'configuring' ? 'Configuring...' : 'Configure Custom Domain'}
                     </Button>
                   </>
                 )}
-
-                {configureStatus === 'configuring' && (
-                  <Stack spacing={1}>
-                    <LinearProgress />
-                    <Typography variant="body2" color="text.secondary">{configureMessage}</Typography>
-                  </Stack>
-                )}
+                {configureStatus === 'configuring' && <Stack spacing={1}><LinearProgress /><Typography variant="body2" color="text.secondary">{configureMessage}</Typography></Stack>}
                 {configureStatus === 'done' && <Alert severity="success">{configureMessage}</Alert>}
                 {configureStatus === 'error' && <Alert severity="error">{configureMessage}</Alert>}
               </Stack>
@@ -543,17 +728,10 @@ export default function SettingsPage() {
               <Typography variant="h3">Dashboard Updates</Typography>
             </Stack>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Check for new versions from the git repository. Updates pull the latest code,
-              rebuild all packages, and re-create the worker bundle.
+              Check for new versions from the git repository. Updates pull the latest code, rebuild all packages, and re-create the worker bundle.
             </Typography>
-
             <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
-              <Button
-                variant="outlined"
-                onClick={checkForUpdates}
-                disabled={checkStatus === 'checking'}
-                startIcon={checkStatus === 'checking' ? <CircularProgress size={16} /> : undefined}
-              >
+              <Button variant="outlined" onClick={checkForUpdates} disabled={checkStatus === 'checking'} startIcon={checkStatus === 'checking' ? <CircularProgress size={16} /> : undefined}>
                 {checkStatus === 'checking' ? 'Checking...' : 'Check for Updates'}
               </Button>
               {updateInfo && !updateInfo.updateAvailable && !updateInfo.error && (
@@ -563,7 +741,6 @@ export default function SettingsPage() {
                 <Chip icon={<NewReleasesIcon />} label={`${updateInfo.commitsBehind} commit${updateInfo.commitsBehind !== 1 ? 's' : ''} behind`} color="warning" />
               )}
             </Stack>
-
             {updateInfo?.error && <Alert severity="error" sx={{ mb: 2 }}>{updateInfo.error}</Alert>}
             {updateInfo?.updateAvailable && updateInfo.newCommits && updateInfo.newCommits.length > 0 && (
               <Paper variant="outlined" sx={{ mb: 2, maxHeight: 200, overflow: 'auto' }}>
@@ -576,7 +753,6 @@ export default function SettingsPage() {
                 </List>
               </Paper>
             )}
-
             {updateInfo?.updateAvailable && applyStatus === 'idle' && (
               <Button variant="contained" color="warning" onClick={applyUpdate}>Apply Update &amp; Restart</Button>
             )}
@@ -590,30 +766,11 @@ export default function SettingsPage() {
           <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>Worker Updates</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              When you update the dashboard, a new worker bundle is automatically created.
-              Workers check for updates periodically and download the new bundle.
+              When you update the dashboard, a new worker bundle is automatically created. Workers check for updates periodically.
             </Typography>
             <List disablePadding>
-              <ListItem secondaryAction={<Switch defaultChecked />} sx={{ px: 0 }}>
+              <ListItem secondaryAction={<Switch checked={getConfig('autoUpdateWorkers', 'true') === 'true'} onChange={(e) => { setConfig('autoUpdateWorkers', e.target.checked ? 'true' : 'false'); saveConfig({ autoUpdateWorkers: e.target.checked ? 'true' : 'false' }); }} />} sx={{ px: 0 }}>
                 <ListItemText primary="Auto-update workers" secondary="Workers automatically download and install new bundles when available" />
-              </ListItem>
-              <Divider />
-              <ListItem sx={{ px: 0 }}>
-                <ListItemText primary="Worker bundle" secondary="Rebuild the worker bundle without pulling new code" />
-                <Button variant="outlined" size="small" sx={{ ml: 2 }}>Rebuild Bundle</Button>
-              </ListItem>
-            </List>
-          </Paper>
-
-          <Paper sx={{ p: 3 }}>
-            <Typography variant="h3" sx={{ mb: 2 }}>Auto-Update Schedule</Typography>
-            <List disablePadding>
-              <ListItem secondaryAction={<Switch />} sx={{ px: 0 }}>
-                <ListItemText primary="Automatically check for updates" secondary="Check the git remote for new commits every hour" />
-              </ListItem>
-              <Divider />
-              <ListItem secondaryAction={<Switch />} sx={{ px: 0 }}>
-                <ListItemText primary="Automatically apply updates" secondary="Pull, build, and restart when new commits are detected (requires auto-check)" />
               </ListItem>
             </List>
           </Paper>
@@ -627,9 +784,23 @@ export default function SettingsPage() {
             <Stack spacing={2}><Skeleton height={56} /><Skeleton height={56} /></Stack>
           ) : (
             <Stack spacing={2}>
-              <TextField label="Display Name" value={data?.user?.displayName ?? ''} />
+              <TextField
+                label="Display Name"
+                value={displayNameEdit}
+                onChange={(e) => setDisplayNameEdit(e.target.value)}
+              />
               <TextField label="Email" value={data?.user?.email ?? ''} disabled />
-              <Button variant="outlined">Change Password</Button>
+              <Stack direction="row" spacing={2}>
+                <Button
+                  variant="contained"
+                  startIcon={savingAccount ? <CircularProgress size={16} /> : <SaveIcon />}
+                  onClick={saveAccount}
+                  disabled={savingAccount || displayNameEdit === (data?.user?.displayName ?? '')}
+                >
+                  Save
+                </Button>
+                <Button variant="outlined" onClick={() => setPasswordOpen(true)}>Change Password</Button>
+              </Stack>
             </Stack>
           )}
         </Paper>
@@ -638,16 +809,30 @@ export default function SettingsPage() {
       {/* ── Tab 5: Security ── */}
       {tab === 5 && (
         <Paper sx={{ p: 3 }}>
-          <Stack spacing={2}>
-            <Button variant="outlined" color="warning">Change Vault Passphrase</Button>
-            <FormControl fullWidth>
-              <InputLabel>Session Timeout</InputLabel>
-              <Select label="Session Timeout" value={(data?.config?.sessionTimeout as string) ?? '7d'}>
-                <MenuItem value="1d">1 day</MenuItem>
-                <MenuItem value="7d">7 days</MenuItem>
-                <MenuItem value="30d">30 days</MenuItem>
-              </Select>
-            </FormControl>
+          <Stack spacing={3}>
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} gutterBottom>Vault Passphrase</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                The vault passphrase encrypts all stored credentials using AES-256-GCM.
+              </Typography>
+              <Button variant="outlined" color="warning" onClick={() => setPassphraseOpen(true)}>Change Vault Passphrase</Button>
+            </Box>
+            <Divider />
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} gutterBottom>Session Timeout</Typography>
+              <FormControl sx={{ minWidth: 200 }}>
+                <InputLabel>Session Timeout</InputLabel>
+                <Select
+                  label="Session Timeout"
+                  value={getConfig('sessionTimeout', '7d')}
+                  onChange={(e) => { setConfig('sessionTimeout', e.target.value); saveConfig({ sessionTimeout: e.target.value }); }}
+                >
+                  <MenuItem value="1d">1 day</MenuItem>
+                  <MenuItem value="7d">7 days</MenuItem>
+                  <MenuItem value="30d">30 days</MenuItem>
+                </Select>
+              </FormControl>
+            </Box>
           </Stack>
         </Paper>
       )}
@@ -660,18 +845,115 @@ export default function SettingsPage() {
           ) : (
             <Stack spacing={1}>
               <Typography variant="body2"><strong>Version:</strong> {data?.system?.version ?? 'Unknown'}</Typography>
-              <Typography variant="body2">
-                <strong>Workers:</strong> {data?.system?.onlineWorkers ?? 0} online / {data?.system?.totalWorkers ?? 0} total
-              </Typography>
+              <Typography variant="body2"><strong>Workers:</strong> {data?.system?.onlineWorkers ?? 0} online / {data?.system?.totalWorkers ?? 0} total</Typography>
               <Typography variant="body2"><strong>Database:</strong> PostgreSQL + pgvector</Typography>
               <Typography variant="body2"><strong>Scheduler:</strong> {schedulerAge()}</Typography>
-              {tunnel?.url && (
-                <Typography variant="body2"><strong>Tunnel:</strong> {tunnel.url} ({tunnel.mode})</Typography>
-              )}
+              {tunnel?.url && <Typography variant="body2"><strong>Tunnel:</strong> {tunnel.url} ({tunnel.mode})</Typography>}
             </Stack>
           )}
         </Paper>
       )}
+
+      {/* ── Add API Key Dialog ── */}
+      <Dialog open={addKeyOpen} onClose={() => setAddKeyOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Add Claude API Key</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              label="Label"
+              fullWidth
+              value={newKeyLabel}
+              onChange={(e) => setNewKeyLabel(e.target.value)}
+              placeholder="e.g., Primary Key, Backup Key"
+              autoFocus
+            />
+            <TextField
+              label="API Key"
+              fullWidth
+              value={newKeyValue}
+              onChange={(e) => setNewKeyValue(e.target.value)}
+              placeholder="sk-ant-api03-..."
+              type="password"
+              inputProps={{ spellCheck: false }}
+              helperText="Your key is encrypted at rest and never displayed after saving."
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAddKeyOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleAddKey}
+            disabled={!newKeyLabel.trim() || !newKeyValue.trim() || addingKey}
+            startIcon={addingKey ? <CircularProgress size={16} /> : undefined}
+          >
+            {addingKey ? 'Adding...' : 'Add Key'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Delete API Key Confirmation ── */}
+      <Dialog open={!!deleteKeyId} onClose={() => setDeleteKeyId(null)}>
+        <DialogTitle>Delete API Key</DialogTitle>
+        <DialogContent>
+          <Typography>Are you sure you want to remove this API key? This action cannot be undone.</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteKeyId(null)}>Cancel</Button>
+          <Button variant="contained" color="error" onClick={() => deleteKeyId && handleDeleteKey(deleteKeyId)}>Delete</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Change Password Dialog ── */}
+      <Dialog open={passwordOpen} onClose={() => setPasswordOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Change Password</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Current Password" type="password" fullWidth value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoFocus />
+            <TextField label="New Password" type="password" fullWidth value={newPassword} onChange={(e) => setNewPassword(e.target.value)} helperText="At least 8 characters" />
+            <TextField label="Confirm New Password" type="password" fullWidth value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPasswordOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={handleChangePassword} disabled={changingPassword || !currentPassword || !newPassword || !confirmPassword} startIcon={changingPassword ? <CircularProgress size={16} /> : undefined}>
+            {changingPassword ? 'Changing...' : 'Change Password'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Change Vault Passphrase Dialog ── */}
+      <Dialog open={passphraseOpen} onClose={() => setPassphraseOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Change Vault Passphrase</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Changing the vault passphrase will re-encrypt all stored credentials. This cannot be undone if you forget the new passphrase.
+          </Alert>
+          <Stack spacing={2}>
+            <TextField label="Current Passphrase" type="password" fullWidth value={currentPassphrase} onChange={(e) => setCurrentPassphrase(e.target.value)} autoFocus />
+            <TextField label="New Passphrase" type="password" fullWidth value={newPassphrase} onChange={(e) => setNewPassphrase(e.target.value)} helperText="At least 8 characters" />
+            <TextField label="Confirm New Passphrase" type="password" fullWidth value={confirmPassphrase} onChange={(e) => setConfirmPassphrase(e.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPassphraseOpen(false)}>Cancel</Button>
+          <Button variant="contained" color="warning" onClick={handleChangePassphrase} disabled={changingPassphrase || !currentPassphrase || !newPassphrase || !confirmPassphrase} startIcon={changingPassphrase ? <CircularProgress size={16} /> : undefined}>
+            {changingPassphrase ? 'Changing...' : 'Change Passphrase'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Snackbar ── */}
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={4000}
+        onClose={() => setSnack((s) => ({ ...s, open: false }))}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity={snack.severity} onClose={() => setSnack((s) => ({ ...s, open: false }))} variant="filled">
+          {snack.message}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

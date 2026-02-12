@@ -45,9 +45,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'name and type are required' }, { status: 400 });
     }
 
-    // Encryption is handled by the vault package at runtime.
-    // For now we store a placeholder encrypted blob. The actual vault
-    // service will be invoked when agents need to read credentials.
     const crypto = await import('crypto');
     const key = crypto.randomBytes(32);
     const iv = crypto.randomBytes(12);
@@ -75,6 +72,38 @@ export async function POST(request: NextRequest) {
         createdAt: credential.createdAt.toISOString(),
       },
     }, { status: 201 });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+/** PATCH /api/vault — Update credential (approval status, etc.) */
+export async function PATCH(request: NextRequest) {
+  try {
+    const db = getDb();
+    const body = await request.json();
+    if (!body.id) return NextResponse.json({ error: 'id is required' }, { status: 400 });
+
+    const updateData: Record<string, unknown> = {};
+    if (body.approvalStatus !== undefined) updateData.approvalStatus = body.approvalStatus;
+    if (body.name !== undefined) updateData.name = body.name;
+
+    await db.vaultCredential.update({ where: { id: body.id }, data: updateData });
+    return NextResponse.json({ success: true });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+/** DELETE /api/vault?id=xxx — Delete a credential */
+export async function DELETE(request: NextRequest) {
+  try {
+    const db = getDb();
+    const id = request.nextUrl.searchParams.get('id');
+    if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 });
+
+    await db.vaultCredential.delete({ where: { id } });
+    return NextResponse.json({ success: true });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

@@ -1,14 +1,15 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Box, TextField, IconButton, Typography, Paper, List, ListItemButton,
   ListItemText, Divider, Avatar, Chip, InputAdornment, Stack,
-  CircularProgress,
+  CircularProgress, Tooltip, Snackbar, Alert,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import AddIcon from '@mui/icons-material/Add';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import DeleteIcon from '@mui/icons-material/Delete';
 
 interface Message {
   id: string;
@@ -17,11 +18,23 @@ interface Message {
   timestamp: Date;
 }
 
+interface ChatSession {
+  id: string;
+  title: string;
+  type: string;
+  messageCount: number;
+  lastMessage: string | null;
+  lastMessageAt: string;
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -30,6 +43,61 @@ export default function ChatPage() {
     }
   }, [messages]);
 
+  // ── Load session list ──
+  const loadSessions = useCallback(() => {
+    fetch('/api/chat/sessions')
+      .then((res) => res.json())
+      .then((data) => setSessions(data.sessions ?? []))
+      .catch(() => setSessions([]))
+      .finally(() => setSessionsLoading(false));
+  }, []);
+
+  useEffect(() => { loadSessions(); }, [loadSessions]);
+
+  // ── Load messages for a session ──
+  const loadMessages = useCallback(async (sid: string) => {
+    try {
+      const res = await fetch(`/api/chat/messages?sessionId=${sid}`);
+      const data = await res.json();
+      setMessages((data.messages ?? []).map((m: any) => ({
+        id: m.id,
+        role: m.role as 'user' | 'ai',
+        content: m.content,
+        timestamp: new Date(m.timestamp),
+      })));
+    } catch {
+      setMessages([]);
+    }
+  }, []);
+
+  // ── Switch to a session ──
+  const switchSession = useCallback((sid: string) => {
+    setSessionId(sid);
+    loadMessages(sid);
+  }, [loadMessages]);
+
+  // ── New conversation ──
+  const startNewConversation = () => {
+    setSessionId(null);
+    setMessages([]);
+  };
+
+  // ── Delete a session ──
+  const deleteSession = useCallback(async (sid: string) => {
+    try {
+      await fetch(`/api/chat/sessions?id=${sid}`, { method: 'DELETE' });
+      if (sessionId === sid) {
+        setSessionId(null);
+        setMessages([]);
+      }
+      loadSessions();
+      setSnack({ open: true, message: 'Conversation deleted', severity: 'success' });
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    }
+  }, [sessionId, loadSessions]);
+
+  // ── Send message ──
   const handleSend = async () => {
     if (!input.trim() || sending) return;
 
@@ -48,14 +116,15 @@ export default function ChatPage() {
       const res = await fetch('/api/chat/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: currentInput,
-          sessionId,
-        }),
+        body: JSON.stringify({ message: currentInput, sessionId }),
       });
       const data = await res.json();
 
-      if (data.sessionId) setSessionId(data.sessionId);
+      if (data.sessionId) {
+        setSessionId(data.sessionId);
+        // Refresh session list to show the new/updated session
+        loadSessions();
+      }
 
       if (data.aiMessage) {
         setMessages((prev) => [...prev, {
@@ -87,24 +156,64 @@ export default function ChatPage() {
   return (
     <Box sx={{ display: 'flex', height: 'calc(100vh - 80px)', gap: 2 }}>
       {/* Sidebar */}
-      <Paper sx={{ width: 280, flexShrink: 0, display: { xs: 'none', md: 'flex' }, flexDirection: 'column', overflow: 'auto' }}>
+      <Paper sx={{ width: 280, flexShrink: 0, display: { xs: 'none', md: 'flex' }, flexDirection: 'column', overflow: 'hidden' }}>
         <Box sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <Typography variant="subtitle2" color="text.secondary">Conversations</Typography>
-          <IconButton size="small" onClick={() => { setSessionId(null); setMessages([]); }}><AddIcon /></IconButton>
+          <Tooltip title="New conversation">
+            <IconButton size="small" onClick={startNewConversation}><AddIcon /></IconButton>
+          </Tooltip>
         </Box>
-        <List dense>
-          {sessionId && (
-            <ListItemButton selected>
-              <ListItemText
-                primary={messages[0]?.content.slice(0, 40) ?? 'New conversation'}
-                secondary={messages[0]?.timestamp.toLocaleTimeString() ?? 'Now'}
-              />
-            </ListItemButton>
+        <Divider />
+        <Box sx={{ flex: 1, overflow: 'auto' }}>
+          {sessionsLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}><CircularProgress size={20} /></Box>
+          ) : sessions.length === 0 ? (
+            <Typography variant="caption" color="text.secondary" sx={{ p: 2, display: 'block', textAlign: 'center' }}>
+              No conversations yet
+            </Typography>
+          ) : (
+            <List dense disablePadding>
+              {sessions.filter((s) => s.type === 'personal').map((session) => (
+                <ListItemButton
+                  key={session.id}
+                  selected={sessionId === session.id}
+                  onClick={() => switchSession(session.id)}
+                  sx={{ pr: 1 }}
+                >
+                  <ListItemText
+                    primary={session.title || 'Untitled'}
+                    secondary={session.lastMessage?.slice(0, 50) ?? `${session.messageCount} messages`}
+                    primaryTypographyProps={{ noWrap: true, fontSize: 13 }}
+                    secondaryTypographyProps={{ noWrap: true, fontSize: 11 }}
+                  />
+                  <Tooltip title="Delete">
+                    <IconButton
+                      size="small"
+                      onClick={(e) => { e.stopPropagation(); deleteSession(session.id); }}
+                      sx={{ opacity: 0.3, '&:hover': { opacity: 1 } }}
+                    >
+                      <DeleteIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+                </ListItemButton>
+              ))}
+            </List>
           )}
-        </List>
+        </Box>
         <Divider />
         <Box sx={{ p: 2 }}>
           <Typography variant="subtitle2" color="text.secondary">Teams</Typography>
+          {sessions.filter((s) => s.type === 'team').length > 0 ? (
+            <List dense disablePadding>
+              {sessions.filter((s) => s.type === 'team').map((session) => (
+                <ListItemButton key={session.id} selected={sessionId === session.id} onClick={() => switchSession(session.id)}>
+                  <ListItemText primary={session.title || 'Team Chat'} primaryTypographyProps={{ noWrap: true, fontSize: 13 }} />
+                </ListItemButton>
+              ))}
+            </List>
+          ) : (
+            <Typography variant="caption" color="text.disabled">No team chats</Typography>
+          )}
         </Box>
       </Paper>
 
@@ -115,7 +224,7 @@ export default function ChatPage() {
             <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 2 }}>
               <SmartToyIcon sx={{ fontSize: 64, color: 'text.disabled' }} />
               <Typography variant="h5" color="text.secondary">How can I help you today?</Typography>
-              <Stack direction="row" spacing={1}>
+              <Stack direction="row" spacing={1} flexWrap="wrap" justifyContent="center">
                 <Chip label="Check my portfolio" variant="outlined" onClick={() => setInput('Check my retirement portfolio')} />
                 <Chip label="Create a workflow" variant="outlined" onClick={() => setInput('Help me create a software development workflow')} />
                 <Chip label="Schedule a task" variant="outlined" onClick={() => setInput('Schedule a daily report at 9 AM')} />
@@ -165,6 +274,10 @@ export default function ChatPage() {
           />
         </Box>
       </Box>
+
+      <Snackbar open={snack.open} autoHideDuration={3000} onClose={() => setSnack((s) => ({ ...s, open: false }))} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+        <Alert severity={snack.severity} onClose={() => setSnack((s) => ({ ...s, open: false }))} variant="filled">{snack.message}</Alert>
+      </Snackbar>
     </Box>
   );
 }

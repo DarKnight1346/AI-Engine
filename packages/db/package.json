@@ -7,7 +7,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "postinstall": "prisma generate",
-    "build": "tsc",
+    "build": "prisma generate && tsc",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
