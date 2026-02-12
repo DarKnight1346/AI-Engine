@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { TunnelManager } from '../../../../../lib/tunnel-manager';
+import { TunnelManager } from '../../../../lib/tunnel-manager';
 
 export const dynamic = 'force-dynamic';
 
