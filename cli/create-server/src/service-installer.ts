@@ -55,6 +55,9 @@ export async function registerDashboardService(opts: DashboardServiceOptions): P
 // ---------------------------------------------------------------------------
 
 function buildWrapperScript(opts: DashboardServiceOptions, nodePath: string): string {
+  // Derive the directory containing node/npm/npx so child processes can find them
+  const nodeBinDir = nodePath.substring(0, nodePath.lastIndexOf('/'));
+
   return `#!/usr/bin/env bash
 # AI Engine Dashboard startup wrapper
 # Sources .env so that config changes take effect on restart.
@@ -62,6 +65,10 @@ function buildWrapperScript(opts: DashboardServiceOptions, nodePath: string): st
 set -e
 
 cd "${opts.projectDir}"
+
+# Ensure Node.js tools (node, npm, npx) and project binaries are on PATH.
+# systemd services start with a minimal PATH that may not include these.
+export PATH="${nodeBinDir}:${opts.projectDir}/node_modules/.bin:\$PATH"
 
 # Load environment variables from .env
 if [ -f "${opts.envFilePath}" ]; then
