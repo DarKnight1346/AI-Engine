@@ -233,7 +233,7 @@ ok "Build complete"
 # ── 9. Bundle the worker (so the dashboard can serve it to workers) ─────────
 
 info "Creating worker bundle..."
-npx --yes tsx scripts/bundle-worker.ts 2>&1 | tail -1
+npx --yes tsx scripts/bundle-worker.ts
 ok "Worker bundle created"
 
 # ── 10. Launch the dashboard setup ───────────────────────────────────────────
