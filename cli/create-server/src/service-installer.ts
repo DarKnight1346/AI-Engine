@@ -72,7 +72,9 @@ if [ -f "${opts.envFilePath}" ]; then
   set +a
 fi
 
-exec "${nodePath}" apps/dashboard/server.js
+# Next.js expects .next/ in the CWD
+cd apps/dashboard
+exec "${nodePath}" server.js
 `;
 
   await writeFile(scriptPath, script, { mode: 0o755 });
@@ -118,7 +120,7 @@ WantedBy=multi-user.target
   tryExec(`sudo cp "${tmpPath}" "${unitPath}"`);
   tryExec('sudo systemctl daemon-reload');
   tryExec(`sudo systemctl enable ${serviceName}`);
-  tryExec(`sudo systemctl start ${serviceName}`);
+  tryExec(`sudo systemctl restart ${serviceName}`);
 
   console.log(`✅ systemd service "${serviceName}" created and enabled`);
   console.log(`   Unit file: ${unitPath}`);
