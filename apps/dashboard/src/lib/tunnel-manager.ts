@@ -133,6 +133,11 @@ class TunnelManager {
     this.stopped = true;
     this.clearRestart();
     if (this.proc) {
+      // Detach all listeners BEFORE killing so the old process's exit event
+      // doesn't trigger scheduleRestart after a new process has started.
+      this.proc.stdout?.removeAllListeners();
+      this.proc.stderr?.removeAllListeners();
+      this.proc.removeAllListeners();
       this.proc.kill('SIGTERM');
       this.proc = null;
     }
