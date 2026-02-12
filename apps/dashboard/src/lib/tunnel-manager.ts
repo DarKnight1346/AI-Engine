@@ -334,12 +334,14 @@ class TunnelManager {
       envContent = upsertEnvVar(envContent, 'TUNNEL_ID', tunnelId);
       envContent = upsertEnvVar(envContent, 'TUNNEL_ACCOUNT_ID', opts.accountId);
       envContent = upsertEnvVar(envContent, 'TUNNEL_ZONE_ID', opts.zoneId);
+      envContent = upsertEnvVar(envContent, 'TUNNEL_API_TOKEN', opts.apiToken);
 
       writeFileSync(envPath, envContent, 'utf-8');
       console.log(`[tunnel] Persisted tunnel config to ${envPath}`);
 
       // Update process.env so the current process can see the values immediately
       process.env.TUNNEL_MODE = 'named';
+      process.env.TUNNEL_API_TOKEN = opts.apiToken;
       process.env.TUNNEL_CONFIG_PATH = configPath;
       process.env.TUNNEL_HOSTNAME = opts.hostname;
       process.env.TUNNEL_ID = tunnelId;
@@ -376,6 +378,99 @@ class TunnelManager {
     this.state.hostname = null;
     this.state.tunnelId = null;
     await this.restart();
+  }
+
+  // -----------------------------------------------------------------------
+  // DNS verification — called automatically after a named tunnel connects
+  // -----------------------------------------------------------------------
+
+  private dnsVerified = false;
+
+  async verifyDns(): Promise<void> {
+    if (this.dnsVerified) return;
+    this.dnsVerified = true;
+
+    const envVars = readEnvFile(join(process.cwd(), '.env'));
+    const apiToken = process.env.TUNNEL_API_TOKEN ?? envVars.TUNNEL_API_TOKEN;
+    const zoneId = process.env.TUNNEL_ZONE_ID ?? envVars.TUNNEL_ZONE_ID;
+    const hostname = this.state.hostname;
+    const tunnelId = this.state.tunnelId;
+
+    if (!apiToken || !zoneId || !hostname || !tunnelId) {
+      console.log('[tunnel] Skipping DNS verification — missing credentials');
+      return;
+    }
+
+    const expectedTarget = `${tunnelId}.cfargotunnel.com`;
+
+    try {
+      // Look up existing DNS record
+      const res = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=CNAME&name=${hostname}`,
+        { headers: { Authorization: `Bearer ${apiToken}` } },
+      );
+      const data = await res.json() as any;
+      const record = data.success && data.result?.length > 0 ? data.result[0] : null;
+
+      if (record && record.content === expectedTarget) {
+        console.log(`[tunnel] DNS record verified: ${hostname} → ${expectedTarget}`);
+        return;
+      }
+
+      if (record) {
+        // Record exists but points to wrong tunnel — update it
+        console.log(`[tunnel] DNS record outdated: ${record.content} → fixing to ${expectedTarget}`);
+        const updateRes = await fetch(
+          `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${record.id}`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${apiToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              type: 'CNAME',
+              name: hostname,
+              content: expectedTarget,
+              proxied: true,
+            }),
+          },
+        );
+        const updateData = await updateRes.json() as any;
+        if (updateData.success) {
+          console.log('[tunnel] DNS record fixed successfully');
+        } else {
+          console.warn('[tunnel] DNS record fix failed:', updateData.errors?.[0]?.message);
+        }
+      } else {
+        // No record exists — create one
+        console.log(`[tunnel] No DNS record found for ${hostname}, creating...`);
+        const createRes = await fetch(
+          `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              type: 'CNAME',
+              name: hostname,
+              content: expectedTarget,
+              proxied: true,
+            }),
+          },
+        );
+        const createData = await createRes.json() as any;
+        if (createData.success) {
+          console.log('[tunnel] DNS record created successfully');
+        } else {
+          console.warn('[tunnel] DNS record creation failed:', createData.errors?.[0]?.message);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[tunnel] DNS verification error:', err.message);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -419,10 +514,14 @@ class TunnelManager {
 
       // Named tunnel: detect registered connection
       if (text.includes('Registered tunnel connection') || text.includes('Connection registered')) {
-        this.state.status = 'connected';
-        console.log('');
-        console.log(`[tunnel] ✅ Named tunnel connected: ${this.state.url}`);
-        console.log('');
+        if (this.state.status !== 'connected') {
+          this.state.status = 'connected';
+          console.log('');
+          console.log(`[tunnel] ✅ Named tunnel connected: ${this.state.url}`);
+          console.log('');
+          // Verify DNS points to the correct tunnel on first connection
+          this.verifyDns().catch((err) => console.warn('[tunnel] DNS verify error:', err));
+        }
       }
     };
 
