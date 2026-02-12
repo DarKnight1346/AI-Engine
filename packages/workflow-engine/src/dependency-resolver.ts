@@ -15,7 +15,7 @@ export class DependencyResolver {
     const deps = await db.taskDependency.findMany({
       where: { taskId, dependencyType: 'blocks' },
     });
-    return deps.map((d) => ({
+    return deps.map((d: any) => ({
       id: d.id,
       taskId: d.taskId,
       dependsOnTaskId: d.dependsOnTaskId,
@@ -29,7 +29,7 @@ export class DependencyResolver {
       where: { taskId, dependencyType: 'blocks' },
       include: { dependsOn: true },
     });
-    return deps.every((d) => d.dependsOn.status === 'completed');
+    return deps.every((d: any) => d.dependsOn.status === 'completed');
   }
 
   async getReadyTasks(workflowId: string): Promise<string[]> {
@@ -50,12 +50,12 @@ export class DependencyResolver {
     const db = getDb();
     const items = await db.workItem.findMany({ where: { workflowId } });
     const deps = await db.taskDependency.findMany({
-      where: { taskId: { in: items.map((i) => i.id) } },
+      where: { taskId: { in: items.map((i: any) => i.id) } },
     });
 
     return {
-      nodes: items.map((i) => i.id),
-      edges: deps.map((d) => ({
+      nodes: items.map((i: any) => i.id),
+      edges: deps.map((d: any) => ({
         from: d.dependsOnTaskId,
         to: d.taskId,
         type: d.dependencyType as DependencyType,
