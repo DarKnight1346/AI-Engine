@@ -227,7 +227,7 @@ ok "Prisma client generated"
 # ── 8. Build all packages ───────────────────────────────────────────────────
 
 info "Building all packages (this may take a minute)..."
-pnpm build 2>&1 | tail -3
+pnpm build
 ok "Build complete"
 
 # ── 9. Bundle the worker (so the dashboard can serve it to workers) ─────────
