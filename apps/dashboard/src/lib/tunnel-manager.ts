@@ -40,12 +40,13 @@ export interface NamedTunnelOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Singleton
+// Singleton — stored on globalThis so the same instance is shared across
+// all webpack chunks in the Next.js process (API routes, instrumentation, etc.)
 // ---------------------------------------------------------------------------
 
-class TunnelManager {
-  private static instance: TunnelManager;
+const TUNNEL_KEY = Symbol.for('ai-engine.tunnel-manager');
 
+class TunnelManager {
   private proc: ChildProcess | null = null;
   private state: TunnelState = {
     status: 'disconnected',
@@ -60,10 +61,11 @@ class TunnelManager {
   private stopped = false; // true when deliberately stopped
 
   static getInstance(): TunnelManager {
-    if (!TunnelManager.instance) {
-      TunnelManager.instance = new TunnelManager();
+    const g = globalThis as Record<symbol, TunnelManager | undefined>;
+    if (!g[TUNNEL_KEY]) {
+      g[TUNNEL_KEY] = new TunnelManager();
     }
-    return TunnelManager.instance;
+    return g[TUNNEL_KEY]!;
   }
 
   getState(): TunnelState {
