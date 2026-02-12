@@ -16,6 +16,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 
+# ── Ensure we're running under bash ──────────────────────────────────────────
+# If someone runs "sh install.sh", re-exec under bash automatically.
+if [ -z "$BASH_VERSION" ]; then
+  exec bash "$0" "$@"
+fi
+
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
 INSTALL_DIR="/opt/ai-engine"
