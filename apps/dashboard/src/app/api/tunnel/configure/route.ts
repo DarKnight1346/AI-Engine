@@ -24,6 +24,17 @@ export async function POST(request: NextRequest) {
     }
 
     const manager = TunnelManager.getInstance();
+    const state = manager.getState();
+
+    // Don't overwrite an existing named tunnel — return the current URL
+    if (state.mode === 'named' && state.status === 'connected' && state.url) {
+      return NextResponse.json({
+        success: true,
+        url: state.url,
+        alreadyConfigured: true,
+      });
+    }
+
     const result = await manager.configureNamedTunnel({
       apiToken,
       accountId,
