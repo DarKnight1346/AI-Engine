@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { PROJECT_ROOT, ROOT_PACKAGE_JSON } from '@ai-engine/shared';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,29 +12,27 @@ export const dynamic = 'force-dynamic';
  * Returns whether an update is available and commit info.
  */
 export async function GET() {
-  const projectDir = process.cwd();
-
   try {
     // Get current version
     let currentVersion = '0.1.0';
     try {
-      const pkg = JSON.parse(await readFile(join(projectDir, 'package.json'), 'utf8'));
+      const pkg = JSON.parse(await readFile(ROOT_PACKAGE_JSON, 'utf8'));
       currentVersion = pkg.version ?? currentVersion;
     } catch { /* default */ }
 
     // Get current HEAD
     const localHead = execSync('git rev-parse HEAD', {
-      cwd: projectDir, encoding: 'utf8', stdio: 'pipe',
+      cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe',
     }).trim();
 
     const localBranch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd: projectDir, encoding: 'utf8', stdio: 'pipe',
+      cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe',
     }).trim();
 
     // Fetch from remote (non-blocking, fast)
     try {
       execSync('git fetch origin --quiet', {
-        cwd: projectDir, encoding: 'utf8', stdio: 'pipe', timeout: 15000,
+        cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe', timeout: 15000,
       });
     } catch {
       return NextResponse.json({
@@ -50,11 +48,11 @@ export async function GET() {
     let remoteHead: string;
     try {
       remoteHead = execSync(`git rev-parse origin/${localBranch}`, {
-        cwd: projectDir, encoding: 'utf8', stdio: 'pipe',
+        cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe',
       }).trim();
     } catch {
       remoteHead = execSync('git rev-parse origin/main', {
-        cwd: projectDir, encoding: 'utf8', stdio: 'pipe',
+        cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe',
       }).trim();
     }
 
@@ -66,7 +64,7 @@ export async function GET() {
       try {
         const log = execSync(
           `git log ${localHead}..${remoteHead} --format="%H|||%s|||%ci" --max-count=20`,
-          { cwd: projectDir, encoding: 'utf8', stdio: 'pipe' },
+          { cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe' },
         ).trim();
 
         if (log) {

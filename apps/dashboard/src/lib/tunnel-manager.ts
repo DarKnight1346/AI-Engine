@@ -18,6 +18,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { ENV_FILE, PROJECT_ROOT } from '@ai-engine/shared';
 import { ensureCloudflared } from './cloudflared';
 
 // ---------------------------------------------------------------------------
@@ -96,7 +97,7 @@ class TunnelManager {
       let tunnelId = process.env.TUNNEL_ID ?? null;
 
       if (!tunnelConfigPath) {
-        const envVars = readEnvFile(join(process.cwd(), '.env'));
+        const envVars = readEnvFile(ENV_FILE);
         tunnelConfigPath = envVars.TUNNEL_CONFIG_PATH ?? null;
         tunnelHostname = envVars.TUNNEL_HOSTNAME ?? null;
         tunnelId = envVars.TUNNEL_ID ?? null;
@@ -323,9 +324,8 @@ class TunnelManager {
       }
 
       // --- 4. Persist to .env file ---
-      const envPath = join(process.cwd(), '.env');
       let envContent = '';
-      try { envContent = readFileSync(envPath, 'utf-8'); } catch { /* file may not exist yet */ }
+      try { envContent = readFileSync(ENV_FILE, 'utf-8'); } catch { /* file may not exist yet */ }
 
       envContent = upsertEnvVar(envContent, 'TUNNEL_MODE', 'named');
       envContent = upsertEnvVar(envContent, 'TUNNEL_CONFIG_PATH', configPath);
@@ -336,8 +336,8 @@ class TunnelManager {
       envContent = upsertEnvVar(envContent, 'TUNNEL_ZONE_ID', opts.zoneId);
       envContent = upsertEnvVar(envContent, 'TUNNEL_API_TOKEN', opts.apiToken);
 
-      writeFileSync(envPath, envContent, 'utf-8');
-      console.log(`[tunnel] Persisted tunnel config to ${envPath}`);
+      writeFileSync(ENV_FILE, envContent, 'utf-8');
+      console.log(`[tunnel] Persisted tunnel config to ${ENV_FILE}`);
 
       // Update process.env so the current process can see the values immediately
       process.env.TUNNEL_MODE = 'named';
@@ -360,9 +360,8 @@ class TunnelManager {
    */
   async removeNamedTunnel(): Promise<void> {
     // Remove tunnel vars from .env
-    const envPath = join(process.cwd(), '.env');
     try {
-      let envContent = readFileSync(envPath, 'utf-8');
+      let envContent = readFileSync(ENV_FILE, 'utf-8');
       const keys = [
         'TUNNEL_MODE', 'TUNNEL_CONFIG_PATH', 'TUNNEL_CRED_PATH',
         'TUNNEL_HOSTNAME', 'TUNNEL_ID', 'TUNNEL_ACCOUNT_ID',
@@ -372,7 +371,7 @@ class TunnelManager {
         envContent = envContent.replace(new RegExp(`^${key}=.*\\n?`, 'm'), '');
         delete process.env[key];
       }
-      writeFileSync(envPath, envContent, 'utf-8');
+      writeFileSync(ENV_FILE, envContent, 'utf-8');
     } catch { /* .env may not exist */ }
 
     this.state.hostname = null;
@@ -390,7 +389,7 @@ class TunnelManager {
     if (this.dnsVerified && !force) return;
     this.dnsVerified = true;
 
-    const envVars = readEnvFile(join(process.cwd(), '.env'));
+    const envVars = readEnvFile(ENV_FILE);
     const apiToken = process.env.TUNNEL_API_TOKEN ?? envVars.TUNNEL_API_TOKEN;
     const zoneId = process.env.TUNNEL_ZONE_ID ?? envVars.TUNNEL_ZONE_ID;
     const hostname = this.state.hostname;

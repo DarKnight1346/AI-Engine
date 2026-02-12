@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
+import { PROJECT_ROOT } from '@ai-engine/shared';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // 5 minutes for pull + build
@@ -13,14 +14,13 @@ export const maxDuration = 300; // 5 minutes for pull + build
  * After this completes, workers can pull the new bundle from /api/worker/bundle.
  */
 export async function POST(_request: NextRequest) {
-  const projectDir = process.cwd();
   const log: string[] = [];
 
   const run = (cmd: string, desc: string, timeoutMs = 120000) => {
     log.push(`> ${desc}`);
     try {
       const out = execSync(cmd, {
-        cwd: projectDir,
+        cwd: PROJECT_ROOT,
         encoding: 'utf8',
         stdio: 'pipe',
         timeout: timeoutMs,
@@ -60,13 +60,13 @@ export async function POST(_request: NextRequest) {
     let newVersion = '0.1.0';
     try {
       const pkg = JSON.parse(
-        execSync('cat package.json', { cwd: projectDir, encoding: 'utf8', stdio: 'pipe' })
+        execSync('cat package.json', { cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe' })
       );
       newVersion = pkg.version ?? newVersion;
     } catch { /* default */ }
 
     const newHead = execSync('git rev-parse --short HEAD', {
-      cwd: projectDir, encoding: 'utf8', stdio: 'pipe',
+      cwd: PROJECT_ROOT, encoding: 'utf8', stdio: 'pipe',
     }).trim();
 
     // Return success — then schedule restart

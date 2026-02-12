@@ -11,12 +11,16 @@ const nextConfig = {
   reactStrictMode: true,
   experimental: {
     instrumentationHook: true,
-    // Tell Next.js server-side bundler to leave Prisma alone — it relies on
-    // native binary engine files (.so.node / .dylib.node) that cannot be
-    // inlined into a JS bundle.
+    // Tell Next.js to keep Prisma external (not bundled by webpack).
+    // Next.js resolves the real module path via its require-hook, so it
+    // works correctly with pnpm's strict linking — unlike raw webpack
+    // externals which emit bare `require()` calls.
+    //
+    // IMPORTANT: @prisma/client must also be a direct dependency of the
+    // dashboard package.json so pnpm links it where Next.js can find it.
     serverComponentsExternalPackages: ['@prisma/client', '.prisma/client'],
     // Point Next.js at the monorepo root so standalone output tracing can
-    // find engine binaries in hoisted node_modules.
+    // find packages in the hoisted node_modules.
     outputFileTracingRoot: resolve(__dirname, '../../'),
   },
   transpilePackages: [
@@ -32,15 +36,9 @@ const nextConfig = {
     '@ai-engine/vault',
     '@ai-engine/planner',
   ],
-  webpack: (config, { isServer }) => {
-    if (isServer) {
-      // Prevent webpack from trying to bundle the Prisma query engine binaries
-      config.externals = config.externals || [];
-      config.externals.push('@prisma/client');
-      config.externals.push('.prisma/client');
-    }
-    return config;
-  },
+  // NOTE: Do NOT add manual webpack externals for @prisma/client — that
+  // emits bare require() calls that fail under pnpm's strict node_modules.
+  // serverComponentsExternalPackages above handles it correctly.
 };
 
 export default nextConfig;

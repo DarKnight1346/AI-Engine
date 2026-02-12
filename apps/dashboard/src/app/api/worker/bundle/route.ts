@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readFile, stat } from 'fs/promises';
-import { join } from 'path';
+import { WORKER_BUNDLE } from '@ai-engine/shared';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,11 +12,9 @@ export const dynamic = 'force-dynamic';
  * The bundle is created during `pnpm build` via the bundle-worker script.
  */
 export async function GET(request: NextRequest) {
-  const bundlePath = join(process.cwd(), 'worker-bundle.tar.gz');
-
   try {
-    const fileStat = await stat(bundlePath);
-    const fileBuffer = await readFile(bundlePath);
+    const fileStat = await stat(WORKER_BUNDLE);
+    const fileBuffer = await readFile(WORKER_BUNDLE);
 
     return new NextResponse(fileBuffer, {
       status: 200,

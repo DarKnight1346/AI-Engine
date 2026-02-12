@@ -109,6 +109,85 @@ export default function SetupPage() {
   const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
   const [tunnelCopied, setTunnelCopied] = useState(false);
 
+  // -- Loading state for initial status check --
+  const [statusLoaded, setStatusLoaded] = useState(false);
+
+  // On mount, fetch the server-side setup status and auto-advance past
+  // already-completed steps.  This survives redeploys, restarts, and
+  // browser changes because it reads from the DB / tunnel manager —
+  // not localStorage.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/setup/status');
+        const s = await res.json();
+
+        // Populate tunnel state from server status
+        if (s.tunnelUrl) setTunnelUrl(s.tunnelUrl);
+        if (s.hasTunnel && s.tunnelUrl) {
+          setCfPermanentUrl(s.tunnelUrl);
+          setCfStatus('done');
+        }
+
+        // Determine the first incomplete step:
+        //  0 = Domain (optional, skip if tunnel configured OR previously skipped)
+        //  1 = Database
+        //  2 = Redis
+        //  3 = Initialize (DB migration)
+        //  4 = Admin Account
+        //  5 = Create Team (optional)
+        //  6 = API Keys (optional)
+        //  7 = Vault Passphrase
+        //  8 = Add Worker (optional)
+        //  9 = Done
+        let firstIncomplete = 0;
+
+        // Step 0: Domain — skip if named tunnel exists OR database is already configured
+        // (user may have skipped domain on purpose)
+        if (s.hasTunnel || s.hasDatabase) firstIncomplete = 1;
+
+        // Step 1: Database
+        if (firstIncomplete === 1 && s.hasDatabase) firstIncomplete = 2;
+
+        // Step 2: Redis
+        if (firstIncomplete === 2 && s.hasRedis) firstIncomplete = 3;
+
+        // Step 3: Initialize
+        if (firstIncomplete === 3 && s.isInitialized) firstIncomplete = 4;
+
+        // Mark connection tests as passing so the UI doesn't block "Next"
+        if (s.hasDatabase) { setPgStatus('success'); setPgMessage('Already configured'); }
+        if (s.hasRedis) { setRedisStatus('success'); setRedisMessage('Already configured'); }
+        if (s.isInitialized) { setInitStatus('done'); setInitMessage('Already initialized'); }
+
+        // Step 4: Admin account
+        if (firstIncomplete === 4 && s.hasAdmin) firstIncomplete = 5;
+
+        // Step 5: Team (optional — skip)
+        if (firstIncomplete === 5 && s.hasTeam) firstIncomplete = 6;
+
+        // Step 6: API Keys (optional — skip if exists)
+        if (firstIncomplete === 6 && s.hasApiKey) firstIncomplete = 7;
+
+        // Step 7: Vault Passphrase
+        if (firstIncomplete === 7 && s.hasPassphrase) firstIncomplete = 8;
+
+        // Step 8: Worker (optional — just skip to done)
+        // If everything is done, go straight to done step (or dashboard)
+        if (firstIncomplete >= 8 && s.hasAdmin && s.hasPassphrase) {
+          firstIncomplete = 9;
+        }
+
+        // Only advance forward, never backward from what localStorage had
+        setActiveStep((prev) => Math.max(prev, firstIncomplete));
+      } catch {
+        // If the status API fails, fall back to localStorage step (already set)
+      } finally {
+        setStatusLoaded(true);
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Persist wizard state
   useEffect(() => {
     localStorage.setItem('ai-engine-setup-step', String(activeStep));
@@ -116,8 +195,6 @@ export default function SetupPage() {
   }, [activeStep, formData]);
 
   // Poll tunnel status for the remote access banner.
-  // Poll tunnel status. If a named tunnel is detected, set permanent URL
-  // and mark Domain step as done (but don't auto-skip — let verifyDns run first).
   useEffect(() => {
     let verified = false;
     const poll = () => {
@@ -391,9 +468,10 @@ export default function SetupPage() {
 
   // ── Step actions: actually call APIs to create resources ──
 
-  /** Step 4 → Create Admin Account */
+  /** Step 4 → Create Admin Account (or login if already exists) */
   const createAdmin = async (): Promise<boolean> => {
-    const res = await fetch('/api/auth/register', {
+    // First try to register
+    const regRes = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -402,17 +480,38 @@ export default function SetupPage() {
         displayName: formData.displayName.trim(),
       }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to create admin account');
-    // Store the JWT so subsequent API calls are authenticated
-    if (data.token) {
-      localStorage.setItem('ai-engine-token', data.token);
-      localStorage.setItem('ai-engine-user', JSON.stringify(data.user));
-      // Set cookie so middleware can read it
-      document.cookie = `ai-engine-token=${data.token}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax`;
-      setAuthToken(data.token);
+    const regData = await regRes.json();
+
+    if (regRes.ok && regData.token) {
+      localStorage.setItem('ai-engine-token', regData.token);
+      localStorage.setItem('ai-engine-user', JSON.stringify(regData.user));
+      document.cookie = `ai-engine-token=${regData.token}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax`;
+      setAuthToken(regData.token);
+      return true;
     }
-    return true;
+
+    // If user already exists, try to login instead
+    if (regRes.status === 409) {
+      const loginRes = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: formData.email.trim(),
+          password: formData.password,
+        }),
+      });
+      const loginData = await loginRes.json();
+      if (!loginRes.ok) throw new Error(loginData.error || 'Admin already exists — login failed. Check password.');
+      if (loginData.token) {
+        localStorage.setItem('ai-engine-token', loginData.token);
+        localStorage.setItem('ai-engine-user', JSON.stringify(loginData.user));
+        document.cookie = `ai-engine-token=${loginData.token}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax`;
+        setAuthToken(loginData.token);
+      }
+      return true;
+    }
+
+    throw new Error(regData.error || 'Failed to create admin account');
   };
 
   /** Step 5 → Create Team */
@@ -564,6 +663,19 @@ export default function SetupPage() {
     if (status === 'error') return <ErrorIcon color="error" />;
     return null;
   };
+
+  // Show a centered spinner while the initial server status check is running,
+  // so the user doesn't see a flash of step 0 before auto-advancing.
+  if (!statusLoaded) {
+    return (
+      <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+        <CircularProgress size={40} />
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+          Checking setup status...
+        </Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'background.default', p: 2, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>

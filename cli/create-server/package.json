@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-engine/shared": "workspace:*",
     "prompts": "^2.4.0"
   },
   "devDependencies": {

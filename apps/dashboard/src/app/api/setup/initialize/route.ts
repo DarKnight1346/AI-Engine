@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { writeFile, readFile } from 'fs/promises';
 import { execSync } from 'child_process';
-import { join } from 'path';
+import { ENV_FILE, PRISMA_DIR, PROJECT_ROOT } from '@ai-engine/shared';
 
 /**
  * POST /api/setup/initialize
@@ -28,12 +28,9 @@ export async function POST(request: NextRequest) {
     }
 
     // --- 1. Update the .env file ---
-    const projectDir = process.cwd();
-    const envPath = join(projectDir, '.env');
-
     let envContent: string;
     try {
-      envContent = await readFile(envPath, 'utf8');
+      envContent = await readFile(ENV_FILE, 'utf8');
     } catch {
       envContent = '';
     }
@@ -42,16 +39,15 @@ export async function POST(request: NextRequest) {
     envContent = upsertEnvVar(envContent, 'DATABASE_URL', databaseUrl);
     envContent = upsertEnvVar(envContent, 'REDIS_URL', redisUrl);
 
-    await writeFile(envPath, envContent);
+    await writeFile(ENV_FILE, envContent);
 
     // --- 2. Push schema to database ---
-    const prismaDir = join(projectDir, 'packages', 'db');
     const prismaEnv = { ...process.env, DATABASE_URL: databaseUrl };
 
     try {
       // Generate the Prisma client with the new URL
       execSync('npx prisma generate', {
-        cwd: prismaDir,
+        cwd: PRISMA_DIR,
         env: prismaEnv,
         stdio: 'pipe',
         timeout: 30000,
@@ -62,7 +58,7 @@ export async function POST(request: NextRequest) {
       // shadow database (which needs CREATEDB permission). If migration
       // files exist in the future, "migrate deploy" is used as a fallback.
       execSync('npx prisma db push --skip-generate --accept-data-loss', {
-        cwd: prismaDir,
+        cwd: PRISMA_DIR,
         env: prismaEnv,
         stdio: 'pipe',
         timeout: 60000,
@@ -73,7 +69,7 @@ export async function POST(request: NextRequest) {
       // If db push fails, try migrate deploy (for repos with migration files)
       try {
         execSync('npx prisma migrate deploy', {
-          cwd: prismaDir,
+          cwd: PRISMA_DIR,
           env: prismaEnv,
           stdio: 'pipe',
           timeout: 60000,

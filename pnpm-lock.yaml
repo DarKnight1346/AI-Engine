@@ -71,6 +71,9 @@ importers:
       '@mui/material':
         specifier: ^6.4.0
         version: 6.5.0(@emotion/react@11.14.0(@types/react@18.3.28)(react@18.3.1))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@18.3.28)(react@18.3.1))(@types/react@18.3.28)(react@18.3.1))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@prisma/client':
+        specifier: ^6.3.0
+        version: 6.19.2(prisma@6.19.2(typescript@5.9.3))(typescript@5.9.3)
       ioredis:
         specifier: ^5.4.0
         version: 5.9.2
@@ -142,6 +145,9 @@ importers:
 
   cli/create-server:
     dependencies:
+      '@ai-engine/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       prompts:
         specifier: ^2.4.0
         version: 2.4.2

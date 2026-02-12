@@ -1,3 +1,5 @@
+export * from './paths.js';
+
 export const DEFAULT_CONFIG = {
   cluster: {
     heartbeatIntervalMs: 3000,

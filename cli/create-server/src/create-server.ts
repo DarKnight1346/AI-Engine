@@ -1,13 +1,12 @@
 import { randomBytes } from 'crypto';
 import { writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join, resolve } from 'path';
+import { join } from 'path';
+import { PROJECT_ROOT, ENV_FILE, DASHBOARD_DIR } from '@ai-engine/shared';
 import { registerDashboardService } from './service-installer.js';
 
 export async function createServer(): Promise<void> {
   console.log('\n🚀 AI Engine Server Setup\n');
-
-  const serverDir = resolve(process.cwd());
 
   // Parse optional --port flag
   const portIdx = process.argv.indexOf('--port');
@@ -16,7 +15,7 @@ export async function createServer(): Promise<void> {
     : 3000;
 
   // Check if the project has been built
-  const nextDir = join(serverDir, 'apps', 'dashboard', '.next');
+  const nextDir = join(DASHBOARD_DIR, '.next');
   if (!existsSync(nextDir)) {
     console.error('❌ The dashboard has not been built yet.');
     console.error('   Run the following commands first:\n');
@@ -28,7 +27,7 @@ export async function createServer(): Promise<void> {
   // Write a minimal .env ONLY if one doesn't exist yet.
   // If .env already exists (from a previous install or the setup wizard),
   // we preserve it and only ensure essential keys are present.
-  const envFilePath = join(serverDir, '.env');
+  const envFilePath = ENV_FILE;
 
   if (existsSync(envFilePath)) {
     // .env already exists — preserve it, only add missing keys
@@ -81,7 +80,7 @@ NODE_ENV="production"
 
   // Register as a system service (auto-start on boot, restart on crash)
   await registerDashboardService({
-    projectDir: serverDir,
+    projectDir: PROJECT_ROOT,
     envFilePath,
     port,
   });
