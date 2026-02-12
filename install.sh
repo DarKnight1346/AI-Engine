@@ -14,7 +14,7 @@
 #   --port <number>    Dashboard port (default: 3000)
 #   --dir  <path>      Install directory (default: /opt/ai-engine)
 # ─────────────────────────────────────────────────────────────────────────────
-set -e
+set -eo pipefail
 
 # ── Ensure we're running under bash ──────────────────────────────────────────
 # If someone runs "sh install.sh", re-exec under bash automatically.
@@ -218,19 +218,25 @@ info "Installing Node.js dependencies..."
 pnpm install 2>&1 | tail -1
 ok "Dependencies installed"
 
-# ── 7. Build all packages ───────────────────────────────────────────────────
+# ── 7. Generate Prisma client ────────────────────────────────────────────────
+
+info "Generating Prisma client..."
+pnpm --filter @ai-engine/db exec prisma generate 2>&1 | tail -1
+ok "Prisma client generated"
+
+# ── 8. Build all packages ───────────────────────────────────────────────────
 
 info "Building all packages (this may take a minute)..."
 pnpm build 2>&1 | tail -3
 ok "Build complete"
 
-# ── 8. Bundle the worker (so the dashboard can serve it to workers) ─────────
+# ── 9. Bundle the worker (so the dashboard can serve it to workers) ─────────
 
 info "Creating worker bundle..."
 npx tsx scripts/bundle-worker.ts 2>&1 | tail -1
 ok "Worker bundle created"
 
-# ── 9. Launch the dashboard setup ────────────────────────────────────────────
+# ── 10. Launch the dashboard setup ───────────────────────────────────────────
 
 info "Starting the dashboard..."
 echo ""
