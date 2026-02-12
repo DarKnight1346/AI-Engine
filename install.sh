@@ -233,7 +233,7 @@ ok "Build complete"
 # ── 9. Bundle the worker (so the dashboard can serve it to workers) ─────────
 
 info "Creating worker bundle..."
-npx tsx scripts/bundle-worker.ts 2>&1 | tail -1
+npx --yes tsx scripts/bundle-worker.ts 2>&1 | tail -1
 ok "Worker bundle created"
 
 # ── 10. Launch the dashboard setup ───────────────────────────────────────────
@@ -241,4 +241,4 @@ ok "Worker bundle created"
 info "Starting the dashboard..."
 echo ""
 
-npx tsx cli/create-server/src/index.ts --port "$DASHBOARD_PORT"
+npx --yes tsx cli/create-server/src/index.ts --port "$DASHBOARD_PORT"
