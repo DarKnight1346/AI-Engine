@@ -100,6 +100,7 @@ export default function SetupPage() {
   const [cfStatus, setCfStatus] = useState<'idle' | 'fetching_zones' | 'zones_loaded' | 'configuring' | 'done' | 'error'>('idle');
   const [cfMessage, setCfMessage] = useState('');
   const [cfPermanentUrl, setCfPermanentUrl] = useState<string | null>(null);
+  const [cfDnsStatus, setCfDnsStatus] = useState<'idle' | 'checking' | 'ok' | 'error'>('idle');
 
   // -- Worker install command --
   const [copied, setCopied] = useState(false);
@@ -115,20 +116,19 @@ export default function SetupPage() {
   }, [activeStep, formData]);
 
   // Poll tunnel status for the remote access banner.
-  // If a named tunnel is already configured, skip the Domain step.
+  // Poll tunnel status. If a named tunnel is detected, set permanent URL
+  // and mark Domain step as done (but don't auto-skip — let verifyDns run first).
   useEffect(() => {
-    let skipped = false;
+    let verified = false;
     const poll = () => {
       fetch('/api/tunnel/status')
         .then((r) => r.json())
         .then((d) => {
           if (d.url) setTunnelUrl(d.url);
-          if (d.mode === 'named' && d.url && !skipped) {
-            skipped = true;
+          if (d.mode === 'named' && d.url && !verified) {
+            verified = true;
             setCfPermanentUrl(d.url);
             setCfStatus('done');
-            // If user is still on Domain step, advance past it
-            setActiveStep((prev) => (prev === 0 ? 1 : prev));
           }
         })
         .catch(() => {});
@@ -137,6 +137,38 @@ export default function SetupPage() {
     const interval = setInterval(poll, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // Auto-verify DNS when a named tunnel is already configured
+  useEffect(() => {
+    if (cfPermanentUrl && activeStep === 0 && cfDnsStatus === 'idle') {
+      setCfDnsStatus('checking');
+      fetch(cfPermanentUrl + '/api/health', { mode: 'no-cors' })
+        .then(() => {
+          // If reachable, DNS is fine — auto-advance
+          setCfDnsStatus('ok');
+          setTimeout(() => setActiveStep(1), 1000);
+        })
+        .catch(() => {
+          // Not reachable — trigger server-side DNS fix via configure endpoint
+          // We don't have the API token in the frontend, but the server has it in .env
+          fetch('/api/tunnel/configure', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ apiToken: '_stored_', accountId: '_stored_', zoneId: '_stored_', hostname: '_stored_' }),
+          })
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.success) {
+                setCfDnsStatus('ok');
+                setTimeout(() => setActiveStep(1), 2000);
+              } else {
+                setCfDnsStatus('error');
+              }
+            })
+            .catch(() => setCfDnsStatus('error'));
+        });
+    }
+  }, [cfPermanentUrl, activeStep, cfDnsStatus]);
 
   const updateField = (field: keyof FormData, value: string) =>
     setFormData((prev) => ({ ...prev, [field]: value }));
