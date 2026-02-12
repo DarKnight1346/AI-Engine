@@ -138,35 +138,21 @@ export default function SetupPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-verify DNS when a named tunnel is already configured
+  // Auto-verify/fix DNS when a named tunnel is already configured
   useEffect(() => {
     if (cfPermanentUrl && activeStep === 0 && cfDnsStatus === 'idle') {
       setCfDnsStatus('checking');
-      fetch(cfPermanentUrl + '/api/health', { mode: 'no-cors' })
-        .then(() => {
-          // If reachable, DNS is fine — auto-advance
-          setCfDnsStatus('ok');
-          setTimeout(() => setActiveStep(1), 1000);
+      fetch('/api/tunnel/verify-dns', { method: 'POST' })
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.success) {
+            setCfDnsStatus('ok');
+            setTimeout(() => setActiveStep(1), 1500);
+          } else {
+            setCfDnsStatus('error');
+          }
         })
-        .catch(() => {
-          // Not reachable — trigger server-side DNS fix via configure endpoint
-          // We don't have the API token in the frontend, but the server has it in .env
-          fetch('/api/tunnel/configure', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ apiToken: '_stored_', accountId: '_stored_', zoneId: '_stored_', hostname: '_stored_' }),
-          })
-            .then((r) => r.json())
-            .then((d) => {
-              if (d.success) {
-                setCfDnsStatus('ok');
-                setTimeout(() => setActiveStep(1), 2000);
-              } else {
-                setCfDnsStatus('error');
-              }
-            })
-            .catch(() => setCfDnsStatus('error'));
-        });
+        .catch(() => setCfDnsStatus('error'));
     }
   }, [cfPermanentUrl, activeStep, cfDnsStatus]);
 
@@ -602,9 +588,6 @@ export default function SetupPage() {
 
               {cfPermanentUrl && (
                 <>
-                  <Alert severity="success">
-                    Permanent domain configured! Your dashboard is now available at:
-                  </Alert>
                   <Paper variant="outlined" sx={{ p: 2, bgcolor: 'action.hover', display: 'flex', alignItems: 'center', gap: 1.5 }}>
                     <LanguageIcon color="success" sx={{ fontSize: 20 }} />
                     <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -618,9 +601,28 @@ export default function SetupPage() {
                       </IconButton>
                     </Tooltip>
                   </Paper>
-                  <Alert severity="info" variant="outlined">
-                    Bookmark the URL above. You can continue setup here or open the permanent URL — your progress is saved.
-                  </Alert>
+
+                  {cfDnsStatus === 'checking' && (
+                    <Stack spacing={1}>
+                      <LinearProgress />
+                      <Typography variant="body2" color="text.secondary">Verifying DNS record...</Typography>
+                    </Stack>
+                  )}
+                  {cfDnsStatus === 'ok' && (
+                    <Alert severity="success">
+                      Domain verified and ready! Advancing to next step...
+                    </Alert>
+                  )}
+                  {cfDnsStatus === 'error' && (
+                    <Alert severity="warning">
+                      Could not auto-verify DNS. You can continue setup — the DNS may need a moment to propagate.
+                    </Alert>
+                  )}
+                  {cfDnsStatus === 'idle' && (
+                    <Alert severity="info" variant="outlined">
+                      Bookmark the URL above. You can continue setup here or open the permanent URL — your progress is saved.
+                    </Alert>
+                  )}
                 </>
               )}
             </Stack>
