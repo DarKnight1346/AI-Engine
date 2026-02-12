@@ -176,7 +176,32 @@ ok "git $(git --version | awk '{print $3}') available"
 if [[ -f "$INSTALL_DIR/package.json" ]] && grep -q '"ai-engine"' "$INSTALL_DIR/package.json" 2>/dev/null; then
   info "Existing installation found at $INSTALL_DIR — pulling latest..."
   cd "$INSTALL_DIR"
-  git pull --ff-only 2>/dev/null || warn "git pull failed — continuing with existing code"
+
+  # Determine the remote and branch to pull from
+  GIT_REMOTE="origin"
+  GIT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")"
+
+  # Stash any local changes (e.g. generated files not in .gitignore)
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    info "Stashing local changes before pull..."
+    git stash --include-untracked -q 2>/dev/null || true
+  fi
+
+  # Fetch first, then try fast-forward merge; fall back to hard reset if diverged
+  if git fetch "$GIT_REMOTE" "$GIT_BRANCH" 2>&1; then
+    if git merge --ff-only "$GIT_REMOTE/$GIT_BRANCH" 2>&1; then
+      ok "Updated to latest from $GIT_REMOTE/$GIT_BRANCH"
+    else
+      warn "Fast-forward merge not possible — resetting to remote (local commits will be lost)"
+      git reset --hard "$GIT_REMOTE/$GIT_BRANCH" 2>&1
+      ok "Reset to $GIT_REMOTE/$GIT_BRANCH"
+    fi
+  else
+    warn "git fetch failed — continuing with existing code"
+  fi
+
+  # Restore stashed changes (best-effort)
+  git stash pop -q 2>/dev/null || true
 else
   # If we're running from inside the repo already, use that
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
