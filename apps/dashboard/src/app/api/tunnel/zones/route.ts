@@ -19,20 +19,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'apiToken is required' }, { status: 400 });
     }
 
-    // Build URL — scope to account if provided
-    const url = accountId
-      ? `https://api.cloudflare.com/client/v4/zones?account.id=${accountId}&per_page=50&status=active`
-      : `https://api.cloudflare.com/client/v4/zones?per_page=50&status=active`;
-
-    const res = await fetch(url, {
+    // List all zones the token can see — no account filter needed.
+    const res = await fetch('https://api.cloudflare.com/client/v4/zones?per_page=50', {
       headers: { Authorization: `Bearer ${apiToken}` },
     });
 
     const data = await res.json() as any;
 
     if (!data.success) {
+      const msg = data.errors?.[0]?.message ?? 'Failed to fetch zones';
       return NextResponse.json(
-        { error: data.errors?.[0]?.message ?? 'Failed to fetch zones' },
+        { error: `Cloudflare API error: ${msg}` },
         { status: 400 },
       );
     }
@@ -41,6 +38,8 @@ export async function POST(request: NextRequest) {
       id: z.id,
       name: z.name,
       status: z.status,
+      accountId: z.account?.id,
+      accountName: z.account?.name,
     }));
 
     return NextResponse.json({ zones });
