@@ -16,6 +16,8 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
 import { ensureCloudflared } from './cloudflared';
 
 // ---------------------------------------------------------------------------
@@ -86,30 +88,30 @@ class TunnelManager {
       const cloudflaredPath = await ensureCloudflared();
       const port = process.env.DASHBOARD_PORT ?? process.env.PORT ?? '3000';
 
-      // Check DB for a persisted named tunnel token
-      let tunnelToken: string | null = null;
+      // Check DB for a persisted named tunnel config
+      let tunnelConfigPath: string | null = null;
       let tunnelHostname: string | null = null;
       let tunnelId: string | null = null;
       try {
         const { getDb } = await import('@ai-engine/db');
         const db = getDb();
-        const tokenRow = await db.config.findUnique({ where: { key: 'tunnel.token' } });
+        const configRow = await db.config.findUnique({ where: { key: 'tunnel.config_path' } });
         const hostRow = await db.config.findUnique({ where: { key: 'tunnel.hostname' } });
         const idRow = await db.config.findUnique({ where: { key: 'tunnel.tunnel_id' } });
-        if (tokenRow) tunnelToken = tokenRow.valueJson as string;
+        if (configRow) tunnelConfigPath = configRow.valueJson as string;
         if (hostRow) tunnelHostname = hostRow.valueJson as string;
         if (idRow) tunnelId = idRow.valueJson as string;
       } catch {
         // DB not ready yet (first-run / setup wizard)
       }
 
-      if (tunnelToken) {
+      if (tunnelConfigPath) {
         this.state.mode = 'named';
         this.state.hostname = tunnelHostname;
         this.state.tunnelId = tunnelId;
         this.state.url = tunnelHostname ? `https://${tunnelHostname}` : null;
         this.spawnProcess(cloudflaredPath, [
-          'tunnel', 'run', '--token', tunnelToken,
+          'tunnel', '--config', tunnelConfigPath, 'run',
         ]);
       } else {
         this.state.mode = 'quick';
@@ -151,6 +153,10 @@ class TunnelManager {
       const port = process.env.DASHBOARD_PORT ?? process.env.PORT ?? '3000';
       const crypto = await import('crypto');
 
+      // Config directory for cloudflared credentials + config
+      const cfDir = join(process.env.HOME ?? '/root', '.ai-engine', 'cloudflared');
+      mkdirSync(cfDir, { recursive: true });
+
       // --- 1. Create the tunnel via Cloudflare API ---
       const tunnelSecret = crypto.randomBytes(32).toString('base64');
       const createRes = await fetch(
@@ -173,30 +179,29 @@ class TunnelManager {
         return { success: false, error: msg };
       }
       const tunnelId: string = createData.result.id;
+      console.log(`[tunnel] Created tunnel ${tunnelId}`);
 
-      // --- 2. Configure ingress ---
-      const configRes = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/tunnels/${tunnelId}/configurations`,
-        {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${opts.apiToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            config: {
-              ingress: [
-                { hostname: opts.hostname, service: `http://localhost:${port}` },
-                { service: 'http_status:404' },
-              ],
-            },
-          }),
-        },
-      );
-      const configData = await configRes.json() as any;
-      if (!configData.success) {
-        return { success: false, error: configData.errors?.[0]?.message ?? 'Failed to configure tunnel ingress' };
-      }
+      // --- 2. Write credentials file + config.yml locally ---
+      // This avoids the PUT /configurations API which doesn't support API tokens.
+      const credentials = {
+        AccountTag: opts.accountId,
+        TunnelSecret: tunnelSecret,
+        TunnelID: tunnelId,
+      };
+      const credPath = join(cfDir, `${tunnelId}.json`);
+      writeFileSync(credPath, JSON.stringify(credentials, null, 2), 'utf-8');
+
+      const configYaml = [
+        `tunnel: ${tunnelId}`,
+        `credentials-file: ${credPath}`,
+        `ingress:`,
+        `  - hostname: ${opts.hostname}`,
+        `    service: http://localhost:${port}`,
+        `  - service: http_status:404`,
+      ].join('\n');
+      const configPath = join(cfDir, 'config.yml');
+      writeFileSync(configPath, configYaml, 'utf-8');
+      console.log(`[tunnel] Wrote config to ${configPath}`);
 
       // --- 3. Create DNS CNAME record ---
       const dnsRes = await fetch(
@@ -221,20 +226,13 @@ class TunnelManager {
         console.warn('[tunnel] DNS record creation note:', dnsData.errors?.[0]?.message);
       }
 
-      // --- 4. Build cloudflared run token ---
-      const credentials = {
-        AccountTag: opts.accountId,
-        TunnelSecret: tunnelSecret,
-        TunnelID: tunnelId,
-      };
-      const tunnelToken = Buffer.from(JSON.stringify(credentials)).toString('base64');
-
-      // --- 5. Persist to DB ---
+      // --- 4. Persist to DB ---
       const { getDb } = await import('@ai-engine/db');
       const db = getDb();
       const entries = [
         { key: 'tunnel.mode', value: 'named' },
-        { key: 'tunnel.token', value: tunnelToken },
+        { key: 'tunnel.config_path', value: configPath },
+        { key: 'tunnel.cred_path', value: credPath },
         { key: 'tunnel.hostname', value: opts.hostname },
         { key: 'tunnel.tunnel_id', value: tunnelId },
         { key: 'tunnel.account_id', value: opts.accountId },
@@ -248,7 +246,7 @@ class TunnelManager {
         });
       }
 
-      // --- 6. Switch to named tunnel ---
+      // --- 5. Switch to named tunnel ---
       await this.restart();
 
       return { success: true, url: `https://${opts.hostname}` };
@@ -265,8 +263,9 @@ class TunnelManager {
       const { getDb } = await import('@ai-engine/db');
       const db = getDb();
       const keys = [
-        'tunnel.mode', 'tunnel.token', 'tunnel.hostname',
-        'tunnel.tunnel_id', 'tunnel.account_id', 'tunnel.zone_id',
+        'tunnel.mode', 'tunnel.config_path', 'tunnel.cred_path',
+        'tunnel.hostname', 'tunnel.tunnel_id', 'tunnel.account_id',
+        'tunnel.zone_id',
       ];
       for (const key of keys) {
         await db.config.delete({ where: { key } }).catch(() => {});
