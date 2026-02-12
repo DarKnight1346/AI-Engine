@@ -11,6 +11,7 @@
 
 const { createServer } = require('http');
 const { parse } = require('url');
+const path = require('path');
 const next = require('next');
 const { WebSocketServer } = require('ws');
 
@@ -18,7 +19,9 @@ const dev = process.env.NODE_ENV !== 'production';
 const port = parseInt(process.env.DASHBOARD_PORT || process.env.PORT || '3000', 10);
 const hostname = '0.0.0.0';
 
-const app = next({ dev, hostname, port });
+// Tell Next.js where the app lives — the CWD may be the monorepo root
+// (e.g. /opt/ai-engine) while the Next.js app is in apps/dashboard/.
+const app = next({ dev, hostname, port, dir: __dirname });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
