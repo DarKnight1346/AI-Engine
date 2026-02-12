@@ -53,6 +53,9 @@ importers:
       '@ai-engine/workflow-engine':
         specifier: workspace:*
         version: link:../../packages/workflow-engine
+      '@anthropic-ai/sdk':
+        specifier: ^0.39.0
+        version: 0.39.0
       '@emotion/cache':
         specifier: ^11.13.0
         version: 11.14.0

@@ -1,15 +1,40 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import {
   AppBar, Toolbar, Typography, IconButton, Badge, Avatar, Box, useMediaQuery, useTheme,
+  Menu, MenuItem, ListItemIcon, Divider,
 } from '@mui/material';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import SearchIcon from '@mui/icons-material/Search';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import LogoutIcon from '@mui/icons-material/Logout';
+import PersonIcon from '@mui/icons-material/Person';
 
 export default function TopBar() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [userName, setUserName] = useState('A');
+  const [userEmail, setUserEmail] = useState('');
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('ai-engine-user');
+      if (stored) {
+        const user = JSON.parse(stored);
+        setUserName(user.displayName?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase() || 'A');
+        setUserEmail(user.email || '');
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleSignOut = () => {
+    localStorage.removeItem('ai-engine-token');
+    localStorage.removeItem('ai-engine-user');
+    document.cookie = 'ai-engine-token=; path=/; max-age=0';
+    window.location.href = '/login';
+  };
 
   return (
     <AppBar
@@ -33,14 +58,37 @@ export default function TopBar() {
         </IconButton>
 
         <IconButton size="large" aria-label="notifications">
-          <Badge badgeContent={3} color="error">
+          <Badge badgeContent={0} color="error">
             <NotificationsIcon />
           </Badge>
         </IconButton>
 
-        <Avatar sx={{ width: 32, height: 32, bgcolor: 'primary.main', cursor: 'pointer' }}>
-          A
+        <Avatar
+          sx={{ width: 32, height: 32, bgcolor: 'primary.main', cursor: 'pointer', fontSize: 14 }}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
+        >
+          {userName}
         </Avatar>
+
+        <Menu
+          anchorEl={anchorEl}
+          open={Boolean(anchorEl)}
+          onClose={() => setAnchorEl(null)}
+          transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+          anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+        >
+          {userEmail && (
+            <MenuItem disabled>
+              <ListItemIcon><PersonIcon fontSize="small" /></ListItemIcon>
+              <Typography variant="body2">{userEmail}</Typography>
+            </MenuItem>
+          )}
+          {userEmail && <Divider />}
+          <MenuItem onClick={handleSignOut}>
+            <ListItemIcon><LogoutIcon fontSize="small" /></ListItemIcon>
+            Sign Out
+          </MenuItem>
+        </Menu>
       </Toolbar>
     </AppBar>
   );

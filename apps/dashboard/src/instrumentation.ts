@@ -11,15 +11,6 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    // Ensure Prisma Client is loadable — this also hints Next.js's
-    // output-file-tracing to include the engine binary in standalone builds.
-    try {
-      await import('@prisma/client');
-    } catch {
-      // Will fail during build — that's fine, the engine just needs
-      // to be present at runtime.
-    }
-
     // When running under the custom server.js, the tunnel is already
     // started.  Check the global flag to avoid a double-start.
     if ((globalThis as any).__tunnelStarted) return;

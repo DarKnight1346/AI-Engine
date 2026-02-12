@@ -11,6 +11,13 @@ const nextConfig = {
   reactStrictMode: true,
   experimental: {
     instrumentationHook: true,
+    // Tell Next.js server-side bundler to leave Prisma alone — it relies on
+    // native binary engine files (.so.node / .dylib.node) that cannot be
+    // inlined into a JS bundle.
+    serverComponentsExternalPackages: ['@prisma/client', '.prisma/client'],
+    // Point Next.js at the monorepo root so standalone output tracing can
+    // find engine binaries in hoisted node_modules.
+    outputFileTracingRoot: resolve(__dirname, '../../'),
   },
   transpilePackages: [
     '@ai-engine/shared',
@@ -25,10 +32,6 @@ const nextConfig = {
     '@ai-engine/vault',
     '@ai-engine/planner',
   ],
-  // Tell Next.js server-side bundler to leave Prisma alone — it relies on
-  // native binary engine files (.so.node / .dylib.node) that cannot be
-  // inlined into a JS bundle.
-  serverExternalPackages: ['@prisma/client', '.prisma/client'],
   webpack: (config, { isServer }) => {
     if (isServer) {
       // Prevent webpack from trying to bundle the Prisma query engine binaries
@@ -38,9 +41,6 @@ const nextConfig = {
     }
     return config;
   },
-  // Point Next.js at the generated Prisma client location so the standalone
-  // build copies the engine binaries into .next/standalone.
-  outputFileTracingRoot: resolve(__dirname, '../../'),
 };
 
 export default nextConfig;

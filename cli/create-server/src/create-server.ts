@@ -25,13 +25,46 @@ export async function createServer(): Promise<void> {
     process.exit(1);
   }
 
-  // Generate instance secret
-  const instanceSecret = randomBytes(32).toString('hex');
-
-  // Write a minimal .env — database and Redis are configured through the
-  // web-based setup wizard at /setup, not here in the CLI.
+  // Write a minimal .env ONLY if one doesn't exist yet.
+  // If .env already exists (from a previous install or the setup wizard),
+  // we preserve it and only ensure essential keys are present.
   const envFilePath = join(serverDir, '.env');
-  const envContent = `# AI Engine Server Configuration
+
+  if (existsSync(envFilePath)) {
+    // .env already exists — preserve it, only add missing keys
+    const { readFile } = await import('fs/promises');
+    let existing = await readFile(envFilePath, 'utf-8');
+    let changed = false;
+
+    // Ensure INSTANCE_SECRET exists (don't regenerate if already set)
+    if (!existing.match(/^INSTANCE_SECRET=/m)) {
+      const instanceSecret = randomBytes(32).toString('hex');
+      existing = existing.trimEnd() + `\nINSTANCE_SECRET="${instanceSecret}"\n`;
+      changed = true;
+    }
+
+    // Ensure DASHBOARD_PORT exists
+    if (!existing.match(/^DASHBOARD_PORT=/m)) {
+      existing = existing.trimEnd() + `\nDASHBOARD_PORT=${port}\n`;
+      changed = true;
+    }
+
+    // Ensure NODE_ENV exists
+    if (!existing.match(/^NODE_ENV=/m)) {
+      existing = existing.trimEnd() + `\nNODE_ENV="production"\n`;
+      changed = true;
+    }
+
+    if (changed) {
+      await writeFile(envFilePath, existing);
+      console.log('✅ Updated .env (preserved existing configuration)');
+    } else {
+      console.log('✅ Existing .env found — configuration preserved');
+    }
+  } else {
+    // Fresh install — create a new .env
+    const instanceSecret = randomBytes(32).toString('hex');
+    const envContent = `# AI Engine Server Configuration
 # Generated on ${new Date().toISOString()}
 #
 # Database and Redis will be configured through the setup wizard.
@@ -42,9 +75,9 @@ INSTANCE_SECRET="${instanceSecret}"
 DASHBOARD_PORT=${port}
 NODE_ENV="production"
 `;
-
-  await writeFile(envFilePath, envContent);
-  console.log('✅ Generated .env with instance secret');
+    await writeFile(envFilePath, envContent);
+    console.log('✅ Generated .env with instance secret');
+  }
 
   // Register as a system service (auto-start on boot, restart on crash)
   await registerDashboardService({

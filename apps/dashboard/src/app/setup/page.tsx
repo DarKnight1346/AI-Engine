@@ -380,36 +380,177 @@ export default function SetupPage() {
     setInitMessage('Server did not come back. Please refresh the page.');
   };
 
+  // ── Step action state ──
+  const [stepBusy, setStepBusy] = useState(false);
+  const [stepError, setStepError] = useState<string | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') return localStorage.getItem('ai-engine-token');
+    return null;
+  });
+  const [workerToken, setWorkerToken] = useState<string | null>(null);
+
+  // ── Step actions: actually call APIs to create resources ──
+
+  /** Step 4 → Create Admin Account */
+  const createAdmin = async (): Promise<boolean> => {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: formData.email.trim(),
+        password: formData.password,
+        displayName: formData.displayName.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to create admin account');
+    // Store the JWT so subsequent API calls are authenticated
+    if (data.token) {
+      localStorage.setItem('ai-engine-token', data.token);
+      localStorage.setItem('ai-engine-user', JSON.stringify(data.user));
+      // Set cookie so middleware can read it
+      document.cookie = `ai-engine-token=${data.token}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax`;
+      setAuthToken(data.token);
+    }
+    return true;
+  };
+
+  /** Step 5 → Create Team */
+  const createTeam = async (): Promise<boolean> => {
+    if (!formData.teamName.trim()) return true; // Skip if empty
+    const res = await fetch('/api/team', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify({ name: formData.teamName.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to create team');
+    return true;
+  };
+
+  /** Step 6 → Save API Key */
+  const saveApiKey = async (): Promise<boolean> => {
+    if (!formData.apiKey.trim()) return true; // Skip if empty
+    const res = await fetch('/api/settings/api-keys', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify({ label: 'Primary', key: formData.apiKey.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save API key');
+    return true;
+  };
+
+  /** Step 7 → Save Vault Passphrase */
+  const savePassphrase = async (): Promise<boolean> => {
+    const res = await fetch('/api/settings/vault-passphrase', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify({
+        currentPassphrase: '', // No existing passphrase during setup
+        newPassphrase: formData.passphrase,
+        isInitialSetup: true,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save vault passphrase');
+    return true;
+  };
+
+  /** Step 8 → Generate a real worker join token */
+  const generateWorkerToken = async (): Promise<void> => {
+    if (workerToken) return; // Already generated
+    try {
+      const res = await fetch('/api/cluster/join', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({ generateToken: true }),
+      });
+      const data = await res.json();
+      if (data.token) setWorkerToken(data.token);
+    } catch {
+      // Non-critical — user can generate later from Workers page
+    }
+  };
+
   // ── Helpers ──
   const isNextDisabled = () => {
-    if (activeStep === 0) return false; // Domain step always allows skip/next
+    if (stepBusy) return true;
+    if (activeStep === 0) return false;
     if (activeStep === 1) return pgStatus !== 'success';
     if (activeStep === 2) return redisStatus !== 'success';
     if (activeStep === 3) return initStatus !== 'done';
-    if (activeStep === 4) return !formData.email || !formData.password || !formData.displayName;
-    if (activeStep === 7) return !formData.passphrase;
+    if (activeStep === 4) return !formData.email || !formData.password || formData.password.length < 8 || !formData.displayName;
+    if (activeStep === 7) return !formData.passphrase || formData.passphrase.length < 8;
     return false;
   };
 
   const getNextLabel = () => {
+    if (stepBusy) return 'Saving...';
     if (activeStep === steps.length - 1) return 'Go to Dashboard';
     if (activeStep === 0) return cfPermanentUrl ? 'Next' : 'Skip (use temporary URL)';
-    if (activeStep === 5) return 'Skip / Next';
+    if (activeStep === 5) return formData.teamName.trim() ? 'Create Team & Continue' : 'Skip';
+    if (activeStep === 6) return formData.apiKey.trim() ? 'Validate & Save Key' : 'Skip';
+    if (activeStep === 4) return 'Create Account';
+    if (activeStep === 7) return 'Set Passphrase';
     return 'Next';
   };
 
-  const handleNextClick = () => {
+  const handleNextClick = async () => {
+    setStepError(null);
+
+    // Final step → go to dashboard
     if (activeStep === steps.length - 1) {
       localStorage.removeItem('ai-engine-setup-step');
       localStorage.removeItem('ai-engine-setup-form');
-      window.location.href = '/';
+      window.location.href = '/login';
       return;
     }
-    handleNext();
+
+    // Steps that require API calls
+    try {
+      setStepBusy(true);
+
+      if (activeStep === 4) {
+        await createAdmin();
+      } else if (activeStep === 5) {
+        await createTeam();
+      } else if (activeStep === 6) {
+        await saveApiKey();
+      } else if (activeStep === 7) {
+        await savePassphrase();
+      }
+
+      // Advance to next step
+      handleNext();
+
+      // If we just advanced to the Worker step, generate a token
+      if (activeStep === 7) {
+        // activeStep is still 7 here; after handleNext it becomes 8
+        setTimeout(() => generateWorkerToken(), 100);
+      }
+    } catch (err: any) {
+      setStepError(err.message);
+    } finally {
+      setStepBusy(false);
+    }
   };
 
   const serverUrl = tunnelUrl || (typeof window !== 'undefined' ? window.location.origin : 'https://your-domain.com');
-  const installCommand = `curl -sSL "${serverUrl}/api/worker/install-script?token=REPLACE_WITH_TOKEN" | bash`;
+  const actualToken = workerToken || 'GENERATING...';
+  const installCommand = `curl -sSL "${serverUrl}/api/worker/install-script?token=${actualToken}" | bash`;
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -818,9 +959,14 @@ export default function SetupPage() {
           {activeStep === 4 && (
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Create Admin Account</Typography>
+              <Typography variant="body2" color="text.secondary">
+                This account will have full administrative access.
+              </Typography>
               <TextField label="Display Name" fullWidth value={formData.displayName} onChange={(e) => updateField('displayName', e.target.value)} />
               <TextField label="Email" fullWidth type="email" value={formData.email} onChange={(e) => updateField('email', e.target.value)} />
-              <TextField label="Password" fullWidth type="password" value={formData.password} onChange={(e) => updateField('password', e.target.value)} />
+              <TextField label="Password" fullWidth type="password" value={formData.password} onChange={(e) => updateField('password', e.target.value)} helperText="Minimum 8 characters" />
+              {stepError && <Alert severity="error">{stepError}</Alert>}
+              {stepBusy && <LinearProgress />}
             </Stack>
           )}
 
@@ -830,16 +976,20 @@ export default function SetupPage() {
               <Typography variant="h6" fontWeight={600}>Create Your First Team</Typography>
               <Typography variant="body2" color="text.secondary">Optional. You can skip this and create teams later.</Typography>
               <TextField label="Team Name" fullWidth value={formData.teamName} onChange={(e) => updateField('teamName', e.target.value)} placeholder="e.g., Engineering, Personal" />
+              {stepError && <Alert severity="error">{stepError}</Alert>}
+              {stepBusy && <LinearProgress />}
             </Stack>
           )}
 
           {/* ── Step 6: API Keys ──────────────────────────────── */}
           {activeStep === 6 && (
             <Stack spacing={2}>
-              <Typography variant="h6" fontWeight={600}>Add Claude API Keys</Typography>
-              <Typography variant="body2" color="text.secondary">Add one or more Claude API keys. More keys = better load distribution.</Typography>
-              <TextField label="Claude API Key" fullWidth value={formData.apiKey} onChange={(e) => updateField('apiKey', e.target.value)} placeholder="sk-ant-..." />
-              <Alert severity="info">Each key is validated with a test call before saving.</Alert>
+              <Typography variant="h6" fontWeight={600}>Add Claude API Key</Typography>
+              <Typography variant="body2" color="text.secondary">Add a Claude API key. You can add more from Settings later.</Typography>
+              <TextField label="Claude API Key" fullWidth value={formData.apiKey} onChange={(e) => updateField('apiKey', e.target.value)} placeholder="sk-ant-..." type="password" inputProps={{ spellCheck: false }} />
+              <Alert severity="info" variant="outlined">The key will be validated with a test call before saving. You can skip this step and add keys later.</Alert>
+              {stepError && <Alert severity="error">{stepError}</Alert>}
+              {stepBusy && <LinearProgress />}
             </Stack>
           )}
 
@@ -848,7 +998,9 @@ export default function SetupPage() {
             <Stack spacing={2}>
               <Typography variant="h6" fontWeight={600}>Vault Passphrase</Typography>
               <Typography variant="body2" color="text.secondary">This encrypts all stored credentials. Keep it safe — it cannot be recovered.</Typography>
-              <TextField label="Passphrase" fullWidth type="password" value={formData.passphrase} onChange={(e) => updateField('passphrase', e.target.value)} />
+              <TextField label="Passphrase" fullWidth type="password" value={formData.passphrase} onChange={(e) => updateField('passphrase', e.target.value)} helperText="Minimum 8 characters" />
+              {stepError && <Alert severity="error">{stepError}</Alert>}
+              {stepBusy && <LinearProgress />}
             </Stack>
           )}
 
@@ -861,21 +1013,29 @@ export default function SetupPage() {
                 The worker downloads everything it needs from this dashboard and connects via WebSocket — no git repository, database, or Redis access required on the worker.
               </Typography>
 
-              <Paper sx={{ p: 2, bgcolor: 'grey.900', color: 'grey.100', borderRadius: 2, fontFamily: 'monospace', fontSize: 13, wordBreak: 'break-all', position: 'relative' }}>
-                {installCommand}
-                <Tooltip title={copied ? 'Copied!' : 'Copy to clipboard'}>
-                  <IconButton
-                    size="small"
-                    onClick={() => copyToClipboard(installCommand)}
-                    sx={{ position: 'absolute', top: 4, right: 4, color: 'grey.400' }}
-                  >
-                    <ContentCopyIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              </Paper>
+              {!workerToken && (
+                <Stack spacing={1} alignItems="center">
+                  <CircularProgress size={20} />
+                  <Typography variant="body2" color="text.secondary">Generating join token...</Typography>
+                </Stack>
+              )}
+
+              {workerToken && (
+                <Paper sx={{ p: 2, bgcolor: 'grey.900', color: 'grey.100', borderRadius: 2, fontFamily: 'monospace', fontSize: 13, wordBreak: 'break-all', position: 'relative' }}>
+                  {installCommand}
+                  <Tooltip title={copied ? 'Copied!' : 'Copy to clipboard'}>
+                    <IconButton
+                      size="small"
+                      onClick={() => copyToClipboard(installCommand)}
+                      sx={{ position: 'absolute', top: 4, right: 4, color: 'grey.400' }}
+                    >
+                      <ContentCopyIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Paper>
+              )}
 
               <Alert severity="info" variant="outlined">
-                Replace <code>REPLACE_WITH_TOKEN</code> with a join token generated from the Workers page after setup.
                 The install script will:
                 <Box component="ol" sx={{ m: 0, pl: 2.5, mt: 0.5 }}>
                   <li>Install Node.js and pnpm if needed</li>
@@ -887,10 +1047,9 @@ export default function SetupPage() {
                 </Box>
               </Alert>
 
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
-                <CircularProgress size={16} />
-                <Typography variant="body2" color="text.secondary">Waiting for first worker to connect...</Typography>
-              </Box>
+              <Typography variant="body2" color="text.secondary">
+                You can skip this and add workers later from the Workers page.
+              </Typography>
             </Stack>
           )}
 

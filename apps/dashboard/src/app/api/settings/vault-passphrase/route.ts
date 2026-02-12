@@ -8,19 +8,26 @@ export async function POST(request: NextRequest) {
   try {
     const db = getDb();
     const body = await request.json();
-    const { currentPassphrase, newPassphrase } = body as { currentPassphrase: string; newPassphrase: string };
+    const { currentPassphrase, newPassphrase, isInitialSetup } = body as {
+      currentPassphrase: string; newPassphrase: string; isInitialSetup?: boolean;
+    };
 
-    if (!currentPassphrase || !newPassphrase) {
-      return NextResponse.json({ error: 'currentPassphrase and newPassphrase are required' }, { status: 400 });
+    if (!newPassphrase) {
+      return NextResponse.json({ error: 'newPassphrase is required' }, { status: 400 });
+    }
+
+    // During initial setup, currentPassphrase is not required
+    if (!isInitialSetup && !currentPassphrase) {
+      return NextResponse.json({ error: 'currentPassphrase is required' }, { status: 400 });
     }
 
     if (newPassphrase.length < 8) {
       return NextResponse.json({ error: 'Passphrase must be at least 8 characters' }, { status: 400 });
     }
 
-    // Verify current passphrase against stored hash in config
+    // Verify current passphrase against stored hash in config (skip during initial setup)
     const config = await db.config.findUnique({ where: { key: 'vaultPassphraseHash' } });
-    if (config) {
+    if (config && !isInitialSetup) {
       const crypto = await import('crypto');
       const storedHash = config.valueJson as string;
       const currentHash = crypto.createHash('sha256').update(currentPassphrase).digest('hex');

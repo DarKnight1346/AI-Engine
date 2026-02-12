@@ -22,6 +22,7 @@
     "@ai-engine/skills": "workspace:*",
     "@ai-engine/vault": "workspace:*",
     "@ai-engine/workflow-engine": "workspace:*",
+    "@anthropic-ai/sdk": "^0.39.0",
     "@emotion/cache": "^11.13.0",
     "@emotion/react": "^11.13.0",
     "@emotion/styled": "^11.13.0",

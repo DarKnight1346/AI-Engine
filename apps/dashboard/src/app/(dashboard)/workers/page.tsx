@@ -104,8 +104,16 @@ export default function WorkersPage() {
       const baseUrl = tunnelData.url || window.location.origin;
       setTunnelUrl(baseUrl);
 
-      // Get the install script URL (which includes a fresh token)
-      const scriptUrl = `${baseUrl}/api/worker/install-script?token=join`;
+      // Generate a real join token
+      const tokenRes = await fetch('/api/cluster/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ generateToken: true }),
+      });
+      const tokenData = await tokenRes.json();
+      const token = tokenData.token ?? 'ERROR_GENERATING_TOKEN';
+
+      const scriptUrl = `${baseUrl}/api/worker/install-script?token=${token}`;
       setInstallCommand(`curl -sSL "${scriptUrl}" | bash`);
     } catch (err: any) {
       setSnack({ open: true, message: 'Failed to generate command: ' + err.message, severity: 'error' });
