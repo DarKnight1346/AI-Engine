@@ -70,9 +70,7 @@ if [ -f "${opts.envFilePath}" ]; then
   set +a
 fi
 
-# Next.js expects .next/ in the CWD
-cd apps/dashboard
-exec "${nodePath}" server.js
+exec "${nodePath}" apps/dashboard/server.js
 `;
 }
 
