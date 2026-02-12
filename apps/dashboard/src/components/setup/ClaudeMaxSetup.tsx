@@ -160,7 +160,7 @@ export default function ClaudeMaxSetup({ authToken, onError }: Props) {
         <Typography variant="body2" component="div" sx={{ fontSize: 13 }}>
           <ol style={{ margin: 0, paddingLeft: 20 }}>
             <li>On a machine with a browser, run <code>claude auth login</code> for each Max account</li>
-            <li>Copy the contents of <code>~/.config/claude-code/auth.json</code></li>
+            <li>Copy the contents of <code>~/.claude/.credentials.json</code></li>
             <li>Paste it below for each account — the dashboard will manage the proxy instances</li>
           </ol>
         </Typography>
@@ -241,15 +241,17 @@ export default function ClaudeMaxSetup({ authToken, onError }: Props) {
               maxRows={10}
               value={addAuthJson}
               onChange={(e) => setAddAuthJson(e.target.value)}
-              placeholder='Paste the contents of ~/.config/claude-code/auth.json'
-              helperText="Run 'claude auth login' on your local machine, then copy ~/.config/claude-code/auth.json"
+              placeholder='Paste the contents of ~/.claude/.credentials.json'
+              helperText="Run 'claude auth login' on your local machine, then copy ~/.claude/.credentials.json"
               inputProps={{ spellCheck: false, style: { fontFamily: 'monospace', fontSize: 12 } }}
             />
             <Alert severity="warning" variant="outlined" sx={{ fontSize: 12 }}>
               Each account should be a different Claude Max subscription.
               Make sure to log out before logging into the next account:
               <Box component="code" display="block" sx={{ mt: 0.5, fontFamily: 'monospace', fontSize: 11 }}>
-                rm ~/.config/claude-code/auth.json && claude auth login
+                Windows: del %USERPROFILE%\.claude\.credentials.json<br />
+                Linux/Mac: rm ~/.claude/.credentials.json<br />
+                Then: claude auth login
               </Box>
             </Alert>
           </Stack>

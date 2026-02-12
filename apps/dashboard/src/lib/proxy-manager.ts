@@ -3,7 +3,7 @@
  *
  * Each Claude Max account gets:
  *   1. An isolated config directory (~/.ai-engine/proxy-accounts/<id>/)
- *      containing the Claude Code auth.json credentials.
+ *      containing the Claude Code .credentials.json credentials.
  *   2. A proxy child process running on its own port.
  *
  * The dashboard's LLM pool round-robins requests across all healthy proxies,
@@ -29,9 +29,9 @@ export interface ProxyAccount {
   id: string;
   label: string;
   port: number;
-  /** Raw contents of auth.json for this Claude Max account */
+  /** Raw contents of ~/.claude/.credentials.json for this Claude Max account */
   authJson: string;
-  /** The directory where auth.json is stored */
+  /** The directory where .credentials.json is stored */
   configDir: string;
 }
 
@@ -105,7 +105,7 @@ export class ProxyManager {
    * Add a new Claude Max account.
    *
    * @param label   Human-readable label (e.g. "Account 1")
-   * @param authJson  Raw contents of ~/.config/claude-code/auth.json
+   * @param authJson  Raw contents of ~/.claude/.credentials.json
    * @returns The created account info + status
    */
   async addAccount(label: string, authJson: string): Promise<ProxyStatus> {
@@ -113,10 +113,10 @@ export class ProxyManager {
     const port = this.nextAvailablePort();
     const configDir = join(ACCOUNTS_BASE_DIR, id);
 
-    // Write auth.json to isolated directory
-    mkdirSync(join(configDir, '.config', 'claude-code'), { recursive: true });
+    // Write .credentials.json to isolated ~/.claude/ directory
+    mkdirSync(join(configDir, '.claude'), { recursive: true });
     writeFileSync(
-      join(configDir, '.config', 'claude-code', 'auth.json'),
+      join(configDir, '.claude', '.credentials.json'),
       authJson,
       'utf-8',
     );
@@ -221,25 +221,27 @@ export class ProxyManager {
       apiKeyId: null,
     });
 
-    // Resolve the proxy binary
+    // Resolve the proxy binary.
+    // claude-max-api-proxy installs a `claude-max-api` binary.
+    // It does NOT accept a --port flag; it reads the PORT env var instead.
     let binPath: string;
+    let args: string[];
     try {
       const { execSync } = await import('child_process');
       binPath = execSync('which claude-max-api 2>/dev/null || which claude-max-api-proxy 2>/dev/null', {
         encoding: 'utf-8',
       }).trim();
+      args = [];
     } catch {
       // Fall back to npx
       binPath = 'npx';
+      args = ['claude-max-api-proxy'];
     }
-
-    const args = binPath === 'npx'
-      ? ['claude-max-api-proxy', '--port', String(port)]
-      : ['--port', String(port)];
 
     // The proxy spawns the Claude CLI as a subprocess.
     // By setting HOME to our isolated config dir, the CLI will read
-    // auth.json from <configDir>/.config/claude-code/auth.json
+    // .credentials.json from <configDir>/.claude/.credentials.json.
+    // PORT env var controls which port the proxy listens on.
     const env = {
       ...process.env,
       HOME: configDir,
@@ -327,10 +329,10 @@ export class ProxyManager {
       }>;
 
       for (const s of saved) {
-        // Ensure the config directory and auth.json still exist
-        const authPath = join(s.configDir, '.config', 'claude-code', 'auth.json');
+        // Ensure the config directory and .credentials.json still exist
+        const authPath = join(s.configDir, '.claude', '.credentials.json');
         if (!existsSync(authPath) && s.authJson) {
-          mkdirSync(join(s.configDir, '.config', 'claude-code'), { recursive: true });
+          mkdirSync(join(s.configDir, '.claude'), { recursive: true });
           writeFileSync(authPath, s.authJson, 'utf-8');
         }
         this.accounts.set(s.id, s);
