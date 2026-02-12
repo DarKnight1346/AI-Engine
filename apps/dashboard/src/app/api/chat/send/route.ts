@@ -39,10 +39,23 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'No user found. Complete setup first.' }, { status: 400 });
       }
 
+      // ownerId is a FK to the Team table, so we need the user's team — not user.id
+      const membership = await db.teamMember.findFirst({
+        where: { userId: user.id },
+        orderBy: { joinedAt: 'asc' },
+      });
+
+      if (!membership) {
+        return NextResponse.json(
+          { error: 'User is not a member of any team. Create a team first in Settings.' },
+          { status: 400 },
+        );
+      }
+
       session = await db.chatSession.create({
         data: {
           type: 'personal',
-          ownerId: user.id,
+          ownerId: membership.teamId,
           title: message.slice(0, 60) + (message.length > 60 ? '...' : ''),
           createdByUserId: user.id,
         },
