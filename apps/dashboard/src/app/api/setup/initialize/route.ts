@@ -44,45 +44,43 @@ export async function POST(request: NextRequest) {
 
     await writeFile(envPath, envContent);
 
-    // --- 2. Run Prisma migrations ---
+    // --- 2. Push schema to database ---
     const prismaDir = join(projectDir, 'packages', 'db');
+    const prismaEnv = { ...process.env, DATABASE_URL: databaseUrl };
 
     try {
       // Generate the Prisma client with the new URL
       execSync('npx prisma generate', {
         cwd: prismaDir,
-        env: { ...process.env, DATABASE_URL: databaseUrl },
+        env: prismaEnv,
         stdio: 'pipe',
         timeout: 30000,
       });
 
-      // Run migrations
-      execSync('npx prisma migrate dev --name init --skip-generate', {
+      // Push the schema directly to the database. This is preferred over
+      // "migrate dev" for production setup because it doesn't require a
+      // shadow database (which needs CREATEDB permission). If migration
+      // files exist in the future, "migrate deploy" is used as a fallback.
+      execSync('npx prisma db push --skip-generate --accept-data-loss', {
         cwd: prismaDir,
-        env: { ...process.env, DATABASE_URL: databaseUrl },
+        env: prismaEnv,
         stdio: 'pipe',
         timeout: 60000,
       });
-    } catch (migrationErr: any) {
-      const stderr = migrationErr.stderr?.toString() ?? '';
-      // If migrations already exist, try deploy instead
-      if (stderr.includes('already exists') || stderr.includes('already applied')) {
-        try {
-          execSync('npx prisma migrate deploy', {
-            cwd: prismaDir,
-            env: { ...process.env, DATABASE_URL: databaseUrl },
-            stdio: 'pipe',
-            timeout: 60000,
-          });
-        } catch (deployErr: any) {
-          return NextResponse.json(
-            { success: false, error: `Migration failed: ${deployErr.stderr?.toString() ?? deployErr.message}` },
-            { status: 500 },
-          );
-        }
-      } else {
+    } catch (pushErr: any) {
+      const stderr = pushErr.stderr?.toString() ?? '';
+
+      // If db push fails, try migrate deploy (for repos with migration files)
+      try {
+        execSync('npx prisma migrate deploy', {
+          cwd: prismaDir,
+          env: prismaEnv,
+          stdio: 'pipe',
+          timeout: 60000,
+        });
+      } catch (deployErr: any) {
         return NextResponse.json(
-          { success: false, error: `Migration failed: ${stderr || migrationErr.message}` },
+          { success: false, error: `Migration failed: ${stderr || pushErr.message}` },
           { status: 500 },
         );
       }
