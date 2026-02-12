@@ -88,20 +88,34 @@ class TunnelManager {
       const cloudflaredPath = await ensureCloudflared();
       const port = process.env.DASHBOARD_PORT ?? process.env.PORT ?? '3000';
 
-      // Check .env / process.env for a persisted named tunnel config
-      const tunnelConfigPath = process.env.TUNNEL_CONFIG_PATH ?? null;
-      const tunnelHostname = process.env.TUNNEL_HOSTNAME ?? null;
-      const tunnelId = process.env.TUNNEL_ID ?? null;
+      // Check for a persisted named tunnel config.
+      // Try process.env first; fall back to reading .env directly in case
+      // Next.js loaded .env from a different directory than where we wrote it.
+      let tunnelConfigPath = process.env.TUNNEL_CONFIG_PATH ?? null;
+      let tunnelHostname = process.env.TUNNEL_HOSTNAME ?? null;
+      let tunnelId = process.env.TUNNEL_ID ?? null;
+
+      if (!tunnelConfigPath) {
+        const envVars = readEnvFile(join(process.cwd(), '.env'));
+        tunnelConfigPath = envVars.TUNNEL_CONFIG_PATH ?? null;
+        tunnelHostname = envVars.TUNNEL_HOSTNAME ?? null;
+        tunnelId = envVars.TUNNEL_ID ?? null;
+      }
 
       if (tunnelConfigPath && existsSync(tunnelConfigPath)) {
         this.state.mode = 'named';
         this.state.hostname = tunnelHostname;
         this.state.tunnelId = tunnelId;
         this.state.url = tunnelHostname ? `https://${tunnelHostname}` : null;
+        console.log(`[tunnel] Named tunnel config: ${tunnelConfigPath}`);
+        console.log(`[tunnel] Hostname: ${tunnelHostname}, Tunnel ID: ${tunnelId}`);
         this.spawnProcess(cloudflaredPath, [
           'tunnel', '--config', tunnelConfigPath, 'run',
         ]);
       } else {
+        if (tunnelConfigPath) {
+          console.warn(`[tunnel] Config path set (${tunnelConfigPath}) but file not found, falling back to quick tunnel`);
+        }
         this.state.mode = 'quick';
         this.spawnProcess(cloudflaredPath, [
           'tunnel', '--url', `http://localhost:${port}`, '--no-autoupdate',
@@ -416,6 +430,30 @@ class TunnelManager {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Read a .env file and return a key→value map. */
+function readEnvFile(filePath: string): Record<string, string> {
+  try {
+    const content = readFileSync(filePath, 'utf-8');
+    const vars: Record<string, string> = {};
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let val = trimmed.slice(eq + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      vars[key] = val;
+    }
+    return vars;
+  } catch {
+    return {};
+  }
+}
 
 /** Insert or replace an env var in a .env file string. */
 function upsertEnvVar(content: string, key: string, value: string): string {
