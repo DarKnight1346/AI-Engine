@@ -157,8 +157,60 @@ class TunnelManager {
       const cfDir = join(process.env.HOME ?? '/root', '.ai-engine', 'cloudflared');
       mkdirSync(cfDir, { recursive: true });
 
-      // --- 1. Create the tunnel via Cloudflare API ---
+      // --- 1. Create (or reuse) the tunnel via Cloudflare API ---
+      const tunnelName = 'ai-engine-dashboard';
       const tunnelSecret = crypto.randomBytes(32).toString('base64');
+
+      // Check if a tunnel with this name already exists
+      const listRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/tunnels?name=${tunnelName}&is_deleted=false`,
+        { headers: { Authorization: `Bearer ${opts.apiToken}` } },
+      );
+      const listData = await listRes.json() as any;
+      let tunnelId: string;
+
+      const existing = listData.success && listData.result?.length > 0 ? listData.result[0] : null;
+
+      if (existing) {
+        // Reuse existing tunnel — delete and recreate so we control the secret
+        console.log(`[tunnel] Found existing tunnel ${existing.id}, deleting to recreate...`);
+        const delRes = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/tunnels/${existing.id}`,
+          {
+            method: 'DELETE',
+            headers: {
+              Authorization: `Bearer ${opts.apiToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+          },
+        );
+        const delData = await delRes.json() as any;
+        if (!delData.success) {
+          // If delete fails, try force-cleaning connections first
+          await fetch(
+            `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/tunnels/${existing.id}/connections`,
+            {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${opts.apiToken}` },
+            },
+          );
+          // Retry delete
+          await fetch(
+            `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/tunnels/${existing.id}`,
+            {
+              method: 'DELETE',
+              headers: {
+                Authorization: `Bearer ${opts.apiToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({}),
+            },
+          );
+        }
+      }
+
+      // Create fresh tunnel
       const createRes = await fetch(
         `https://api.cloudflare.com/client/v4/accounts/${opts.accountId}/tunnels`,
         {
@@ -168,7 +220,7 @@ class TunnelManager {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            name: 'ai-engine-dashboard',
+            name: tunnelName,
             tunnel_secret: tunnelSecret,
           }),
         },
@@ -178,7 +230,7 @@ class TunnelManager {
         const msg = createData.errors?.[0]?.message ?? 'Failed to create tunnel';
         return { success: false, error: msg };
       }
-      const tunnelId: string = createData.result.id;
+      tunnelId = createData.result.id;
       console.log(`[tunnel] Created tunnel ${tunnelId}`);
 
       // --- 2. Write credentials file + config.yml locally ---
