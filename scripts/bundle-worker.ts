@@ -17,9 +17,10 @@
 // Run: npx tsx scripts/bundle-worker.ts
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync } from 'fs';
-import { join, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
-const ROOT = resolve(import.meta.dirname, '..');
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BUNDLE_DIR = join(ROOT, '.worker-bundle');
 const OUTPUT = join(ROOT, 'worker-bundle.tar.gz');
 
