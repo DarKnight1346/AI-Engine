@@ -386,8 +386,8 @@ class TunnelManager {
 
   private dnsVerified = false;
 
-  async verifyDns(): Promise<void> {
-    if (this.dnsVerified) return;
+  async verifyDns(force = false): Promise<void> {
+    if (this.dnsVerified && !force) return;
     this.dnsVerified = true;
 
     const envVars = readEnvFile(join(process.cwd(), '.env'));
