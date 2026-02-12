@@ -14,6 +14,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DownloadIcon from '@mui/icons-material/Download';
 import LanguageIcon from '@mui/icons-material/Language';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import ClaudeMaxSetup from '../../components/setup/ClaudeMaxSetup';
 
 // ---------------------------------------------------------------------------
 // Steps
@@ -47,6 +48,8 @@ interface FormData {
   displayName: string;
   teamName: string;
   apiKey: string;
+  apiProvider: 'anthropic' | 'claude-max';
+  apiBaseUrl: string;
   passphrase: string;
 }
 
@@ -72,7 +75,8 @@ export default function SetupPage() {
       databaseUrl: 'postgresql://ai_engine:ai_engine_password@localhost:5432/ai_engine',
       redisUrl: 'redis://localhost:6379',
       email: '', password: '', displayName: '',
-      teamName: '', apiKey: '', passphrase: '',
+      teamName: '', apiKey: '', apiProvider: 'anthropic' as const,
+      apiBaseUrl: 'http://localhost:3456/v1', passphrase: '',
     };
   });
 
@@ -530,8 +534,23 @@ export default function SetupPage() {
     return true;
   };
 
-  /** Step 6 → Save API Key */
+  /** Step 6 → Save API Key / Configure Claude Max Proxy */
   const saveApiKey = async (): Promise<boolean> => {
+    if (formData.apiProvider === 'claude-max') {
+      // Claude Max accounts are managed by the ClaudeMaxSetup component.
+      // Just verify at least one account exists.
+      const res = await fetch('/api/settings/claude-max', {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error('Could not check Claude Max status');
+      if (!data.accounts || data.accounts.length === 0) {
+        throw new Error('Add at least one Claude Max account before continuing');
+      }
+      return true;
+    }
+
+    // Standard Anthropic API key
     if (!formData.apiKey.trim()) return true; // Skip if empty
     const res = await fetch('/api/settings/api-keys', {
       method: 'POST',
@@ -539,7 +558,11 @@ export default function SetupPage() {
         'Content-Type': 'application/json',
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
-      body: JSON.stringify({ label: 'Primary', key: formData.apiKey.trim() }),
+      body: JSON.stringify({
+        label: 'Primary',
+        key: formData.apiKey.trim(),
+        provider: 'anthropic',
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to save API key');
@@ -601,7 +624,10 @@ export default function SetupPage() {
     if (activeStep === steps.length - 1) return 'Go to Dashboard';
     if (activeStep === 0) return cfPermanentUrl ? 'Next' : 'Skip (use temporary URL)';
     if (activeStep === 5) return formData.teamName.trim() ? 'Create Team & Continue' : 'Skip';
-    if (activeStep === 6) return formData.apiKey.trim() ? 'Validate & Save Key' : 'Skip';
+    if (activeStep === 6) {
+      if (formData.apiProvider === 'claude-max') return 'Connect to Proxy';
+      return formData.apiKey.trim() ? 'Validate & Save Key' : 'Skip';
+    }
     if (activeStep === 4) return 'Create Account';
     if (activeStep === 7) return 'Set Passphrase';
     return 'Next';
@@ -1096,10 +1122,44 @@ export default function SetupPage() {
           {/* ── Step 6: API Keys ──────────────────────────────── */}
           {activeStep === 6 && (
             <Stack spacing={2}>
-              <Typography variant="h6" fontWeight={600}>Add Claude API Key</Typography>
-              <Typography variant="body2" color="text.secondary">Add a Claude API key. You can add more from Settings later.</Typography>
-              <TextField label="Claude API Key" fullWidth value={formData.apiKey} onChange={(e) => updateField('apiKey', e.target.value)} placeholder="sk-ant-..." type="password" inputProps={{ spellCheck: false }} />
-              <Alert severity="info" variant="outlined">The key will be validated with a test call before saving. You can skip this step and add keys later.</Alert>
+              <Typography variant="h6" fontWeight={600}>Connect to Claude</Typography>
+              <Typography variant="body2" color="text.secondary">Choose how to connect to Claude. You can change this later in Settings.</Typography>
+
+              <TextField
+                select
+                label="Provider"
+                fullWidth
+                value={formData.apiProvider}
+                onChange={(e) => updateField('apiProvider', e.target.value)}
+                SelectProps={{ native: true }}
+              >
+                <option value="anthropic">Anthropic API Key (pay-per-token)</option>
+                <option value="claude-max">Claude Max Subscription (via proxy)</option>
+              </TextField>
+
+              {formData.apiProvider === 'anthropic' && (
+                <>
+                  <TextField
+                    label="Claude API Key"
+                    fullWidth
+                    value={formData.apiKey}
+                    onChange={(e) => updateField('apiKey', e.target.value)}
+                    placeholder="sk-ant-..."
+                    type="password"
+                    inputProps={{ spellCheck: false }}
+                  />
+                  <Alert severity="info" variant="outlined">
+                    Get an API key from{' '}
+                    <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+                    The key will be validated before saving.
+                  </Alert>
+                </>
+              )}
+
+              {formData.apiProvider === 'claude-max' && (
+                <ClaudeMaxSetup authToken={authToken} onError={(msg) => setStepError(msg)} />
+              )}
+
               {stepError && <Alert severity="error">{stepError}</Alert>}
               {stepBusy && <LinearProgress />}
             </Stack>

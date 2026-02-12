@@ -20,6 +20,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import DeleteIcon from '@mui/icons-material/Delete';
 import SaveIcon from '@mui/icons-material/Save';
+import ClaudeMaxSetup from '../../../components/setup/ClaudeMaxSetup';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -541,6 +542,15 @@ export default function SettingsPage() {
               ))
             )}
             <Button variant="outlined" onClick={() => setAddKeyOpen(true)}>Add API Key</Button>
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>Claude Max Accounts</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Manage Claude Max subscriptions for load-balanced, flat-rate AI access.
+              Each account runs its own proxy and requests are distributed across all running proxies.
+            </Typography>
+            <ClaudeMaxSetup authToken={null} onError={(msg) => setSnack({ open: true, message: msg, severity: 'error' })} />
           </Paper>
 
           <Paper sx={{ p: 3 }}>

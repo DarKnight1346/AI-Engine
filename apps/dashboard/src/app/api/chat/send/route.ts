@@ -73,10 +73,16 @@ export async function POST(request: NextRequest) {
       // Decrypt keys — for now, key_encrypted stores the raw key
       // (actual decryption via vault in production)
       const pool = new LLMPool({
-        keys: apiKeys.map((k) => ({
-          id: k.id,
-          apiKey: k.keyEncrypted,
-        })),
+        keys: apiKeys.map((k) => {
+          const stats = k.usageStats as any;
+          return {
+            id: k.id,
+            apiKey: k.keyEncrypted,
+            keyType: (stats?.keyType as 'api-key' | 'bearer' | undefined) ?? 'api-key',
+            provider: (stats?.provider as 'anthropic' | 'openai-compatible' | undefined) ?? 'anthropic',
+            baseUrl: stats?.baseUrl as string | undefined,
+          };
+        }),
         strategy: 'round-robin',
       });
 

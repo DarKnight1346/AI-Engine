@@ -25,5 +25,21 @@ export async function register() {
     } catch {
       // server.js will handle this
     }
+
+    // Start Claude Max proxy instances (if any accounts are configured).
+    // Runs after a short delay to give the database time to connect.
+    if (!(globalThis as any).__proxiesStarted) {
+      (globalThis as any).__proxiesStarted = true;
+      setTimeout(async () => {
+        try {
+          const { ProxyManager } = await import('./lib/proxy-manager');
+          const pm = ProxyManager.getInstance();
+          await pm.startAll();
+        } catch (err: any) {
+          // Non-fatal — proxies can be started later from the settings UI
+          console.warn('[proxy-manager] Auto-start skipped:', err.message);
+        }
+      }, 5000);
+    }
   }
 }

@@ -164,6 +164,28 @@ else
   ok "pnpm $(pnpm -v) installed"
 fi
 
+# ── 3b. Install Claude Code CLI (required for Claude Max subscriptions)
+
+if command_exists claude; then
+  ok "Claude Code CLI already installed"
+else
+  info "Installing Claude Code CLI (required for Claude Max subscriptions)..."
+  npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 && \
+    ok "Claude Code CLI installed" || \
+    warn "Claude Code CLI install failed (only needed for Claude Max subscriptions)"
+fi
+
+# ── 3c. Install claude-max-api-proxy (required for Claude Max subscriptions)
+
+if command_exists claude-max-api; then
+  ok "claude-max-api-proxy already installed"
+else
+  info "Installing claude-max-api-proxy (for Claude Max/Pro subscription users)..."
+  npm install -g claude-max-api-proxy >/dev/null 2>&1 && \
+    ok "claude-max-api-proxy installed" || \
+    warn "claude-max-api-proxy install failed (only needed for Claude Max subscriptions)"
+fi
+
 # ── 4. Install git (verify) ─────────────────────────────────────────────────
 
 if ! command_exists git; then
