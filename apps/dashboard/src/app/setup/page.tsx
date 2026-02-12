@@ -522,7 +522,7 @@ export default function SetupPage() {
 
                   {cfStatus === 'fetching_zones' && <LinearProgress />}
 
-                  {cfStatus === 'zones_loaded' && cfZones.length > 0 && (
+                  {(cfStatus === 'zones_loaded' || cfStatus === 'configuring') && cfZones.length > 0 && (
                     <>
                       <TextField
                         select
