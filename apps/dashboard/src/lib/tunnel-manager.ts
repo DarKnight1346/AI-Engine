@@ -16,7 +16,7 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { ensureCloudflared } from './cloudflared';
 
@@ -88,24 +88,12 @@ class TunnelManager {
       const cloudflaredPath = await ensureCloudflared();
       const port = process.env.DASHBOARD_PORT ?? process.env.PORT ?? '3000';
 
-      // Check DB for a persisted named tunnel config
-      let tunnelConfigPath: string | null = null;
-      let tunnelHostname: string | null = null;
-      let tunnelId: string | null = null;
-      try {
-        const { getDb } = await import('@ai-engine/db');
-        const db = getDb();
-        const configRow = await db.config.findUnique({ where: { key: 'tunnel.config_path' } });
-        const hostRow = await db.config.findUnique({ where: { key: 'tunnel.hostname' } });
-        const idRow = await db.config.findUnique({ where: { key: 'tunnel.tunnel_id' } });
-        if (configRow) tunnelConfigPath = configRow.valueJson as string;
-        if (hostRow) tunnelHostname = hostRow.valueJson as string;
-        if (idRow) tunnelId = idRow.valueJson as string;
-      } catch {
-        // DB not ready yet (first-run / setup wizard)
-      }
+      // Check .env / process.env for a persisted named tunnel config
+      const tunnelConfigPath = process.env.TUNNEL_CONFIG_PATH ?? null;
+      const tunnelHostname = process.env.TUNNEL_HOSTNAME ?? null;
+      const tunnelId = process.env.TUNNEL_ID ?? null;
 
-      if (tunnelConfigPath) {
+      if (tunnelConfigPath && existsSync(tunnelConfigPath)) {
         this.state.mode = 'named';
         this.state.hostname = tunnelHostname;
         this.state.tunnelId = tunnelId;
@@ -278,25 +266,27 @@ class TunnelManager {
         console.warn('[tunnel] DNS record creation note:', dnsData.errors?.[0]?.message);
       }
 
-      // --- 4. Persist to DB ---
-      const { getDb } = await import('@ai-engine/db');
-      const db = getDb();
-      const entries = [
-        { key: 'tunnel.mode', value: 'named' },
-        { key: 'tunnel.config_path', value: configPath },
-        { key: 'tunnel.cred_path', value: credPath },
-        { key: 'tunnel.hostname', value: opts.hostname },
-        { key: 'tunnel.tunnel_id', value: tunnelId },
-        { key: 'tunnel.account_id', value: opts.accountId },
-        { key: 'tunnel.zone_id', value: opts.zoneId },
-      ];
-      for (const { key, value } of entries) {
-        await db.config.upsert({
-          where: { key },
-          update: { valueJson: value as any, version: { increment: 1 } },
-          create: { key, valueJson: value as any },
-        });
-      }
+      // --- 4. Persist to .env file ---
+      const envPath = join(process.cwd(), '.env');
+      let envContent = '';
+      try { envContent = readFileSync(envPath, 'utf-8'); } catch { /* file may not exist yet */ }
+
+      envContent = upsertEnvVar(envContent, 'TUNNEL_MODE', 'named');
+      envContent = upsertEnvVar(envContent, 'TUNNEL_CONFIG_PATH', configPath);
+      envContent = upsertEnvVar(envContent, 'TUNNEL_CRED_PATH', credPath);
+      envContent = upsertEnvVar(envContent, 'TUNNEL_HOSTNAME', opts.hostname);
+      envContent = upsertEnvVar(envContent, 'TUNNEL_ID', tunnelId);
+      envContent = upsertEnvVar(envContent, 'TUNNEL_ACCOUNT_ID', opts.accountId);
+      envContent = upsertEnvVar(envContent, 'TUNNEL_ZONE_ID', opts.zoneId);
+
+      writeFileSync(envPath, envContent, 'utf-8');
+      console.log(`[tunnel] Persisted tunnel config to ${envPath}`);
+
+      // Update process.env so the current process can see the values immediately
+      process.env.TUNNEL_MODE = 'named';
+      process.env.TUNNEL_CONFIG_PATH = configPath;
+      process.env.TUNNEL_HOSTNAME = opts.hostname;
+      process.env.TUNNEL_ID = tunnelId;
 
       // --- 5. Switch to named tunnel ---
       await this.restart();
@@ -311,18 +301,21 @@ class TunnelManager {
    * Revert to a quick tunnel (remove named tunnel config).
    */
   async removeNamedTunnel(): Promise<void> {
+    // Remove tunnel vars from .env
+    const envPath = join(process.cwd(), '.env');
     try {
-      const { getDb } = await import('@ai-engine/db');
-      const db = getDb();
+      let envContent = readFileSync(envPath, 'utf-8');
       const keys = [
-        'tunnel.mode', 'tunnel.config_path', 'tunnel.cred_path',
-        'tunnel.hostname', 'tunnel.tunnel_id', 'tunnel.account_id',
-        'tunnel.zone_id',
+        'TUNNEL_MODE', 'TUNNEL_CONFIG_PATH', 'TUNNEL_CRED_PATH',
+        'TUNNEL_HOSTNAME', 'TUNNEL_ID', 'TUNNEL_ACCOUNT_ID',
+        'TUNNEL_ZONE_ID',
       ];
       for (const key of keys) {
-        await db.config.delete({ where: { key } }).catch(() => {});
+        envContent = envContent.replace(new RegExp(`^${key}=.*\\n?`, 'm'), '');
+        delete process.env[key];
       }
-    } catch { /* DB may not be ready */ }
+      writeFileSync(envPath, envContent, 'utf-8');
+    } catch { /* .env may not exist */ }
 
     this.state.hostname = null;
     this.state.tunnelId = null;
@@ -418,6 +411,19 @@ class TunnelManager {
       this.restartTimer = null;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Insert or replace an env var in a .env file string. */
+function upsertEnvVar(content: string, key: string, value: string): string {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`^${escaped}=.*$`, 'm');
+  const line = `${key}="${value}"`;
+  if (regex.test(content)) return content.replace(regex, line);
+  return content.trimEnd() + '\n' + line + '\n';
 }
 
 export { TunnelManager };
