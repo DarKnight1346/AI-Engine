@@ -22,6 +22,12 @@ export async function POST(_request: NextRequest) {
   const dbUser = 'ai_engine';
 
   try {
+    // Check if PostgreSQL is already installed and the ai_engine database exists
+    const existing = detectExistingPostgres(dbUser, dbName);
+    if (existing) {
+      return await reuseExistingPostgres(existing.platform, dbUser, password, dbName);
+    }
+
     if (platform === 'linux') {
       return await installLinux(dbUser, password, dbName);
     } else if (platform === 'darwin') {
@@ -46,6 +52,95 @@ export async function POST(_request: NextRequest) {
       { status: 500 },
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Detect & reuse existing installation
+// ---------------------------------------------------------------------------
+
+function detectExistingPostgres(dbUser: string, dbName: string): { platform: string; hasDb: boolean; hasUser: boolean } | null {
+  try {
+    // Check if psql is available and PostgreSQL is running
+    execSync('sudo -u postgres psql -c "SELECT 1;"', { encoding: 'utf8', timeout: 5000, stdio: 'pipe' });
+  } catch {
+    return null; // PostgreSQL not installed or not running
+  }
+
+  let hasUser = false;
+  let hasDb = false;
+
+  try {
+    const roles = execSync(`sudo -u postgres psql -t -c "SELECT 1 FROM pg_roles WHERE rolname = '${dbUser}';"`, { encoding: 'utf8', timeout: 5000, stdio: 'pipe' });
+    hasUser = roles.trim() === '1';
+  } catch { /* not fatal */ }
+
+  try {
+    const dbs = execSync(`sudo -u postgres psql -t -c "SELECT 1 FROM pg_database WHERE datname = '${dbName}';"`, { encoding: 'utf8', timeout: 5000, stdio: 'pipe' });
+    hasDb = dbs.trim() === '1';
+  } catch { /* not fatal */ }
+
+  if (!hasUser && !hasDb) return null; // PostgreSQL exists but has no ai_engine setup
+
+  return { platform: os.platform(), hasDb, hasUser };
+}
+
+async function reuseExistingPostgres(platform: string, dbUser: string, password: string, dbName: string) {
+  const log: string[] = ['Existing PostgreSQL installation detected.'];
+
+  const run = (cmd: string, desc: string) => {
+    log.push(`> ${desc}`);
+    try {
+      const out = execSync(cmd, { encoding: 'utf8', timeout: 30000, stdio: 'pipe' });
+      if (out.trim()) log.push(out.trim());
+    } catch (err: any) {
+      const stderr = err.stderr?.toString() ?? '';
+      throw new Error(`${desc} failed: ${stderr || err.message}`);
+    }
+  };
+
+  // Ensure the user exists and reset password
+  run(
+    `sudo -u postgres psql -c "DO \\$\\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${dbUser}') THEN CREATE ROLE ${dbUser} WITH LOGIN PASSWORD '${password}'; ELSE ALTER ROLE ${dbUser} WITH LOGIN PASSWORD '${password}'; END IF; END \\$\\$;"`,
+    'Resetting database user password',
+  );
+
+  // Ensure the database exists
+  try {
+    run(`sudo -u postgres createdb -O ${dbUser} ${dbName}`, 'Creating database');
+  } catch {
+    log.push('  (database already exists)');
+    // Make sure ownership is correct
+    try {
+      run(`sudo -u postgres psql -c "ALTER DATABASE ${dbName} OWNER TO ${dbUser};"`, 'Ensuring database ownership');
+    } catch { /* non-fatal */ }
+  }
+
+  // Ensure pgvector extension
+  try {
+    run(`sudo -u postgres psql -d ${dbName} -c "CREATE EXTENSION IF NOT EXISTS vector;"`, 'Ensuring pgvector extension');
+  } catch {
+    log.push('  (pgvector extension may need manual installation)');
+  }
+
+  // Ensure pg_hba.conf allows password auth
+  try {
+    const hbaPath = execSync(`sudo -u postgres psql -t -c "SHOW hba_file;"`, { encoding: 'utf8' }).trim();
+    const hbaContent = execSync(`sudo cat "${hbaPath}"`, { encoding: 'utf8' });
+    if (!hbaContent.includes(`# ai-engine`)) {
+      execSync(`echo "# ai-engine\\nlocal   ${dbName}   ${dbUser}   md5\\nhost    ${dbName}   ${dbUser}   127.0.0.1/32   md5" | sudo tee -a "${hbaPath}"`, { encoding: 'utf8' });
+      run('sudo systemctl reload postgresql', 'Reloading PostgreSQL config');
+    }
+  } catch { /* non-fatal */ }
+
+  const connectionUrl = `postgresql://${dbUser}:${password}@localhost:5432/${dbName}`;
+
+  return NextResponse.json({
+    success: true,
+    connectionUrl,
+    message: `Existing PostgreSQL detected. Password reset and database "${dbName}" verified.`,
+    log,
+    reused: true,
+  });
 }
 
 // ---------------------------------------------------------------------------
