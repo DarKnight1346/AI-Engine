@@ -110,7 +110,7 @@ class TunnelManager {
         console.log(`[tunnel] Named tunnel config: ${tunnelConfigPath}`);
         console.log(`[tunnel] Hostname: ${tunnelHostname}, Tunnel ID: ${tunnelId}`);
         this.spawnProcess(cloudflaredPath, [
-          '--config', tunnelConfigPath, 'tunnel', 'run',
+          '--config', tunnelConfigPath, 'tunnel', 'run', tunnelId!,
         ]);
       } else {
         if (tunnelConfigPath) {
@@ -355,6 +355,12 @@ class TunnelManager {
     const handleData = (data: Buffer) => {
       const text = data.toString();
       outputBuf.push(text);
+
+      // Log raw cloudflared output for debugging
+      for (const line of text.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) console.log(`[cloudflared] ${trimmed}`);
+      }
 
       // Quick tunnel: parse the trycloudflare.com URL
       if (this.state.mode === 'quick') {
