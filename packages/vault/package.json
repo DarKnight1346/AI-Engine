@@ -11,5 +11,5 @@
     "@ai-engine/db": "workspace:*",
     "argon2": "^0.41.0"
   },
-  "devDependencies": { "typescript": "^5.7.0" }
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.7.0" }
 }

@@ -14,7 +14,7 @@ export class VaultService {
     const db = getDb();
     const cred = await db.vaultCredential.create({
       data: {
-        name, type, encryptedData: encrypted, iv, authTag,
+        name, type, encryptedData: Uint8Array.from(encrypted), iv: Uint8Array.from(iv), authTag: Uint8Array.from(authTag),
         urlPattern: options.urlPattern, createdBy: options.createdBy ?? 'user',
         approvalStatus,
       },
@@ -47,7 +47,7 @@ export class VaultService {
     const db = getDb();
     const cred = await db.vaultCredential.update({
       where: { name },
-      data: { encryptedData: encrypted, iv, authTag },
+      data: { encryptedData: Uint8Array.from(encrypted), iv: Uint8Array.from(iv), authTag: Uint8Array.from(authTag) },
     });
     await this.auditLog(cred.id, agentId ?? null, 'update');
     return this.mapCredential(cred);

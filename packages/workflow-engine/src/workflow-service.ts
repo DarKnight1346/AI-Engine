@@ -35,7 +35,7 @@ export class WorkflowService {
       data: {
         workflowId,
         currentStage: firstStage,
-        dataJson: data,
+        dataJson: data as any,
         status: 'waiting',
         requiredCapabilities: capabilities ? JSON.parse(JSON.stringify(capabilities)) : undefined,
         nodeAffinity,

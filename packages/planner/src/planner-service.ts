@@ -21,7 +21,7 @@ export class PlannerService {
     const graph = await db.planningTaskGraph.create({
       data: { sessionId, graphJson: JSON.parse(JSON.stringify(nodes)) },
     });
-    return { id: graph.id, sessionId: graph.sessionId, graphJson: graph.graphJson as TaskGraphNode[], status: graph.status as TaskGraphStatus, createdAt: graph.createdAt };
+    return { id: graph.id, sessionId: graph.sessionId, graphJson: graph.graphJson as unknown as TaskGraphNode[], status: graph.status as TaskGraphStatus, createdAt: graph.createdAt };
   }
 
   async confirmGraph(graphId: string): Promise<void> {
@@ -37,6 +37,6 @@ export class PlannerService {
   async getGraphsForSession(sessionId: string): Promise<PlanningTaskGraph[]> {
     const db = getDb();
     const graphs = await db.planningTaskGraph.findMany({ where: { sessionId }, orderBy: { createdAt: 'desc' } });
-    return graphs.map((g) => ({ id: g.id, sessionId: g.sessionId, graphJson: g.graphJson as TaskGraphNode[], status: g.status as TaskGraphStatus, createdAt: g.createdAt }));
+    return graphs.map((g) => ({ id: g.id, sessionId: g.sessionId, graphJson: g.graphJson as unknown as TaskGraphNode[], status: g.status as TaskGraphStatus, createdAt: g.createdAt }));
   }
 }

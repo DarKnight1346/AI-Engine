@@ -19,7 +19,7 @@ export class ScheduleService {
         agentId: options.agentId,
         workflowId: options.workflowId,
         goalContextId: options.goalContextId,
-        configJson: options.configJson ?? {},
+        configJson: (options.configJson ?? {}) as any,
         nextRunAt,
         createdFromSessionId: options.sessionId,
       },
