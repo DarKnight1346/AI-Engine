@@ -10,7 +10,6 @@
  *   - Record heartbeats in the DB
  */
 
-import crypto from 'crypto';
 import type { IncomingMessage } from 'http';
 import type WebSocket from 'ws';
 import type {
@@ -262,7 +261,7 @@ export class WorkerHub {
       };
     }
 
-    const callId = crypto.randomUUID();
+    const callId = globalThis.crypto.randomUUID();
 
     return new Promise<{ success: boolean; output: string }>((resolve, reject) => {
       const timeout = setTimeout(() => {

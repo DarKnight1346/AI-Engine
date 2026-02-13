@@ -22,6 +22,7 @@ const nextConfig = {
       '@prisma/client',
       '.prisma/client',
       'ioredis',
+      'jsonwebtoken',
     ],
     // Point Next.js at the monorepo root so standalone output tracing can
     // find packages in the hoisted node_modules.
