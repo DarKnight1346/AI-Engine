@@ -19,7 +19,7 @@ export interface LLMKeyConfig {
    *                               claude-max-api-proxy at localhost:3456
    */
   provider?: LLMProvider;
-  /** 'api-key' (standard sk-ant-*) or 'bearer' (OAuth tokens) — Anthropic only */
+  /** 'api-key' (standard sk-ant-*) or 'bearer' (OAuth setup-tokens) — Anthropic only */
   keyType?: 'api-key' | 'bearer';
   /** Base URL for the provider (e.g. http://localhost:3456/v1) */
   baseUrl?: string;
@@ -114,16 +114,47 @@ function toOpenAIMessages(messages: LLMMessage[], systemPrompt?: string): OpenAI
 }
 
 // ---------------------------------------------------------------------------
+// OAuth / setup-token helpers
+// ---------------------------------------------------------------------------
+
+/** Detect if a key is an OAuth setup-token (from `claude setup-token`) */
+function isOAuthToken(key: string): boolean {
+  return key.includes('sk-ant-oat');
+}
+
+// Mimic Claude Code CLI version — needed for OAuth beta headers
+const CLAUDE_CODE_VERSION = '2.1.39';
+
+// ---------------------------------------------------------------------------
 // Client factory
 // ---------------------------------------------------------------------------
 
 function createAnthropicClient(config: LLMKeyConfig): Anthropic {
   const opts: Record<string, any> = {};
-  if (config.keyType === 'bearer') {
+
+  if (isOAuthToken(config.apiKey)) {
+    // ── OAuth setup-token path ──
+    // Setup-tokens (sk-ant-oat*) require:
+    //   1. Bearer auth (authToken) — NOT x-api-key
+    //   2. The "oauth-2025-04-20" beta header to enable OAuth on the API
+    //   3. The "claude-code-20250219" beta header to identify as Claude Code
+    //   4. Claude CLI user-agent and x-app headers
+    // Without these headers, the API returns:
+    //   "OAuth authentication is currently not supported"
+    // Reference: pi-ai library (OpenClaw) anthropic.ts createClient()
+    opts.apiKey = null;
     opts.authToken = config.apiKey;
+    opts.defaultHeaders = {
+      'accept': 'application/json',
+      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+      'user-agent': `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`,
+      'x-app': 'cli',
+    };
   } else {
+    // ── Standard API key path (sk-ant-api03-*) ──
     opts.apiKey = config.apiKey;
   }
+
   if (config.baseUrl) {
     opts.baseURL = config.baseUrl;
   }
@@ -215,11 +246,30 @@ export class LLMPool {
     const client = this.anthropicClients.get(keyId);
     if (!client) throw new Error(`No Anthropic client for key ${keyId}`);
 
+    const keyConfig = this.options.keys.find((k) => k.id === keyId);
+    const usingOAuth = keyConfig ? isOAuthToken(keyConfig.apiKey) : false;
+
+    // When using OAuth setup-tokens, the API requires a Claude Code identity
+    // prepended to the system prompt. The user's custom system prompt is
+    // appended after it.  Reference: pi-ai (OpenClaw) anthropic.ts buildParams()
+    let systemPrompt: string | Anthropic.Messages.TextBlockParam[] | undefined;
+    if (usingOAuth) {
+      const blocks: Anthropic.Messages.TextBlockParam[] = [
+        { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+      ];
+      if (options.systemPrompt) {
+        blocks.push({ type: 'text', text: options.systemPrompt });
+      }
+      systemPrompt = blocks;
+    } else {
+      systemPrompt = options.systemPrompt;
+    }
+
     const response = await client.messages.create({
       model,
       max_tokens: options.maxTokens ?? DEFAULT_CONFIG.llm.defaultMaxTokens,
       temperature: options.temperature ?? DEFAULT_CONFIG.llm.defaultTemperature,
-      system: options.systemPrompt,
+      system: systemPrompt,
       messages: messages.map(toAnthropicMessage),
     });
 

@@ -43,15 +43,17 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Determine key type ──
-    // Setup-tokens from `claude setup-token` start with 'sk-ant-oat01-'
+    // Setup-tokens from `claude setup-token` start with 'sk-ant-oat01-' or 'sk-ant-oat'
     // Standard API keys start with 'sk-ant-api03-'
     // Both start with 'sk-ant-' — so we must check the more specific prefix.
-    const isSetupToken = key.startsWith('sk-ant-oat01-');
+    const isSetupToken = key.includes('sk-ant-oat');
     const isStandardKey = key.startsWith('sk-ant-') && !isSetupToken;
 
     // Prefer the explicit keyType from the frontend; fall back to auto-detect
-    let keyType: 'api-key' | 'bearer' = explicitKeyType ?? (isSetupToken ? 'bearer' : (isStandardKey ? 'api-key' : 'bearer'));
-    let validationWarning: string | undefined;
+    let keyType: 'api-key' | 'bearer' = explicitKeyType ?? (isSetupToken ? 'bearer' : 'api-key');
+
+    // Claude Code CLI version for OAuth headers
+    const CLAUDE_CODE_VERSION = '2.1.39';
 
     // ── Validate the key / connection ──
     if (provider === 'openai-compatible') {
@@ -78,8 +80,59 @@ export async function POST(request: NextRequest) {
         );
       }
       keyType = 'api-key'; // not relevant for proxy
-    } else if (keyType === 'api-key') {
-      // ── Standard Anthropic API key (sk-ant-*) — validate with a test call ──
+    } else if (isSetupToken) {
+      // ── Setup-token (sk-ant-oat*) — OAuth Bearer auth with beta headers ──
+      // Setup-tokens require:
+      //   1. Bearer auth (authToken) — NOT x-api-key
+      //   2. The "oauth-2025-04-20" beta header to enable OAuth on the API
+      //   3. The "claude-code-20250219" beta header to identify as Claude Code
+      //   4. Claude CLI user-agent and x-app headers
+      // Without these beta headers the API rejects with:
+      //   "OAuth authentication is currently not supported"
+      // Reference: pi-ai (OpenClaw) anthropic.ts createClient()
+      keyType = 'bearer';
+
+      // Sanity check: setup-tokens should be >= 80 chars
+      const trimmedKey = key.trim();
+      if (trimmedKey.length < 80) {
+        return NextResponse.json(
+          { error: 'Token looks too short. Make sure you copied the full output of "claude setup-token". Expected 80+ characters starting with sk-ant-oat.' },
+          { status: 400 },
+        );
+      }
+
+      // Validate with Bearer auth + Claude Code beta headers
+      try {
+        const Anthropic = (await import('@anthropic-ai/sdk')).default;
+        const client = new Anthropic({
+          apiKey: null as any,
+          authToken: trimmedKey,
+          defaultHeaders: {
+            'accept': 'application/json',
+            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+            'user-agent': `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`,
+            'x-app': 'cli',
+          },
+        });
+        await client.messages.create({
+          model: 'claude-3-5-haiku-latest',
+          max_tokens: 10,
+          system: 'You are Claude Code, Anthropic\'s official CLI for Claude.',
+          messages: [{ role: 'user', content: 'Hi' }],
+        });
+      } catch (err: any) {
+        if (err?.status === 401 || err?.status === 403) {
+          return NextResponse.json(
+            { error: `Authentication failed (${err.status}). Make sure the setup-token is valid and not expired. Try running "claude setup-token" again.` },
+            { status: 400 },
+          );
+        }
+        // Non-auth error (rate limit, overloaded, etc.) — token is valid
+        console.log(`[api-keys] Setup-token validation passed (non-auth error: ${err?.status})`);
+      }
+    } else {
+      // ── Standard Anthropic API key (sk-ant-api03-*) — validate with a test call ──
+      keyType = 'api-key';
       try {
         const Anthropic = (await import('@anthropic-ai/sdk')).default;
         const client = new Anthropic({ apiKey: key });
@@ -88,7 +141,6 @@ export async function POST(request: NextRequest) {
           max_tokens: 10,
           messages: [{ role: 'user', content: 'Hi' }],
         });
-        keyType = 'api-key';
       } catch (err: any) {
         if (err?.status === 401 || err?.status === 403) {
           return NextResponse.json(
@@ -97,42 +149,6 @@ export async function POST(request: NextRequest) {
           );
         }
         // Non-auth error (rate limit, model error, network) — key is valid
-        keyType = 'api-key';
-      }
-    } else {
-      // ── Setup-token / OAuth bearer token ──
-      // Setup-tokens from `claude setup-token` start with 'sk-ant-oat01-' and are
-      // at least 80 characters long (per OpenClaw's validation). They are passed to
-      // the Anthropic SDK as `authToken` (Bearer auth), not `apiKey` (x-api-key).
-      keyType = 'bearer';
-
-      // Sanity check: setup-tokens should start with sk-ant-oat01- and be >= 80 chars
-      const trimmedKey = key.trim();
-      if (isSetupToken && trimmedKey.length < 80) {
-        return NextResponse.json(
-          { error: 'Token looks too short. Make sure you copied the full output of "claude setup-token". Expected 80+ characters starting with sk-ant-oat01-.' },
-          { status: 400 },
-        );
-      } else if (!isSetupToken && trimmedKey.length < 20) {
-        return NextResponse.json(
-          { error: 'Token is too short. If using a setup-token, it should start with sk-ant-oat01-.' },
-          { status: 400 },
-        );
-      }
-
-      // Best-effort validation — try but don't block on failure
-      try {
-        const Anthropic = (await import('@anthropic-ai/sdk')).default;
-        const client = new Anthropic({ authToken: trimmedKey });
-        await client.messages.create({
-          model: 'claude-3-5-haiku-latest',
-          max_tokens: 10,
-          messages: [{ role: 'user', content: 'Hi' }],
-        });
-      } catch (err: any) {
-        // Log for debugging but don't block
-        console.warn(`[api-keys] Setup-token validation attempt (non-blocking): status=${err?.status} message=${err?.message}`);
-        validationWarning = 'Token saved. Could not validate immediately — it will be tested when you send your first message.';
       }
     }
 
@@ -165,7 +181,6 @@ export async function POST(request: NextRequest) {
         keyType,
         provider,
       },
-      warning: validationWarning,
     }, { status: 201 });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
