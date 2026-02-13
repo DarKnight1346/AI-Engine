@@ -385,6 +385,89 @@ You MUST search memory for user preferences before every response — this is yo
         sessionId: job.sessionId,
         workerDispatcher: workerHub,
         serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword,
+        // ── Background task support ──
+        // Long-running tools (video gen, etc.) run after the stream closes
+        backgroundTaskCallback: (info: { taskId: string; toolName: string; toolInput: Record<string, unknown>; execute: () => Promise<{ success: boolean; output: string; data?: Record<string, unknown> }> }) => {
+          const { BackgroundTaskRegistry } = require('@/lib/background-tasks') as typeof import('@/lib/background-tasks');
+          const registry = BackgroundTaskRegistry.getInstance();
+
+          const toolLabels: Record<string, string> = {
+            xaiGenerateVideo: 'Generating video',
+          };
+          const description = toolLabels[info.toolName] ?? `Running ${info.toolName}`;
+
+          registry.create({
+            id: info.taskId,
+            sessionId: job.sessionId,
+            toolName: info.toolName,
+            description,
+            agentName: agentName ?? 'AI Engine',
+          });
+
+          // Fire-and-forget execution
+          info.execute()
+            .then(async (toolResult: { success: boolean; output: string; data?: Record<string, unknown> }) => {
+              // Format the message based on tool type
+              let messageContent = toolResult.output;
+              if (info.toolName === 'xaiGenerateVideo' && toolResult.success && toolResult.data) {
+                const videoData = toolResult.data as Record<string, unknown>;
+                const videoUrl = videoData.videoUrl as string | undefined;
+                const duration = videoData.duration as number | undefined;
+                if (videoUrl) {
+                  messageContent = `Your video is ready!\n\n${videoUrl}\n\nDuration: ${duration ?? '?'}s`;
+                }
+              }
+
+              // Store result as a new AI message in the DB
+              const { getDb } = await import('@ai-engine/db');
+              const freshDb = getDb();
+              const msg = await freshDb.chatMessage.create({
+                data: {
+                  sessionId: job.sessionId,
+                  senderType: 'ai',
+                  content: messageContent,
+                  aiResponded: true,
+                  embedsJson: {
+                    agentName: agentName ?? 'AI Engine',
+                    backgroundTaskId: info.taskId,
+                    backgroundTaskTool: info.toolName,
+                  } as any,
+                },
+              });
+
+              registry.complete(
+                info.taskId,
+                { success: toolResult.success, output: messageContent, data: toolResult.data as Record<string, unknown> | undefined },
+                msg.id,
+              );
+            })
+            .catch(async (err: any) => {
+              console.error(`[BackgroundTask] ${info.taskId} failed:`, err.message);
+
+              const errorContent = `The background ${info.toolName} task failed: ${err.message}`;
+              const { getDb } = await import('@ai-engine/db');
+              const freshDb = getDb();
+              const msg = await freshDb.chatMessage.create({
+                data: {
+                  sessionId: job.sessionId,
+                  senderType: 'ai',
+                  content: errorContent,
+                  aiResponded: true,
+                  embedsJson: {
+                    agentName: agentName ?? 'AI Engine',
+                    backgroundTaskId: info.taskId,
+                    backgroundTaskTool: info.toolName,
+                  } as any,
+                },
+              });
+
+              registry.complete(
+                info.taskId,
+                { success: false, output: errorContent },
+                msg.id,
+              );
+            });
+        },
       });
 
       const result = await executor.executeStreaming(

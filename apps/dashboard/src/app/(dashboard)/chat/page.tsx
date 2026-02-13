@@ -5,7 +5,7 @@ import {
   Box, TextField, IconButton, Typography, Paper, List, ListItemButton,
   ListItemText, Divider, Avatar, Chip, InputAdornment, Stack,
   CircularProgress, Tooltip, Snackbar, Alert, Popover, MenuItem,
-  ListItemIcon, Fade, alpha, useTheme,
+  ListItemIcon, Fade, alpha, useTheme, Badge,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import AddIcon from '@mui/icons-material/Add';
@@ -19,6 +19,9 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
 import DownloadIcon from '@mui/icons-material/Download';
+import HourglassTopIcon from '@mui/icons-material/HourglassTop';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -28,6 +31,19 @@ interface Attachment {
   type: string;      // MIME type
   url: string;       // data URL for preview, or uploaded URL
   size: number;
+}
+
+interface BackgroundTaskInfo {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  description: string;
+  status: 'running' | 'completed' | 'failed';
+  result?: { success: boolean; output: string; data?: Record<string, unknown> };
+  messageId?: string;
+  agentName?: string;
+  startedAt: string;
+  completedAt?: string;
 }
 
 interface Message {
@@ -124,8 +140,8 @@ function CodeBlock({ content }: { content: string }) {
 }
 
 function FormattedText({ text }: { text: string }) {
-  // Regex for bold, italic, inline code, and links
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g);
+  // Regex for bold, italic, inline code, markdown links, and bare URLs
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s)<>]+)/g);
   return (
     <>
       {parts.map((part, i) => {
@@ -146,6 +162,9 @@ function FormattedText({ text }: { text: string }) {
         const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
         if (linkMatch)
           return <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9' }}>{linkMatch[1]}</a>;
+        // Bare URLs → clickable link opening in new tab
+        if (/^https?:\/\//.test(part))
+          return <a key={i} href={part} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9', wordBreak: 'break-all' }}>{part}</a>;
         return <Fragment key={i}>{part}</Fragment>;
       })}
     </>
@@ -259,6 +278,166 @@ function InlineImage({ url }: { url: string }) {
   );
 }
 
+/**
+ * Image Gallery — responsive masonry-style grid for 2+ images.
+ * Features: responsive columns, hover overlay with download, lightbox with
+ * keyboard nav (arrow keys, ESC), download-all button, image counter.
+ */
+function ImageGallery({ urls }: { urls: string[] }) {
+  const theme = useTheme();
+  const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+
+  // Keyboard navigation in lightbox
+  useEffect(() => {
+    if (lightboxIdx === null) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxIdx(null);
+      if (e.key === 'ArrowRight') setLightboxIdx((i) => (i !== null ? Math.min(i + 1, urls.length - 1) : null));
+      if (e.key === 'ArrowLeft') setLightboxIdx((i) => (i !== null ? Math.max(i - 1, 0) : null));
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [lightboxIdx, urls.length]);
+
+  // Responsive column count based on image count
+  const cols = urls.length <= 2 ? 2 : urls.length <= 4 ? 2 : urls.length <= 9 ? 3 : 4;
+
+  return (
+    <>
+      <Box sx={{ my: 1.5 }}>
+        {/* Header row */}
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+            {urls.length} image{urls.length !== 1 ? 's' : ''}
+          </Typography>
+          <Tooltip title="Download all images">
+            <IconButton
+              size="small"
+              onClick={() => urls.forEach((u, i) => setTimeout(() => downloadUrl(u, `image-${i + 1}.png`), i * 200))}
+              sx={{ color: 'text.secondary', '&:hover': { color: 'primary.main' } }}
+            >
+              <DownloadIcon sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        {/* Image grid */}
+        <Box sx={{
+          display: 'grid',
+          gridTemplateColumns: `repeat(${cols}, 1fr)`,
+          gap: 0.75,
+          borderRadius: 2,
+          overflow: 'hidden',
+        }}>
+          {urls.map((url, i) => (
+            <Box
+              key={i}
+              onClick={() => setLightboxIdx(i)}
+              sx={{
+                position: 'relative',
+                aspectRatio: '1 / 1',
+                cursor: 'pointer',
+                overflow: 'hidden',
+                bgcolor: alpha(theme.palette.background.paper, 0.3),
+                '&:hover': {
+                  '& img': { transform: 'scale(1.05)' },
+                  '& .gallery-overlay': { opacity: 1 },
+                },
+              }}
+            >
+              <Box
+                component="img"
+                src={url}
+                alt={`Image ${i + 1}`}
+                loading="lazy"
+                sx={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  transition: 'transform 0.25s ease',
+                }}
+              />
+              <Box
+                className="gallery-overlay"
+                sx={{
+                  position: 'absolute', inset: 0,
+                  background: 'linear-gradient(transparent 60%, rgba(0,0,0,0.5))',
+                  opacity: 0,
+                  transition: 'opacity 0.2s',
+                  display: 'flex',
+                  alignItems: 'flex-end',
+                  justifyContent: 'flex-end',
+                  p: 0.75,
+                }}
+              >
+                <IconButton
+                  size="small"
+                  onClick={(e) => { e.stopPropagation(); downloadUrl(url, `image-${i + 1}.png`); }}
+                  sx={{
+                    bgcolor: 'rgba(0,0,0,0.6)', color: 'white',
+                    backdropFilter: 'blur(4px)',
+                    width: 28, height: 28,
+                    '&:hover': { bgcolor: 'rgba(0,0,0,0.85)' },
+                  }}
+                >
+                  <DownloadIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+
+      {/* Lightbox overlay */}
+      {lightboxIdx !== null && (
+        <Box
+          onClick={() => setLightboxIdx(null)}
+          sx={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            bgcolor: 'rgba(0,0,0,0.9)', zIndex: 9999,
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            cursor: 'zoom-out',
+          }}
+        >
+          <Box
+            component="img"
+            src={urls[lightboxIdx]}
+            alt={`Image ${lightboxIdx + 1}`}
+            sx={{ maxWidth: '90vw', maxHeight: '80vh', borderRadius: 2, objectFit: 'contain' }}
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+          />
+          <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', gap: 2 }}>
+            <IconButton
+              disabled={lightboxIdx <= 0}
+              onClick={(e) => { e.stopPropagation(); setLightboxIdx((i) => Math.max((i ?? 1) - 1, 0)); }}
+              sx={{ color: 'white', '&.Mui-disabled': { color: 'rgba(255,255,255,0.2)' } }}
+            >
+              <Typography sx={{ fontSize: 20 }}>&larr;</Typography>
+            </IconButton>
+            <Typography sx={{ color: 'white', fontSize: 13, minWidth: 60, textAlign: 'center' }}>
+              {lightboxIdx + 1} / {urls.length}
+            </Typography>
+            <IconButton
+              disabled={lightboxIdx >= urls.length - 1}
+              onClick={(e) => { e.stopPropagation(); setLightboxIdx((i) => Math.min((i ?? 0) + 1, urls.length - 1)); }}
+              sx={{ color: 'white', '&.Mui-disabled': { color: 'rgba(255,255,255,0.2)' } }}
+            >
+              <Typography sx={{ fontSize: 20 }}>&rarr;</Typography>
+            </IconButton>
+            <IconButton
+              onClick={(e) => { e.stopPropagation(); downloadUrl(urls[lightboxIdx], `image-${lightboxIdx + 1}.png`); }}
+              sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.1)', ml: 1, '&:hover': { bgcolor: 'rgba(255,255,255,0.2)' } }}
+            >
+              <DownloadIcon />
+            </IconButton>
+          </Box>
+        </Box>
+      )}
+    </>
+  );
+}
+
 /** Render an inline video player with controls + download */
 function InlineVideo({ url }: { url: string }) {
   return (
@@ -302,12 +481,330 @@ function InlineVideo({ url }: { url: string }) {
   );
 }
 
+function VideoGallery({ urls }: { urls: string[] }) {
+  const cols = urls.length <= 2 ? 1 : 2;
+
+  return (
+    <Box sx={{ my: 1.5 }}>
+      {/* Header row */}
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+          {urls.length} video{urls.length !== 1 ? 's' : ''}
+        </Typography>
+        <Tooltip title="Download all videos">
+          <IconButton
+            size="small"
+            onClick={() => urls.forEach((u, i) => setTimeout(() => downloadUrl(u, `video-${i + 1}.mp4`), i * 300))}
+            sx={{ color: 'text.secondary', '&:hover': { color: 'primary.main' } }}
+          >
+            <DownloadIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      {/* Video grid */}
+      <Box sx={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${cols}, 1fr)`,
+        gap: 1,
+        borderRadius: 2,
+        overflow: 'hidden',
+      }}>
+        {urls.map((url, i) => (
+          <Box key={i} sx={{ position: 'relative', '&:hover .media-actions': { opacity: 1 } }}>
+            <Box
+              component="video"
+              src={url}
+              controls
+              preload="metadata"
+              sx={{
+                width: '100%',
+                maxHeight: 360,
+                borderRadius: 1.5,
+                display: 'block',
+                bgcolor: 'black',
+              }}
+            />
+            <Box
+              className="media-actions"
+              sx={{
+                position: 'absolute', top: 8, right: 8,
+                display: 'flex', gap: 0.5,
+                opacity: 0, transition: 'opacity 0.2s',
+              }}
+            >
+              <Tooltip title={`Download video ${i + 1}`}>
+                <IconButton
+                  size="small"
+                  onClick={() => downloadUrl(url, `video-${i + 1}.mp4`)}
+                  sx={{
+                    bgcolor: 'rgba(0,0,0,0.65)', color: 'white',
+                    backdropFilter: 'blur(4px)',
+                    '&:hover': { bgcolor: 'rgba(0,0,0,0.85)' },
+                  }}
+                >
+                  <DownloadIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+/** Video card from search results */
+interface VideoCard {
+  title: string;
+  link: string;
+  imageUrl: string;
+  duration: string;
+  channel: string;
+}
+
+/** Extract YouTube video ID from a URL */
+function getYouTubeId(url: string): string | null {
+  const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+/** Parse <!--VIDEO_RESULTS-->...<!--/VIDEO_RESULTS--> blocks from content */
+function extractVideoCards(text: string): { cards: VideoCard[]; cleaned: string } {
+  const regex = /<!--VIDEO_RESULTS-->([\s\S]*?)<!--\/VIDEO_RESULTS-->/g;
+  const allCards: VideoCard[] = [];
+  const cleaned = text.replace(regex, (_match, json: string) => {
+    try {
+      const parsed = JSON.parse(json);
+      if (Array.isArray(parsed)) allCards.push(...parsed);
+    } catch { /* skip malformed */ }
+    return '';
+  });
+  return { cards: allCards, cleaned };
+}
+
+/**
+ * Gallery for video SEARCH results — displays thumbnail cards with
+ * embedded YouTube players on click, or opens the video in a new tab.
+ */
+function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
+  const theme = useTheme();
+  const [playingIdx, setPlayingIdx] = useState<number | null>(null);
+  const cols = cards.length <= 2 ? 1 : cards.length <= 4 ? 2 : 3;
+
+  return (
+    <Box sx={{ my: 1.5 }}>
+      {/* Header */}
+      <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11, mb: 1, display: 'block' }}>
+        {cards.length} video{cards.length !== 1 ? 's' : ''} found
+      </Typography>
+
+      {/* Card grid */}
+      <Box sx={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${cols}, 1fr)`,
+        gap: 1.25,
+      }}>
+        {cards.map((card, i) => {
+          const ytId = getYouTubeId(card.link);
+          const isPlaying = playingIdx === i && ytId;
+
+          return (
+            <Box
+              key={i}
+              sx={{
+                borderRadius: 2,
+                overflow: 'hidden',
+                bgcolor: alpha(theme.palette.background.paper, 0.5),
+                border: `1px solid ${alpha(theme.palette.divider, 0.15)}`,
+                transition: 'border-color 0.2s, box-shadow 0.2s',
+                '&:hover': {
+                  borderColor: alpha(theme.palette.primary.main, 0.3),
+                  boxShadow: `0 2px 12px ${alpha(theme.palette.common.black, 0.25)}`,
+                },
+              }}
+            >
+              {/* Thumbnail / Embed area */}
+              <Box sx={{ position: 'relative', aspectRatio: '16 / 9', bgcolor: 'black' }}>
+                {isPlaying && ytId ? (
+                  <Box
+                    component="iframe"
+                    src={`https://www.youtube.com/embed/${ytId}?autoplay=1`}
+                    allow="autoplay; encrypted-media"
+                    allowFullScreen
+                    sx={{ width: '100%', height: '100%', border: 'none' }}
+                  />
+                ) : (
+                  <>
+                    {card.imageUrl && (
+                      <Box
+                        component="img"
+                        src={card.imageUrl}
+                        alt={card.title}
+                        loading="lazy"
+                        sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
+                    )}
+                    {/* Play overlay */}
+                    <Box
+                      onClick={() => ytId ? setPlayingIdx(i) : window.open(card.link, '_blank')}
+                      sx={{
+                        position: 'absolute', inset: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        cursor: 'pointer',
+                        bgcolor: 'rgba(0,0,0,0.15)',
+                        transition: 'background-color 0.2s',
+                        '&:hover': { bgcolor: 'rgba(0,0,0,0.35)' },
+                      }}
+                    >
+                      <Box sx={{
+                        width: 48, height: 48, borderRadius: '50%',
+                        bgcolor: 'rgba(0,0,0,0.7)', display: 'flex',
+                        alignItems: 'center', justifyContent: 'center',
+                        backdropFilter: 'blur(4px)',
+                      }}>
+                        <PlayArrowIcon sx={{ color: 'white', fontSize: 28 }} />
+                      </Box>
+                    </Box>
+                    {/* Duration badge */}
+                    {card.duration && (
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          position: 'absolute', bottom: 6, right: 6,
+                          bgcolor: 'rgba(0,0,0,0.8)', color: 'white',
+                          px: 0.75, py: 0.15, borderRadius: 0.5,
+                          fontSize: 10, fontWeight: 600,
+                          fontFamily: '"JetBrains Mono", monospace',
+                        }}
+                      >
+                        {card.duration}
+                      </Typography>
+                    )}
+                  </>
+                )}
+              </Box>
+
+              {/* Info row */}
+              <Box sx={{ px: 1.25, py: 1 }}>
+                <Typography
+                  variant="body2"
+                  component="a"
+                  href={card.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  sx={{
+                    color: 'text.primary',
+                    textDecoration: 'none',
+                    fontWeight: 600,
+                    fontSize: 12.5,
+                    lineHeight: 1.3,
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden',
+                    '&:hover': { color: 'primary.main' },
+                  }}
+                >
+                  {card.title}
+                </Typography>
+                {card.channel && (
+                  <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11, mt: 0.25, display: 'block' }}>
+                    {card.channel}
+                  </Typography>
+                )}
+                {/* Open in new tab link */}
+                <Box
+                  component="a"
+                  href={card.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  sx={{
+                    display: 'inline-flex', alignItems: 'center', gap: 0.4,
+                    color: 'text.secondary', fontSize: 10.5, mt: 0.5,
+                    textDecoration: 'none',
+                    '&:hover': { color: 'primary.main' },
+                  }}
+                >
+                  <OpenInNewIcon sx={{ fontSize: 12 }} />
+                  Open
+                </Box>
+              </Box>
+            </Box>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+}
+
 function MessageContent({ content, attachments }: { content: string; attachments?: Attachment[] }) {
-  // Split by code blocks first
-  const segments = content.split(/(```[\s\S]*?```)/g);
+  // ── Extract structured video search results ──
+  const { cards: videoSearchCards, cleaned: contentAfterVideoExtract } = extractVideoCards(content);
+
+  // ── Collect all media URLs across the entire content for galleries ──
+  // Strip markdown image/link syntax first, then find all media URLs.
+  let processedContent = contentAfterVideoExtract
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/\[[^\]]*\]\((https?:\/\/[^)]+\.(?:mp4|webm|mov|ogg|png|jpg|jpeg|gif|webp|svg)(?:\?[^)]*)?)\)/gi, '$1');
+
+  const allUrls = processedContent.match(URL_REGEX) ?? [];
+  const imageUrls = allUrls.filter((u) => isImageUrl(u));
+  const videoUrls = allUrls.filter((u) => isVideoUrl(u));
+  const useImageGallery = imageUrls.length >= 2;
+  const useVideoGallery = videoUrls.length >= 2;
+
+  // If showing an image gallery, strip image URLs from the text
+  if (useImageGallery) {
+    for (const imgUrl of imageUrls) {
+      processedContent = processedContent.split(imgUrl).join('');
+    }
+  }
+
+  // If showing a video gallery (direct files), strip video URLs from the text
+  if (useVideoGallery) {
+    for (const vidUrl of videoUrls) {
+      processedContent = processedContent.split(vidUrl).join('');
+    }
+  }
+
+  // If showing a video search gallery, strip the human-readable listing
+  // (numbered lines with YouTube links + titles) since the card gallery replaces it.
+  if (videoSearchCards.length > 0) {
+    for (const card of videoSearchCards) {
+      if (card.link) processedContent = processedContent.split(card.link).join('');
+      // Also strip lines that are just the card title/metadata from the tool output
+      if (card.title) {
+        const escapedTitle = card.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        processedContent = processedContent.replace(
+          new RegExp(`^\\s*\\d+[.)\\s]+${escapedTitle}.*$`, 'gm'), ''
+        );
+      }
+    }
+  }
+
+  // Clean up straggling list markers left behind (e.g. "1. - " or "- ")
+  if (useImageGallery || useVideoGallery || videoSearchCards.length > 0) {
+    processedContent = processedContent
+      .replace(/^\s*\d+[.)]\s*[-–—]?\s*$/gm, '')  // empty numbered list items
+      .replace(/^\s*[-*]\s*$/gm, '')                 // empty bullet items
+      .replace(/\n{3,}/g, '\n\n');                   // collapse excess blank lines
+  }
+
+  // Split by code blocks
+  const segments = processedContent.split(/(```[\s\S]*?```)/g);
 
   return (
     <Box sx={{ '& > *:first-of-type': { mt: 0 }, '& > *:last-child': { mb: 0 } }}>
+      {/* Render image gallery if 2+ image URLs were found */}
+      {useImageGallery && <ImageGallery urls={imageUrls} />}
+
+      {/* Render video search results as thumbnail cards */}
+      {videoSearchCards.length > 0 && <VideoSearchGallery cards={videoSearchCards} />}
+
+      {/* Render video gallery (direct .mp4 files) if 2+ video URLs were found */}
+      {useVideoGallery && <VideoGallery urls={videoUrls} />}
+
       {/* Render any explicit attachments (images, videos, files) */}
       {attachments && attachments.length > 0 && (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 1.5 }}>
@@ -568,9 +1065,11 @@ export default function ChatPage() {
   const [mentionCursorPos, setMentionCursorPos] = useState(0);
   const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskInfo[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const acknowledgedTasksRef = useRef<Set<string>>(new Set());
 
   // ── File attachment handlers ──
   const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
@@ -733,6 +1232,8 @@ export default function ChatPage() {
   // ── Switch session ──
   const switchSession = useCallback((sid: string) => {
     setSessionId(sid);
+    setBackgroundTasks([]);
+    acknowledgedTasksRef.current.clear();
     loadMessages(sid);
   }, [loadMessages]);
 
@@ -742,6 +1243,7 @@ export default function ChatPage() {
     setMessages([]);
     setInput('');
     setContextTokens(0);
+    setBackgroundTasks([]);
     inputRef.current?.focus();
   }, []);
 
@@ -917,6 +1419,8 @@ export default function ChatPage() {
       const decoder = new TextDecoder();
       let buffer = '';
       let currentEventType = '';
+      let receivedDone = false;
+      let streamSessionId: string | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -946,6 +1450,7 @@ export default function ChatPage() {
             switch (currentEventType) {
               case 'session':
                 if (data.sessionId) {
+                  streamSessionId = data.sessionId;
                   setSessionId(data.sessionId);
                   loadSessions();
                 }
@@ -994,11 +1499,26 @@ export default function ChatPage() {
                 break;
               }
 
+              case 'background_task': {
+                // A long-running tool was started in the background
+                const newTask: BackgroundTaskInfo = {
+                  id: data.taskId,
+                  sessionId: sessionId ?? '',
+                  toolName: data.toolName,
+                  description: data.toolName === 'xaiGenerateVideo' ? 'Generating video' : `Running ${data.toolName}`,
+                  status: 'running',
+                  startedAt: new Date().toISOString(),
+                };
+                setBackgroundTasks((prev) => [...prev, newTask]);
+                break;
+              }
+
               case 'tool':
               case 'status':
                 break;
 
               case 'done': {
+                receivedDone = true;
                 const msgId = slotMessages.get(slot);
                 if (msgId) {
                   setMessages((msgs) => msgs.map((m) =>
@@ -1015,6 +1535,7 @@ export default function ChatPage() {
               }
 
               case 'error': {
+                receivedDone = true; // Error is also a terminal event
                 const msgId = slotMessages.get(slot);
                 if (msgId) {
                   setMessages((msgs) => msgs.map((m) =>
@@ -1029,17 +1550,114 @@ export default function ChatPage() {
           }
         }
       }
+
+      // ── Stream ended — check if we got a proper termination ──
+      // If the stream was cut (proxy timeout, network blip) without a
+      // `done` or `error` event, the backend may still be processing.
+      // Poll the messages API to recover the AI response from DB.
+      if (!receivedDone && streamSessionId) {
+        console.warn('[Chat] SSE stream ended without done event — attempting recovery via polling');
+
+        const recoverSessionId = streamSessionId;
+        const slotMsgEntries = Array.from(slotMessages.entries());
+
+        // Retry up to 5 times with exponential backoff (2s, 4s, 8s, 16s, 32s)
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const delay = 2000 * Math.pow(2, attempt);
+          await new Promise((r) => setTimeout(r, delay));
+
+          try {
+            const pollRes = await fetch(`/api/chat/messages?sessionId=${recoverSessionId}`);
+            if (!pollRes.ok) continue;
+            const pollData = await pollRes.json();
+            const dbMessages: Array<{ id: string; role: string; content: string; agentName?: string }> = pollData.messages ?? [];
+
+            // Find the latest AI messages that weren't part of our local slots
+            const localSlotIds = new Set(slotMsgEntries.map(([, id]) => id));
+            const latestAiMsgs = dbMessages.filter(
+              (m) => m.role === 'ai' && m.content && !localSlotIds.has(m.id)
+            );
+
+            if (latestAiMsgs.length > 0) {
+              // The backend finished — replace our placeholder(s) with the DB content
+              const lastAi = latestAiMsgs[latestAiMsgs.length - 1];
+              // Update the first empty slot with the recovered content
+              for (const [, msgId] of slotMsgEntries) {
+                const slotText = slotContent.get(slotMsgEntries.find(([, id]) => id === msgId)?.[0] ?? '') ?? '';
+                if (!slotText) {
+                  setMessages((msgs) => msgs.map((m) =>
+                    m.id === msgId
+                      ? { ...m, content: lastAi.content, agentName: lastAi.agentName || m.agentName }
+                      : m
+                  ));
+                  break;
+                }
+              }
+              console.log(`[Chat] Recovery successful on attempt ${attempt + 1}`);
+              break;
+            }
+
+            // Check if all our slot messages already have content (partial streaming succeeded)
+            const allSlotsHaveContent = slotMsgEntries.every(
+              ([slot]) => (slotContent.get(slot) ?? '').length > 0
+            );
+            if (allSlotsHaveContent) {
+              console.log('[Chat] All slots have partial content — keeping streamed text');
+              break;
+            }
+          } catch {
+            // Poll failed — continue retrying
+          }
+        }
+      }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
-        setMessages((prev) => {
-          const emptySlotMsgIds = Array.from(slotMessages.values());
-          return prev.map((m) => {
-            if (emptySlotMsgIds.includes(m.id) && !m.content) {
-              return { ...m, content: `Failed to connect: ${err.message}` };
-            }
-            return m;
+        // ── Connection error recovery ──
+        // If we got a network error but a session was established,
+        // attempt to recover by polling the messages API.
+        const recoverSessionId = sessionId;
+        const slotMsgEntries = Array.from(slotMessages.entries());
+        let recovered = false;
+
+        if (recoverSessionId) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
+            try {
+              const pollRes = await fetch(`/api/chat/messages?sessionId=${recoverSessionId}`);
+              if (!pollRes.ok) continue;
+              const pollData = await pollRes.json();
+              const dbMessages: Array<{ id: string; role: string; content: string; agentName?: string }> = pollData.messages ?? [];
+              const lastAi = [...dbMessages].reverse().find((m) => m.role === 'ai' && m.content);
+              if (lastAi) {
+                for (const [, msgId] of slotMsgEntries) {
+                  const slotText = slotContent.get(slotMsgEntries.find(([, id]) => id === msgId)?.[0] ?? '') ?? '';
+                  if (!slotText) {
+                    setMessages((msgs) => msgs.map((m) =>
+                      m.id === msgId
+                        ? { ...m, content: lastAi.content, agentName: lastAi.agentName || m.agentName }
+                        : m
+                    ));
+                    recovered = true;
+                    break;
+                  }
+                }
+                if (recovered) break;
+              }
+            } catch { /* continue */ }
+          }
+        }
+
+        if (!recovered) {
+          setMessages((prev) => {
+            const emptySlotMsgIds = Array.from(slotMessages.values());
+            return prev.map((m) => {
+              if (emptySlotMsgIds.includes(m.id) && !m.content) {
+                return { ...m, content: `Connection lost: ${err.message}. The agent may still be processing — check back shortly.` };
+              }
+              return m;
+            });
           });
-        });
+        }
       }
     } finally {
       setSending(false);
@@ -1064,12 +1682,84 @@ export default function ChatPage() {
     return () => window.removeEventListener('keydown', handler);
   }, [startNewConversation]);
 
+  // ── Background task polling ──
+  // When there are running tasks, poll /api/chat/tasks every 3 seconds.
+  // On completion, inject the result message and acknowledge the task.
+  useEffect(() => {
+    const hasRunning = backgroundTasks.some((t) => t.status === 'running');
+    if (!hasRunning || !sessionId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/chat/tasks?sessionId=${sessionId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const tasks: BackgroundTaskInfo[] = data.tasks ?? [];
+        setBackgroundTasks(tasks);
+
+        // Check for newly completed tasks
+        for (const task of tasks) {
+          if (
+            (task.status === 'completed' || task.status === 'failed') &&
+            !acknowledgedTasksRef.current.has(task.id)
+          ) {
+            acknowledgedTasksRef.current.add(task.id);
+
+            // Inject the result as a new AI message in the chat
+            const newMsg: Message = {
+              id: task.messageId ?? crypto.randomUUID(),
+              role: 'ai',
+              content: task.result?.output ?? (task.status === 'failed' ? 'Background task failed.' : ''),
+              timestamp: new Date(task.completedAt ?? Date.now()),
+              agentName: task.agentName,
+            };
+            setMessages((prev) => [...prev, newMsg]);
+            setSnack({
+              open: true,
+              message: task.status === 'completed'
+                ? `Background task complete: ${task.description}`
+                : `Background task failed: ${task.description}`,
+              severity: task.status === 'completed' ? 'success' : 'error',
+            });
+
+            // Acknowledge the task to clean it up on the server
+            fetch('/api/chat/tasks', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ taskId: task.id }),
+            }).catch(() => { /* ignore ack errors */ });
+          }
+        }
+      } catch {
+        // Polling errors are non-fatal
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [backgroundTasks, sessionId]);
+
   /* ─── Render ────────────────────────────────────────────────────────── */
 
   const sidebarBg = alpha(theme.palette.background.paper, 0.6);
   const chatBg = theme.palette.background.default;
 
   return (
+    <>
+    {/* Global CSS for Siri-style animated glow border */}
+    <style>{`
+      @property --glow-angle {
+        syntax: "<angle>";
+        initial-value: 0deg;
+        inherits: false;
+      }
+      @keyframes siriRotate {
+        to { --glow-angle: 360deg; }
+      }
+      @keyframes siriPulse {
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 0.75; }
+      }
+    `}</style>
     <Box sx={{ display: 'flex', height: { xs: 'calc(100vh - 56px)', sm: 'calc(100vh - 64px)' }, overflow: 'hidden' }}>
       {/* ── Sidebar ────────────────────────────────────────────────── */}
       <Box
@@ -1165,7 +1855,76 @@ export default function ChatPage() {
       </Box>
 
       {/* ── Main chat area ──────────────────────────────────────────── */}
-      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', bgcolor: chatBg, minWidth: 0 }}>
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', bgcolor: chatBg, minWidth: 0, position: 'relative' }}>
+
+        {/* ── Background task indicator ─────────────────────────────── */}
+        {backgroundTasks.filter((t) => t.status === 'running').length > 0 && (
+          <Fade in timeout={400}>
+            <Box
+              sx={{
+                position: 'absolute',
+                top: 12,
+                right: 16,
+                zIndex: 20,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                px: 1.5,
+                py: 0.75,
+                borderRadius: 3,
+                bgcolor: alpha(theme.palette.background.paper, 0.85),
+                backdropFilter: 'blur(8px)',
+                border: '1px solid',
+                borderColor: alpha(theme.palette.primary.main, 0.3),
+                boxShadow: `0 0 16px ${alpha(theme.palette.primary.main, 0.15)}, 0 0 4px ${alpha(theme.palette.primary.main, 0.1)}`,
+                animation: 'bgTaskPulse 2.5s ease-in-out infinite',
+                '@keyframes bgTaskPulse': {
+                  '0%, 100%': {
+                    boxShadow: `0 0 16px ${alpha(theme.palette.primary.main, 0.15)}, 0 0 4px ${alpha(theme.palette.primary.main, 0.1)}`,
+                    borderColor: alpha(theme.palette.primary.main, 0.3),
+                  },
+                  '50%': {
+                    boxShadow: `0 0 24px ${alpha(theme.palette.primary.main, 0.3)}, 0 0 8px ${alpha(theme.palette.primary.main, 0.2)}`,
+                    borderColor: alpha(theme.palette.primary.main, 0.5),
+                  },
+                },
+              }}
+            >
+              <Badge
+                badgeContent={backgroundTasks.filter((t) => t.status === 'running').length}
+                color="primary"
+                sx={{
+                  '& .MuiBadge-badge': {
+                    fontSize: 10,
+                    minWidth: 16,
+                    height: 16,
+                    p: 0,
+                  },
+                }}
+              >
+                <HourglassTopIcon
+                  sx={{
+                    fontSize: 18,
+                    color: 'primary.main',
+                    animation: 'bgTaskSpin 2s linear infinite',
+                    '@keyframes bgTaskSpin': {
+                      '0%': { transform: 'rotate(0deg)' },
+                      '100%': { transform: 'rotate(360deg)' },
+                    },
+                  }}
+                />
+              </Badge>
+              <Box>
+                <Typography variant="caption" sx={{ fontWeight: 600, fontSize: 11, color: 'primary.main', lineHeight: 1.2, display: 'block' }}>
+                  Working in background
+                </Typography>
+                <Typography variant="caption" sx={{ fontSize: 10, color: 'text.secondary', lineHeight: 1.2 }}>
+                  {backgroundTasks.filter((t) => t.status === 'running').map((t) => t.description).join(', ')}
+                </Typography>
+              </Box>
+            </Box>
+          </Fade>
+        )}
 
         {/* Messages */}
         <Box
@@ -1251,6 +2010,11 @@ export default function ChatPage() {
 
                 const showAvatar = idx === 0 || messages[idx - 1].role !== msg.role;
 
+                // Detect if this AI message is still being actively generated
+                // (any AI message after the last user message while still streaming)
+                const lastUserIdx = messages.reduce((acc, m, i) => m.role === 'user' ? i : acc, -1);
+                const isActiveAi = !isUser && sending && idx > lastUserIdx;
+
                 return (
                   <Fade in key={msg.id} timeout={300}>
                     <Box sx={{
@@ -1289,6 +2053,42 @@ export default function ChatPage() {
                             </Typography>
                           </Box>
                         )}
+                        {/* Siri-style glow wrapper — only active during generation */}
+                        <Box
+                          className={isActiveAi ? 'siri-glow-active' : undefined}
+                          sx={{
+                            position: 'relative',
+                            borderRadius: isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                            '&.siri-glow-active': {
+                              // Animated gradient border
+                              '&::before': {
+                                content: '""',
+                                position: 'absolute',
+                                inset: -1,
+                                borderRadius: 'inherit',
+                                padding: '1.5px',
+                                background: 'conic-gradient(from var(--glow-angle, 0deg), #6366f1, #06b6d4, #a855f7, #ec4899, #6366f1)',
+                                WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+                                WebkitMaskComposite: 'xor',
+                                maskComposite: 'exclude',
+                                animation: 'siriRotate 3s linear infinite',
+                                opacity: 0.85,
+                              },
+                              // Ambient glow blur
+                              '&::after': {
+                                content: '""',
+                                position: 'absolute',
+                                inset: -6,
+                                borderRadius: 'inherit',
+                                background: 'conic-gradient(from var(--glow-angle, 0deg), rgba(99,102,241,0.3), rgba(6,182,212,0.3), rgba(168,85,247,0.3), rgba(236,72,153,0.3), rgba(99,102,241,0.3))',
+                                filter: 'blur(14px)',
+                                animation: 'siriRotate 3s linear infinite, siriPulse 2s ease-in-out infinite',
+                                opacity: 0.6,
+                                zIndex: -1,
+                              },
+                            },
+                          }}
+                        >
                         <Paper
                           elevation={0}
                           sx={{
@@ -1300,7 +2100,11 @@ export default function ChatPage() {
                             border: '1px solid',
                             borderColor: isUser
                               ? alpha(theme.palette.primary.main, 0.15)
-                              : alpha(theme.palette.divider, 0.5),
+                              : isActiveAi
+                                ? 'transparent'
+                                : alpha(theme.palette.divider, 0.5),
+                            position: 'relative',
+                            zIndex: 1,
                           }}
                         >
                           {isUser ? (
@@ -1349,6 +2153,7 @@ export default function ChatPage() {
                             <MessageContent content={msg.content} attachments={msg.attachments} />
                           )}
                         </Paper>
+                        </Box>
                       </Box>
                     </Box>
                   </Fade>
@@ -1365,13 +2170,46 @@ export default function ChatPage() {
                   }}>
                     <SmartToyIcon sx={{ fontSize: 16 }} />
                   </Avatar>
-                  <Paper elevation={0} sx={{
-                    px: 2, py: 1.25, borderRadius: '16px 16px 16px 4px',
-                    bgcolor: alpha(theme.palette.background.paper, 0.5),
-                    border: '1px solid', borderColor: alpha(theme.palette.divider, 0.5),
-                  }}>
-                    <TypingIndicator />
-                  </Paper>
+                  <Box
+                    className="siri-glow-active"
+                    sx={{
+                      position: 'relative',
+                      borderRadius: '16px 16px 16px 4px',
+                      '&.siri-glow-active::before': {
+                        content: '""',
+                        position: 'absolute',
+                        inset: -1,
+                        borderRadius: 'inherit',
+                        padding: '1.5px',
+                        background: 'conic-gradient(from var(--glow-angle, 0deg), #6366f1, #06b6d4, #a855f7, #ec4899, #6366f1)',
+                        WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+                        WebkitMaskComposite: 'xor',
+                        maskComposite: 'exclude',
+                        animation: 'siriRotate 3s linear infinite',
+                        opacity: 0.85,
+                      },
+                      '&.siri-glow-active::after': {
+                        content: '""',
+                        position: 'absolute',
+                        inset: -6,
+                        borderRadius: 'inherit',
+                        background: 'conic-gradient(from var(--glow-angle, 0deg), rgba(99,102,241,0.3), rgba(6,182,212,0.3), rgba(168,85,247,0.3), rgba(236,72,153,0.3), rgba(99,102,241,0.3))',
+                        filter: 'blur(14px)',
+                        animation: 'siriRotate 3s linear infinite, siriPulse 2s ease-in-out infinite',
+                        opacity: 0.6,
+                        zIndex: -1,
+                      },
+                    }}
+                  >
+                    <Paper elevation={0} sx={{
+                      px: 2, py: 1.25, borderRadius: '16px 16px 16px 4px',
+                      bgcolor: alpha(theme.palette.background.paper, 0.5),
+                      border: '1px solid', borderColor: 'transparent',
+                      position: 'relative', zIndex: 1,
+                    }}>
+                      <TypingIndicator />
+                    </Paper>
+                  </Box>
                 </Box>
               )}
             </Box>
@@ -1658,5 +2496,6 @@ export default function ChatPage() {
         </Alert>
       </Snackbar>
     </Box>
+    </>
   );
 }

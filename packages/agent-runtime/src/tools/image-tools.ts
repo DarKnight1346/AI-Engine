@@ -35,6 +35,11 @@ export interface ImageServiceLike {
     duration: number;
     model: string;
   }>;
+  generateVideoBatch(prompt: string, n: number, options?: Record<string, unknown>): Promise<Array<{
+    url: string;
+    duration: number;
+    model: string;
+  }>>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -47,11 +52,13 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
     {
       name: 'xaiGenerateImage',
       description:
-        'Generate an image from a text description using xAI Grok Imagine. ' +
-        'Fast and affordable ($0.02/image). Use this when the user asks you to CREATE, DRAW, DESIGN, or GENERATE an image — ' +
+        'Generate images from a text description using xAI Grok Imagine. ' +
+        'Fast and affordable ($0.02/image). Use this when the user asks you to CREATE, DRAW, DESIGN, or GENERATE images — ' +
         'NOT when they want to find existing images (use webSearchImages for that). ' +
+        'Supports generating up to 100 images in parallel batches. ' +
         'Supports aspect ratios: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 2:1, 1:2, auto. ' +
-        'Can also EDIT an existing image by providing imageUrl.',
+        'Can also EDIT an existing image by providing imageUrl. ' +
+        'IMPORTANT: Include all generated image URLs on their own lines in your response — the UI renders them as a visual gallery.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -65,7 +72,7 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
           },
           n: {
             type: 'number',
-            description: 'Number of image variations to generate (1-10, default 1).',
+            description: 'Number of images to generate (1-100, default 1). Large batches are executed in parallel.',
           },
           imageUrl: {
             type: 'string',
@@ -84,7 +91,7 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
             responseFormat: 'url',
           };
           if (input.aspectRatio) options.aspectRatio = input.aspectRatio;
-          if (input.n) options.n = input.n;
+          if (input.n) options.n = Math.min(Number(input.n) || 1, 100);
           if (input.imageUrl) options.imageUrl = input.imageUrl;
 
           const result = await service.generate(prompt, options);
@@ -93,17 +100,15 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
             return { success: false, output: 'Image generation produced no results.' };
           }
 
-          const imageEntries = result.images.map((img, i) => {
-            const prefix = result.images.length > 1 ? `Image ${i + 1}: ` : '';
-            const url = img.url ?? '[base64 data]';
-            const revised = img.revisedPrompt ? `\n  Revised prompt: "${img.revisedPrompt}"` : '';
-            return `${prefix}${url}${revised}`;
-          });
+          // Output each URL on its own line for clean gallery rendering
+          const imageUrls = result.images
+            .map((img) => img.url)
+            .filter((u): u is string => !!u);
 
           return {
             success: true,
-            output: `Generated ${result.images.length} image(s):\n${imageEntries.join('\n')}\n\n_[Model: ${result.model}]_`,
-            data: { images: result.images, model: result.model },
+            output: `Generated ${imageUrls.length} image(s):\n\n${imageUrls.join('\n')}\n\n_[Model: ${result.model}]_`,
+            data: { images: result.images, imageUrls, model: result.model },
           };
         } catch (err: any) {
           return { success: false, output: `Image generation failed: ${err.message}` };
@@ -115,10 +120,11 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
     {
       name: 'xaiGenerateImagePro',
       description:
-        'Generate a HIGH-QUALITY image using xAI Grok Imagine Pro ($0.07/image). ' +
+        'Generate HIGH-QUALITY images using xAI Grok Imagine Pro ($0.07/image). ' +
         'Use this only when the user explicitly asks for professional/premium quality, ' +
         'or when the standard xaiGenerateImage results are not sufficient. ' +
-        'Same parameters as xaiGenerateImage but produces higher fidelity output.',
+        'Supports up to 100 images in parallel. Same parameters as xaiGenerateImage but higher fidelity. ' +
+        'IMPORTANT: Include all generated image URLs on their own lines — the UI renders them as a visual gallery.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -132,7 +138,7 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
           },
           n: {
             type: 'number',
-            description: 'Number of image variations (1-10, default 1).',
+            description: 'Number of images to generate (1-100, default 1). Large batches run in parallel.',
           },
           imageUrl: {
             type: 'string',
@@ -151,7 +157,7 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
             responseFormat: 'url',
           };
           if (input.aspectRatio) options.aspectRatio = input.aspectRatio;
-          if (input.n) options.n = input.n;
+          if (input.n) options.n = Math.min(Number(input.n) || 1, 100);
           if (input.imageUrl) options.imageUrl = input.imageUrl;
 
           const result = await service.generate(prompt, options);
@@ -160,17 +166,14 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
             return { success: false, output: 'Pro image generation produced no results.' };
           }
 
-          const imageEntries = result.images.map((img, i) => {
-            const prefix = result.images.length > 1 ? `Image ${i + 1}: ` : '';
-            const url = img.url ?? '[base64 data]';
-            const revised = img.revisedPrompt ? `\n  Revised prompt: "${img.revisedPrompt}"` : '';
-            return `${prefix}${url}${revised}`;
-          });
+          const imageUrls = result.images
+            .map((img) => img.url)
+            .filter((u): u is string => !!u);
 
           return {
             success: true,
-            output: `Generated ${result.images.length} pro image(s):\n${imageEntries.join('\n')}\n\n_[Model: ${result.model} (Pro)]_`,
-            data: { images: result.images, model: result.model },
+            output: `Generated ${imageUrls.length} pro image(s):\n\n${imageUrls.join('\n')}\n\n_[Model: ${result.model} (Pro)]_`,
+            data: { images: result.images, imageUrls, model: result.model },
           };
         } catch (err: any) {
           return { success: false, output: `Pro image generation failed: ${err.message}` };
@@ -182,18 +185,24 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
     {
       name: 'xaiGenerateVideo',
       description:
-        'Generate a video from a text description using xAI Grok Imagine Video ($0.05/video). ' +
+        'Generate one or more videos from a text description using xAI Grok Imagine Video ($0.05/video). ' +
         'Use when the user asks you to CREATE, MAKE, or GENERATE a video or animation. ' +
         'Supports text-to-video, image-to-video (animate a still image), and video editing (modify an existing video). ' +
+        'Set n > 1 to generate multiple videos in parallel (max 20). ' +
         'Duration: 1-15 seconds. Resolutions: 480p (faster) or 720p (HD). ' +
         'Aspect ratios: 16:9 (default), 9:16 (portrait), 1:1, 4:3, 3:2. ' +
-        'NOTE: Video generation is asynchronous and may take 30s-2min to complete.',
+        'NOTE: Video generation is asynchronous and may take 30s-2min per video. ' +
+        'IMPORTANT: Include all video URLs on separate lines in your response for proper rendering.',
       inputSchema: {
         type: 'object',
         properties: {
           prompt: {
             type: 'string',
             description: 'Detailed description of the video to generate. Describe the scene, motion, camera movement, atmosphere.',
+          },
+          n: {
+            type: 'number',
+            description: 'Number of videos to generate (1-20). Multiple videos are generated in parallel. Default: 1.',
           },
           duration: {
             type: 'number',
@@ -230,15 +239,36 @@ export function createImageTools(service: ImageServiceLike): Tool[] {
           if (input.imageUrl) options.imageUrl = input.imageUrl;
           if (input.videoUrl) options.videoUrl = input.videoUrl;
 
-          const result = await service.generateVideo(prompt, options);
+          const requestedN = Math.max(1, Math.min(Number(input.n) || 1, 20));
+
+          // Single video
+          if (requestedN === 1) {
+            const result = await service.generateVideo(prompt, options);
+            return {
+              success: true,
+              output: `Generated video (${result.duration}s):\n${result.url}\n\n_[Model: ${result.model}]_`,
+              data: {
+                videoUrl: result.url,
+                videoUrls: [result.url],
+                duration: result.duration,
+                model: result.model,
+                count: 1,
+              },
+            };
+          }
+
+          // Batch parallel generation
+          const results = await service.generateVideoBatch(prompt, requestedN, options);
+          const videoUrls = results.map((r) => r.url).filter(Boolean);
 
           return {
             success: true,
-            output: `Generated video (${result.duration}s):\n${result.url}\n\n_[Model: ${result.model}]_`,
+            output: `Generated ${videoUrls.length} video(s):\n\n${videoUrls.join('\n')}\n\n_[Model: ${results[0]?.model ?? 'grok-imagine-video'}]_`,
             data: {
-              videoUrl: result.url,
-              duration: result.duration,
-              model: result.model,
+              videoUrls,
+              videos: results,
+              model: results[0]?.model ?? 'grok-imagine-video',
+              count: videoUrls.length,
             },
           };
         } catch (err: any) {
@@ -258,8 +288,8 @@ export function getImageToolManifest(): ToolManifestEntry[] {
     {
       name: 'xaiGenerateImage',
       description:
-        'Generate an image from a text description using xAI Grok Imagine. ' +
-        'Fast and affordable ($0.02/image). Use for creating, drawing, designing new images — not for finding existing ones.',
+        'Generate images from a text description using xAI Grok Imagine ($0.02/image). ' +
+        'Supports batch generation of 1-100 images in parallel. Results are displayed as a visual gallery.',
       category: 'media-generation',
       inputSchema: {
         type: 'object',
@@ -277,8 +307,8 @@ export function getImageToolManifest(): ToolManifestEntry[] {
     {
       name: 'xaiGenerateImagePro',
       description:
-        'Generate a high-quality professional image using xAI Grok Imagine Pro ($0.07/image). ' +
-        'More expensive but higher fidelity. Use only when premium quality is explicitly requested.',
+        'Generate high-quality professional images using xAI Grok Imagine Pro ($0.07/image). ' +
+        'Supports batch generation of 1-100 images in parallel. Higher fidelity. Use when premium quality is requested.',
       category: 'media-generation',
       inputSchema: {
         type: 'object',
@@ -296,14 +326,15 @@ export function getImageToolManifest(): ToolManifestEntry[] {
     {
       name: 'xaiGenerateVideo',
       description:
-        'Generate a video from a text description using xAI Grok Imagine Video ($0.05/video). ' +
-        'Supports text-to-video, image-to-video animation, and video editing. ' +
-        'Duration 1-15 seconds, 480p or 720p. Takes 30s-2min to complete.',
+        'Generate one or more videos from a text description using xAI Grok Imagine Video ($0.05/video). ' +
+        'Supports parallel batch generation of 1-20 videos, text-to-video, image-to-video animation, and video editing. ' +
+        'Duration 1-15 seconds, 480p or 720p. Takes 30s-2min per video.',
       category: 'media-generation',
       inputSchema: {
         type: 'object',
         properties: {
           prompt: { type: 'string' },
+          n: { type: 'number' },
           duration: { type: 'number' },
           aspectRatio: { type: 'string' },
           resolution: { type: 'string' },

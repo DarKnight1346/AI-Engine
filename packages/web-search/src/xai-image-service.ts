@@ -120,6 +120,9 @@ export class XaiImageService {
 
   /**
    * Generate images from a text prompt using xAI Grok Imagine.
+   *
+   * For n > 10: splits into parallel batches (xAI API supports max 10/request)
+   * and executes them concurrently. Supports up to 100+ images.
    */
   async generate(prompt: string, options: XaiImageOptions = {}): Promise<XaiImageResult> {
     if (!this.apiKey) {
@@ -127,29 +130,79 @@ export class XaiImageService {
     }
 
     const model = options.model ?? 'grok-imagine-image';
+    const totalN = options.n ?? 1;
     const responseFormat = options.responseFormat ?? 'url';
 
-    // Check cache (only for URL responses — b64 is too large to cache)
-    if (responseFormat === 'url') {
-      const cacheKey = `xai:img:${model}:${prompt}:${options.n ?? 1}:${options.aspectRatio ?? '1:1'}:${options.imageUrl ?? ''}`;
+    // Check cache (only for small requests)
+    if (responseFormat === 'url' && totalN <= 10) {
+      const cacheKey = `xai:img:${model}:${prompt}:${totalN}:${options.aspectRatio ?? '1:1'}:${options.imageUrl ?? ''}`;
       const cached = await this.cache.get(cacheKey);
       if (cached) return cached as XaiImageResult;
     }
 
+    // ── Parallel batch generation for large n ──────────────────────
+    // xAI API supports max 10 images per request. For larger batches,
+    // split into parallel requests of up to 10 each.
+    const MAX_PER_REQUEST = 10;
+
+    if (totalN > MAX_PER_REQUEST) {
+      const batches: number[] = [];
+      let remaining = totalN;
+      while (remaining > 0) {
+        const batchSize = Math.min(remaining, MAX_PER_REQUEST);
+        batches.push(batchSize);
+        remaining -= batchSize;
+      }
+
+      console.log(`[XaiImageService] Generating ${totalN} images in ${batches.length} parallel batches: [${batches.join(', ')}]`);
+
+      const batchPromises = batches.map((batchN) =>
+        this.generateSingleBatch(prompt, { ...options, n: batchN, responseFormat, model })
+      );
+
+      const batchResults = await Promise.allSettled(batchPromises);
+
+      const allImages: XaiGeneratedImage[] = [];
+      let usedModel = model;
+
+      for (const br of batchResults) {
+        if (br.status === 'fulfilled') {
+          allImages.push(...br.value.images);
+          usedModel = br.value.model;
+        } else {
+          console.error(`[XaiImageService] Batch failed:`, br.reason?.message ?? br.reason);
+        }
+      }
+
+      if (allImages.length === 0) {
+        throw new Error(`All ${batches.length} image generation batches failed`);
+      }
+
+      console.log(`[XaiImageService] Generated ${allImages.length}/${totalN} images successfully`);
+
+      return { images: allImages, model: usedModel };
+    }
+
+    // ── Single request (n ≤ 10) ───────────────────────────────────
+    return this.generateSingleBatch(prompt, { ...options, n: totalN, responseFormat, model });
+  }
+
+  /**
+   * Execute a single image generation API call (n ≤ 10).
+   */
+  private async generateSingleBatch(
+    prompt: string,
+    options: XaiImageOptions & { responseFormat: string; model: string },
+  ): Promise<XaiImageResult> {
     const body: Record<string, unknown> = {
-      model,
+      model: options.model,
       prompt,
       n: options.n ?? 1,
-      response_format: responseFormat,
+      response_format: options.responseFormat,
     };
 
-    if (options.aspectRatio) {
-      body.aspect_ratio = options.aspectRatio;
-    }
-
-    if (options.imageUrl) {
-      body.image_url = options.imageUrl;
-    }
+    if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+    if (options.imageUrl) body.image_url = options.imageUrl;
 
     const response = await fetch(`${XAI_BASE_URL}/images/generations`, {
       method: 'POST',
@@ -180,12 +233,12 @@ export class XaiImageService {
 
     const result: XaiImageResult = {
       images,
-      model: data.model ?? model,
+      model: data.model ?? options.model,
     };
 
-    // Cache URL results
-    if (responseFormat === 'url') {
-      const cacheKey = `xai:img:${model}:${prompt}:${options.n ?? 1}:${options.aspectRatio ?? '1:1'}:${options.imageUrl ?? ''}`;
+    // Cache small requests
+    if (options.responseFormat === 'url' && (options.n ?? 1) <= 10) {
+      const cacheKey = `xai:img:${options.model}:${prompt}:${options.n ?? 1}:${options.aspectRatio ?? '1:1'}:${options.imageUrl ?? ''}`;
       await this.cache.set(cacheKey, result, CACHE_TTL);
     }
 
@@ -197,16 +250,63 @@ export class XaiImageService {
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
-   * Generate a video from a text prompt (and optionally a source image/video).
-   * This is an async operation: submits a request, then polls until done.
-   * Typical generation time: 30s to several minutes.
+   * Generate a single video from a text prompt.
+   * Delegates to the private submit+poll method.
    */
   async generateVideo(prompt: string, options: XaiVideoOptions = {}): Promise<XaiVideoResult> {
     if (!this.apiKey) {
       throw new Error('xAI API key not configured. Add your API key in Settings → Web Search → Tier 2.');
     }
+    return this.generateSingleVideo(prompt, options);
+  }
 
-    // Step 1: Submit generation request
+  /**
+   * Generate multiple videos in parallel from the same prompt + options.
+   * Each video is independently submitted and polled concurrently.
+   * Capped at 20 concurrent videos to respect rate limits (60 rpm).
+   */
+  async generateVideoBatch(
+    prompt: string,
+    n: number,
+    options: XaiVideoOptions = {},
+  ): Promise<XaiVideoResult[]> {
+    if (!this.apiKey) {
+      throw new Error('xAI API key not configured. Add your API key in Settings → Web Search → Tier 2.');
+    }
+
+    const count = Math.max(1, Math.min(n, 20));
+    console.log(`[XaiImageService] Generating ${count} videos in parallel...`);
+
+    const promises = Array.from({ length: count }, (_, i) =>
+      this.generateSingleVideo(prompt, options)
+        .then((result) => {
+          console.log(`[XaiImageService] Video ${i + 1}/${count} completed (${result.duration}s)`);
+          return result;
+        })
+        .catch((err: any) => {
+          console.error(`[XaiImageService] Video ${i + 1}/${count} failed:`, err.message);
+          return null;
+        })
+    );
+
+    const results = await Promise.all(promises);
+    const successful = results.filter((r): r is XaiVideoResult => r !== null);
+
+    if (successful.length === 0) {
+      throw new Error(`All ${count} video generation requests failed`);
+    }
+
+    console.log(`[XaiImageService] ${successful.length}/${count} videos generated successfully`);
+    return successful;
+  }
+
+  /**
+   * Internal: submit a single video generation request and poll until done.
+   */
+  private async generateSingleVideo(
+    prompt: string,
+    options: XaiVideoOptions = {},
+  ): Promise<XaiVideoResult> {
     const body: Record<string, unknown> = {
       model: 'grok-imagine-video',
       prompt,
@@ -244,7 +344,7 @@ export class XaiImageService {
       throw new Error('xAI Video API did not return a request_id');
     }
 
-    // Step 2: Poll for completion
+    // Poll for completion
     const startTime = Date.now();
 
     while (true) {
@@ -252,14 +352,11 @@ export class XaiImageService {
         throw new Error(`Video generation timed out after ${VIDEO_POLL_TIMEOUT / 1000}s (request_id: ${requestId})`);
       }
 
-      // Wait before polling
       await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL));
 
       const pollResponse = await fetch(`${XAI_BASE_URL}/videos/${requestId}`, {
         method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-        },
+        headers: { 'Authorization': `Bearer ${this.apiKey}` },
       });
 
       if (!pollResponse.ok) {
@@ -287,8 +384,7 @@ export class XaiImageService {
         throw new Error(`Video generation request expired (request_id: ${requestId})`);
       }
 
-      // status === 'pending' — continue polling
-      console.log(`[XaiImageService] Video generation pending... elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`);
+      console.log(`[XaiImageService] Video pending (${requestId.slice(0, 8)})... elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`);
     }
   }
 }

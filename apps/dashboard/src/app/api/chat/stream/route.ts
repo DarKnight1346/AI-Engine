@@ -137,14 +137,15 @@ export async function POST(request: NextRequest) {
           userMessageId: userMessage.id,
         });
 
-        // Keep-alive ping every 15 seconds
+        // Keep-alive ping every 5 seconds — prevents Cloudflare tunnel,
+        // reverse proxy, and HTTP/2 idle timeouts from killing the stream.
         const keepAlive = setInterval(() => {
           try {
-            controller.enqueue(encoder.encode(`: ping\n\n`));
+            controller.enqueue(encoder.encode(`: ping ${Date.now()}\n\n`));
           } catch {
             clearInterval(keepAlive);
           }
-        }, 15000);
+        }, 5000);
 
         // Enqueue the chat job
         const queue = ChatQueue.getInstance();
@@ -180,6 +181,13 @@ export async function POST(request: NextRequest) {
                   send('tool', {
                     slot, phase: 'end', name: event.name, id: event.id,
                     success: event.success, output: event.output.slice(0, 500),
+                  });
+                  break;
+                case 'background_task_start':
+                  send('background_task', {
+                    slot,
+                    taskId: (event as any).taskId,
+                    toolName: (event as any).toolName,
                   });
                   break;
                 case 'iteration':

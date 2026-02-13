@@ -125,7 +125,10 @@ export function createWebSearchTools(service: SerperServiceLike): Tool[] {
 
     {
       name: 'webSearchImages',
-      description: '[Tier 1 — fast/cheap] Quick Google image search. Returns image URLs, dimensions, sources, and thumbnails. Use for finding images, visual references, or inspecting image results.',
+      description:
+        '[Tier 1 — fast/cheap] Quick Google image search. Returns image URLs that will be rendered as a visual gallery for the user. ' +
+        'IMPORTANT: In your response, include every image URL on its own line so the UI renders them as a visual collage. ' +
+        'The user will see the actual images, not just links. Do NOT wrap URLs in markdown links — just include the raw URL.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -137,7 +140,28 @@ export function createWebSearchTools(service: SerperServiceLike): Tool[] {
       execute: async (input) => {
         try {
           const results = await service.images(input.query as string, extractOptions(input));
-          return formatResults(results, 'image');
+          if (!results || results.length === 0) {
+            return { success: true, output: 'No image results found.' };
+          }
+
+          // Extract image URLs in a clean format for gallery rendering
+          const imageUrls: string[] = [];
+          const imageEntries: string[] = [];
+          for (const r of results as any[]) {
+            const imgUrl = r.imageUrl || r.thumbnailUrl || r.link;
+            if (imgUrl) {
+              imageUrls.push(imgUrl);
+              const title = r.title || '';
+              const source = r.source || r.domain || '';
+              imageEntries.push(`${imgUrl}${title ? ` — ${title}` : ''}${source ? ` (${source})` : ''}`);
+            }
+          }
+
+          return {
+            success: true,
+            output: `Found ${imageUrls.length} images:\n\n${imageEntries.join('\n')}`,
+            data: { imageUrls, results, count: imageUrls.length },
+          };
         } catch (err: any) {
           return { success: false, output: `Image search failed: ${err.message}` };
         }
@@ -146,7 +170,11 @@ export function createWebSearchTools(service: SerperServiceLike): Tool[] {
 
     {
       name: 'webSearchVideos',
-      description: '[Tier 1 — fast/cheap] Quick Google video search. Returns video links, titles, durations, channels, and thumbnails. Use for finding video content, tutorials, or media.',
+      description:
+        '[Tier 1 — fast/cheap] Quick Google video search. Returns video links with thumbnails, titles, durations, and channels. ' +
+        'Results are rendered as a visual video gallery for the user. ' +
+        'IMPORTANT: In your response, include the video data block exactly as returned so the UI renders the video collage. ' +
+        'Do NOT reformat the <!--VIDEO_RESULTS--> block.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -158,7 +186,43 @@ export function createWebSearchTools(service: SerperServiceLike): Tool[] {
       execute: async (input) => {
         try {
           const results = await service.videos(input.query as string, extractOptions(input));
-          return formatResults(results, 'video');
+          if (!results || results.length === 0) {
+            return { success: true, output: 'No video results found.' };
+          }
+
+          // Build structured video card data for the UI
+          const videoCards: Array<{
+            title: string;
+            link: string;
+            imageUrl: string;
+            duration: string;
+            channel: string;
+          }> = [];
+
+          for (const r of results as any[]) {
+            const link = r.link || '';
+            if (link) {
+              videoCards.push({
+                title: r.title || '',
+                link,
+                imageUrl: r.imageUrl || '',
+                duration: r.duration || '',
+                channel: r.channel || '',
+              });
+            }
+          }
+
+          // Embed structured data in a marker block the UI can parse
+          const jsonBlock = `<!--VIDEO_RESULTS-->${JSON.stringify(videoCards)}<!--/VIDEO_RESULTS-->`;
+          const humanReadable = videoCards
+            .map((v, i) => `${i + 1}. ${v.title}${v.duration ? ` (${v.duration})` : ''}${v.channel ? ` — ${v.channel}` : ''}\n   ${v.link}`)
+            .join('\n');
+
+          return {
+            success: true,
+            output: `Found ${videoCards.length} videos:\n\n${jsonBlock}\n\n${humanReadable}`,
+            data: { videoCards, results, count: videoCards.length },
+          };
         } catch (err: any) {
           return { success: false, output: `Video search failed: ${err.message}` };
         }

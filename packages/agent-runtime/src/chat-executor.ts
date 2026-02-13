@@ -88,6 +88,16 @@ function stripXmlToolCalls(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Long-running tools — executed in the background so the user can continue
+// chatting. The agent gets a placeholder result and can respond immediately.
+// ---------------------------------------------------------------------------
+
+const LONG_RUNNING_TOOLS = new Set([
+  'xaiGenerateVideo',
+  // Future: add other slow tools here (e.g. heavy data analysis, bulk scraping)
+]);
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -147,6 +157,26 @@ export interface ChatExecutorOptions {
    * to a worker via WebSocket instead of failing with "no worker".
    */
   workerDispatcher?: WorkerToolDispatcher;
+
+  /**
+   * Callback for handling long-running tool executions in the background.
+   *
+   * When the agent calls a tool that's known to take >10 seconds (e.g.
+   * video generation), the executor returns a placeholder result to the
+   * LLM so it can respond immediately, while the actual tool runs in
+   * the background. The caller is responsible for starting the execution
+   * and storing the result.
+   *
+   * @param info.taskId  — Unique background task identifier
+   * @param info.toolName — The inner tool being executed (e.g. "xaiGenerateVideo")
+   * @param info.execute — Function that performs the actual tool execution
+   */
+  backgroundTaskCallback?: (info: {
+    taskId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    execute: () => Promise<ToolResult>;
+  }) => void;
 }
 
 export interface ChatExecutorResult {
@@ -168,6 +198,7 @@ export type ChatStreamEvent =
   | { type: 'tool_call_start'; name: string; id: string }
   | { type: 'tool_call_end'; name: string; id: string; success: boolean; output: string }
   | { type: 'iteration'; iteration: number; maxIterations: number }
+  | { type: 'background_task_start'; taskId: string; toolName: string }
   | { type: 'done'; result: ChatExecutorResult }
   | { type: 'error'; message: string };
 
@@ -484,6 +515,67 @@ export class ChatExecutor {
       for (const toolCall of effectiveToolCalls) {
         toolCallsCount++;
         onEvent({ type: 'tool_call_start', name: toolCall.name, id: toolCall.id });
+
+        // ── Background task detection ──
+        // If this is an execute_tool call for a long-running tool and we
+        // have a background task callback, start it in the background and
+        // return a placeholder result so the LLM can respond immediately.
+        if (
+          toolCall.name === 'execute_tool' &&
+          this.options.backgroundTaskCallback &&
+          typeof toolCall.input === 'object' &&
+          toolCall.input !== null
+        ) {
+          const innerToolName = String((toolCall.input as Record<string, unknown>).tool ?? '');
+          if (LONG_RUNNING_TOOLS.has(innerToolName)) {
+            const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            const metaTool = this.metaTools.find((t) => t.name === 'execute_tool');
+            const dummyContext: ToolContext = {
+              nodeId: this.options.nodeId ?? 'dashboard',
+              agentId: this.options.agentId ?? 'chat',
+              workItemId: this.options.workItemId,
+              capabilities: {
+                os: process.platform as any,
+                hasDisplay: false,
+                browserCapable: false,
+                environment: 'cloud' as any,
+                customTags: [],
+              },
+            };
+
+            // Notify frontend
+            onEvent({ type: 'background_task_start', taskId, toolName: innerToolName });
+
+            // Start execution in background (fire-and-forget via callback)
+            this.options.backgroundTaskCallback({
+              taskId,
+              toolName: innerToolName,
+              toolInput: (toolCall.input as Record<string, unknown>).input as Record<string, unknown> ?? {},
+              execute: async () => {
+                if (!metaTool) return { success: false, output: 'Tool not available' };
+                return metaTool.execute(toolCall.input, dummyContext);
+              },
+            });
+
+            // Return placeholder to the LLM
+            const placeholderResult = `Background task started (ID: ${taskId}). The "${innerToolName}" tool is now processing in the background and will take 30 seconds to a few minutes. The result will be automatically delivered to the user when it's ready. Let the user know you're working on it and they can continue chatting in the meantime.`;
+
+            onEvent({
+              type: 'tool_call_end',
+              name: toolCall.name,
+              id: toolCall.id,
+              success: true,
+              output: `Background task started: ${innerToolName} (${taskId})`,
+            });
+
+            toolResults.push({
+              type: 'tool_result',
+              toolUseId: toolCall.id,
+              content: placeholderResult,
+            });
+            continue;
+          }
+        }
 
         const metaTool = this.metaTools.find((t) => t.name === toolCall.name);
         let result: ToolResult;
