@@ -77,6 +77,13 @@ export class ChatQueue {
   private totalProcessed = 0;
   private _poolInstance: any = null;
 
+  /**
+   * Pending clarification callbacks, keyed by sessionId.
+   * When `ask_user` is called, it registers a resolve function here.
+   * When the user responds via POST /api/chat/clarify, we resolve it.
+   */
+  private pendingClarifications = new Map<string, (answers: Record<string, string>) => void>();
+
   /** Event emitter for queue-level events (optional monitoring) */
   readonly events = new EventEmitter();
 
@@ -147,6 +154,19 @@ export class ChatQueue {
       totalProcessed: this.totalProcessed,
       maxConcurrency: this.maxConcurrency,
     };
+  }
+
+  /**
+   * Resolve a pending clarification request for a session.
+   * Called by the /api/chat/clarify endpoint when the user responds.
+   * Returns true if a pending clarification was found and resolved.
+   */
+  resolveClarification(sessionId: string, answers: Record<string, string>): boolean {
+    const resolve = this.pendingClarifications.get(sessionId);
+    if (!resolve) return false;
+    this.pendingClarifications.delete(sessionId);
+    resolve(answers);
+    return true;
   }
 
   /**
@@ -376,15 +396,33 @@ You MUST search memory for user preferences before every response — this is yo
       // Notify the frontend which agent is starting
       job.onEvent({ type: 'agent_start', slot, agentName: agentName ?? 'AI Engine' } as any);
 
-      const executor = new ChatExecutor({
+      // Build the base executor options (reused for sub-agent creation)
+      const baseExecutorOptions = {
         llm: pool,
-        tier: 'standard',
+        tier: 'standard' as const,
         searchMemory: searchMemoryFn,
         userId: contextUser?.id,
         teamId: contextMembership?.teamId,
         sessionId: job.sessionId,
         workerDispatcher: workerHub,
         serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword,
+      };
+
+      const executor = new ChatExecutor({
+        ...baseExecutorOptions,
+        // Pass self-reference so delegate_tasks can spawn sub-agents with same config
+        parentExecutorOptions: baseExecutorOptions,
+        // Forward orchestration events through to the SSE stream
+        onSubtaskEvent: (subEvent: any) => {
+          if (signal.aborted) return;
+          job.onEvent({ ...subEvent, slot } as any);
+        },
+        // Clarification callback — registers in the pending map and blocks
+        onClarificationRequest: (questions: any[], resolve: (answers: Record<string, string>) => void) => {
+          this.pendingClarifications.set(job.sessionId, resolve);
+          // The ask_user tool also emits a clarification_request event
+          // via onSubtaskEvent, which is forwarded to the SSE stream above.
+        },
         // ── Background task support ──
         // Long-running tools (video gen, etc.) run after the stream closes
         backgroundTaskCallback: (info: { taskId: string; toolName: string; toolInput: Record<string, unknown>; execute: () => Promise<{ success: boolean; output: string; data?: Record<string, unknown> }> }) => {

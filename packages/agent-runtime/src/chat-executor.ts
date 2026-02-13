@@ -3,7 +3,7 @@ import type { LLMMessage, LLMToolDefinition, LLMToolCall, LLMCallOptions } from 
 import { ToolIndex, type ToolManifestEntry } from './tool-index.js';
 import { ToolExecutor, type WorkerToolDispatcher } from './tool-executor.js';
 import { EnvironmentTools } from './tools/environment.js';
-import { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
+import { createMetaTools, getMetaToolDefinitions, type MetaToolOptions } from './tools/meta-tools.js';
 import { createWebSearchTools, createXaiSearchTools } from './tools/web-search-tools.js';
 import { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
 import { createImageTools, getImageToolManifest } from './tools/image-tools.js';
@@ -177,6 +177,30 @@ export interface ChatExecutorOptions {
     toolInput: Record<string, unknown>;
     execute: () => Promise<ToolResult>;
   }) => void;
+
+  // ── Orchestration / sub-agent support ────────────────────────────
+
+  /**
+   * Parent executor options — passed through so that the delegate_tasks
+   * meta-tool can create sub-agent ChatExecutors with the same config.
+   * When set, the `delegate_tasks` tool becomes available.
+   */
+  parentExecutorOptions?: ChatExecutorOptions;
+
+  /**
+   * Callback for emitting orchestration streaming events (report outline,
+   * section updates, subtask completions) back through the SSE stream.
+   */
+  onSubtaskEvent?: (event: ChatStreamEvent) => void;
+
+  /**
+   * Callback for sending clarification questions to the user and receiving
+   * answers. When set, the `ask_user` tool becomes available.
+   */
+  onClarificationRequest?: (
+    questions: Array<{ id: string; prompt: string; options?: Array<{ id: string; label: string }>; allowFreeText?: boolean }>,
+    resolve: (answers: Record<string, string>) => void,
+  ) => void;
 }
 
 export interface ChatExecutorResult {
@@ -200,7 +224,13 @@ export type ChatStreamEvent =
   | { type: 'iteration'; iteration: number; maxIterations: number }
   | { type: 'background_task_start'; taskId: string; toolName: string }
   | { type: 'done'; result: ChatExecutorResult }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  // ── Orchestration / sub-agent events ──
+  | { type: 'clarification_request'; questions: Array<{ id: string; prompt: string; options?: Array<{ id: string; label: string }>; allowFreeText?: boolean }> }
+  | { type: 'report_outline'; title: string; sections: Array<{ id: string; title: string; tier: string; dependsOn?: string[] }> }
+  | { type: 'report_section_update'; sectionId: string; status: 'running' | 'complete' | 'failed'; content?: string; tier?: string }
+  | { type: 'report_section_added'; section: { id: string; title: string; content: string } }
+  | { type: 'subtask_complete'; taskId: string; success: boolean; completed: number; total: number; tier: string };
 
 /** Callback for receiving streaming events during chat execution. */
 export type ChatStreamCallback = (event: ChatStreamEvent) => void;
@@ -228,9 +258,25 @@ export class ChatExecutor {
   private metaTools: Tool[];
   private metaToolDefs: LLMToolDefinition[];
   private maxIterations: number;
+  private currentTier: 'fast' | 'standard' | 'heavy';
+
+  /**
+   * Dynamically switch the LLM tier used for subsequent calls.
+   * Called by meta-tools (ask_user, delegate_tasks) to upgrade to Opus
+   * for planning/orchestration, then drop back to Sonnet afterward.
+   */
+  public setTier(tier: 'fast' | 'standard' | 'heavy'): void {
+    console.log(`[ChatExecutor] Tier switch: ${this.currentTier} → ${tier}`);
+    this.currentTier = tier;
+  }
+
+  public getTier(): 'fast' | 'standard' | 'heavy' {
+    return this.currentTier;
+  }
 
   constructor(private options: ChatExecutorOptions) {
-    this.maxIterations = options.maxIterations ?? 15;
+    this.maxIterations = options.maxIterations ?? 25;
+    this.currentTier = options.tier ?? 'standard';
 
     // Initialize tool index with built-in dashboard-safe tools
     this.toolIndex = new ToolIndex();
@@ -260,6 +306,11 @@ export class ChatExecutor {
       userId: options.userId,
       teamId: options.teamId,
       sessionId: options.sessionId,
+      // Pass-through for orchestration support
+      parentExecutorOptions: options.parentExecutorOptions,
+      onSubtaskEvent: options.onSubtaskEvent,
+      onClarificationRequest: options.onClarificationRequest,
+      setParentTier: (tier) => this.setTier(tier),
     });
 
     // Register meta-tools in the executor so they can be dispatched
@@ -282,8 +333,12 @@ export class ChatExecutor {
       this.toolExecutor.registerAllLocal(options.additionalTools);
     }
 
-    // LLM-compatible definitions (compact, ~240 tokens total)
-    this.metaToolDefs = getMetaToolDefinitions();
+    // LLM-compatible definitions — include orchestration/clarification tools
+    // when the corresponding options are provided
+    this.metaToolDefs = getMetaToolDefinitions({
+      includeOrchestration: !!options.parentExecutorOptions,
+      includeClarification: !!options.onClarificationRequest,
+    });
   }
 
   /**
@@ -305,7 +360,7 @@ export class ChatExecutor {
 
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       const callOpts: LLMCallOptions = {
-        tier: this.options.tier ?? 'standard',
+        tier: this.currentTier,
         systemPrompt,
         tools: this.metaToolDefs,
       };
@@ -409,9 +464,16 @@ export class ChatExecutor {
       });
     }
 
-    // Max iterations reached — return whatever content we have
+    // Max iterations reached — return best-effort response with partial findings
+    const lastToolResults = workingMessages
+      .filter(m => m.role === 'user' && Array.isArray(m.content))
+      .slice(-1);
+    const partialFindings = lastToolResults.length > 0
+      ? '\n\nPartial findings from the last tool results are included in the conversation above.'
+      : '';
+
     return {
-      content: 'I reached the maximum number of tool-use iterations. Here is what I found so far — please try again with a more specific request.',
+      content: `I reached the maximum number of tool-use iterations (${this.maxIterations}). Here is what I found so far — the task may need to be broken into smaller pieces or tried with a more specific request.${partialFindings}`,
       toolCallsCount,
       usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
       iterations: this.maxIterations,
@@ -440,7 +502,7 @@ export class ChatExecutor {
       onEvent({ type: 'iteration', iteration, maxIterations: this.maxIterations });
 
       const callOpts: LLMCallOptions = {
-        tier: this.options.tier ?? 'standard',
+        tier: this.currentTier,
         systemPrompt,
         tools: this.metaToolDefs,
       };
@@ -624,9 +686,9 @@ export class ChatExecutor {
       onEvent({ type: 'status', message: 'Processing results...' });
     }
 
-    // Max iterations reached
+    // Max iterations reached — return best-effort response with partial findings
     const maxResult: ChatExecutorResult = {
-      content: 'I reached the maximum number of tool-use iterations. Here is what I found so far — please try again with a more specific request.',
+      content: `I reached the maximum number of tool-use iterations (${this.maxIterations}). Here is what I found so far — the task may need to be broken into smaller pieces or tried with a more specific request.`,
       toolCallsCount,
       usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
       iterations: this.maxIterations,

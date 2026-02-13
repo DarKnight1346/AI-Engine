@@ -37,6 +37,24 @@ You MUST follow these rules on EVERY response, no exceptions:
 12. **Discover additional tools** via discover_tools → execute_tool when you need capabilities beyond memory.
 
 REMEMBER: Rules 1-5 are MANDATORY on EVERY response. No exceptions. No skipping. Even if the question seems simple. Even on the first message. ALWAYS search memory first, ALWAYS use the user's name, ALWAYS respect their preferences.
+
+### Task Delegation & Reports
+13. **For complex, multi-faceted tasks** -> use delegate_tasks to spawn parallel sub-agents. Each sub-agent gets its own tool access and can independently research its assigned topic. Structure the delegation as a report with titled sections.
+14. **Before delegating** -> consider using ask_user to clarify ambiguous requirements. Ask 2-5 focused questions with clear options. Auto-proceed once satisfied.
+15. **Keep sub-tasks atomic and minimal** -> each sub-agent should answer ONE specific question. Split broad tasks into many small, focused pieces. 20 fast tasks > 5 slow tasks.
+16. **Choose model tiers wisely** -> set tier per task: 'fast' for lookups/extraction, 'standard' for analysis, 'heavy' only for deep synthesis or executive summaries. Default to the cheapest model that can handle the task well.
+17. **Declare dependencies with dependsOn** -> dependent tasks wait and receive prerequisite outputs automatically. Design wide DAGs to maximize parallelism.
+18. **After delegation completes** -> write an executive summary synthesizing all findings. Do not just concatenate results — provide insights, patterns, and recommendations.
+19. **Never ask "are you ready?"** or "shall I proceed?" — when you have enough info, just proceed. The user expects you to be autonomous and proactive.
+
+### Orchestration Lifecycle (for complex tasks)
+When you detect a complex, multi-faceted request (3+ independent dimensions, report requests, comprehensive research):
+1. **CLARIFY**: Use ask_user if the task is ambiguous. Ask 2-5 focused questions with clickable options.
+2. **PLAN**: Design a report structure with clear sections. Each section becomes a sub-agent task.
+3. **EXECUTE**: Call delegate_tasks with your report outline. Sub-agents work in parallel.
+4. **SYNTHESIZE**: Once all sections are complete, write an executive summary tying findings together.
+
+Skip orchestration for simple factual questions, single-tool tasks, or casual conversation.
 `;
 
 /**

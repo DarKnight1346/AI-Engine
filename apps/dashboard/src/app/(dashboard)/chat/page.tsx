@@ -325,6 +325,331 @@ function InlineImage({ url }: { url: string }) {
   );
 }
 
+/* ─── Report Section State ──────────────────────────────────────────── */
+
+interface ReportSectionState {
+  id: string;
+  title: string;
+  status: 'pending' | 'running' | 'complete' | 'failed';
+  content?: string;
+  tier?: string;
+}
+
+interface ReportState {
+  title: string;
+  sections: ReportSectionState[];
+  completed: number;
+  total: number;
+}
+
+/* ─── SubtaskTracker ───────────────────────────────────────────────── */
+
+function SubtaskTracker({ report }: { report: ReportState }) {
+  const theme = useTheme();
+  const progress = report.total > 0 ? (report.completed / report.total) * 100 : 0;
+  const [expanded, setExpanded] = useState(true);
+
+  const tierColors: Record<string, string> = {
+    fast: '#66bb6a',
+    standard: '#42a5f5',
+    heavy: '#ab47bc',
+  };
+
+  return (
+    <Box sx={{ mb: 2 }}>
+      {/* Progress bar */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, cursor: 'pointer' }}
+        onClick={() => setExpanded(!expanded)}>
+        <Box sx={{ flex: 1, height: 6, borderRadius: 3, bgcolor: alpha(theme.palette.common.white, 0.1), overflow: 'hidden' }}>
+          <Box sx={{
+            height: '100%', borderRadius: 3,
+            background: `linear-gradient(90deg, ${theme.palette.primary.main}, ${theme.palette.secondary.main})`,
+            width: `${progress}%`,
+            transition: 'width 0.5s ease-out',
+          }} />
+        </Box>
+        <Typography variant="caption" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
+          {report.completed}/{report.total} sections
+        </Typography>
+      </Box>
+
+      {/* Expandable task list */}
+      {expanded && (
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+          {report.sections.map((s) => {
+            const statusIcon = s.status === 'complete' ? '\u2713'
+              : s.status === 'failed' ? '\u2717'
+              : s.status === 'running' ? '\u25CB'
+              : '\u2022';
+            const statusColor = s.status === 'complete' ? '#66bb6a'
+              : s.status === 'failed' ? '#ef5350'
+              : s.status === 'running' ? '#42a5f5'
+              : 'text.disabled';
+            return (
+              <Chip
+                key={s.id}
+                size="small"
+                label={`${statusIcon} ${s.title}`}
+                sx={{
+                  fontSize: '0.7rem',
+                  height: 22,
+                  color: statusColor,
+                  borderColor: alpha(statusColor as string, 0.3),
+                  bgcolor: alpha(statusColor as string, 0.08),
+                  border: '1px solid',
+                  '& .MuiChip-label': { px: 1 },
+                }}
+              />
+            );
+          })}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+/* ─── DynamicReport ────────────────────────────────────────────────── */
+
+function DynamicReport({ report }: { report: ReportState }) {
+  const theme = useTheme();
+
+  return (
+    <Box sx={{ mb: 2 }}>
+      {/* Report header */}
+      <Typography variant="h6" sx={{ fontWeight: 700, mb: 1, color: 'primary.main' }}>
+        {report.title}
+      </Typography>
+
+      {/* Progress tracker */}
+      <SubtaskTracker report={report} />
+
+      {/* Sections */}
+      {report.sections.map((section) => (
+        <Box key={section.id} sx={{
+          mb: 1.5,
+          borderRadius: 2,
+          border: '1px solid',
+          borderColor: section.status === 'complete' ? alpha(theme.palette.success.main, 0.2)
+            : section.status === 'failed' ? alpha(theme.palette.error.main, 0.2)
+            : section.status === 'running' ? alpha(theme.palette.info.main, 0.2)
+            : 'divider',
+          overflow: 'hidden',
+        }}>
+          {/* Section header */}
+          <Box sx={{
+            px: 2, py: 1,
+            bgcolor: section.status === 'running' ? alpha(theme.palette.info.main, 0.05)
+              : section.status === 'complete' ? alpha(theme.palette.success.main, 0.03)
+              : 'transparent',
+            borderBottom: section.content ? '1px solid' : 'none',
+            borderColor: 'divider',
+            display: 'flex', alignItems: 'center', gap: 1,
+          }}>
+            {section.status === 'running' && (
+              <CircularProgress size={14} thickness={5} sx={{ color: 'info.main' }} />
+            )}
+            {section.status === 'complete' && (
+              <Typography sx={{ color: 'success.main', fontSize: 14, fontWeight: 700 }}>{'\u2713'}</Typography>
+            )}
+            {section.status === 'failed' && (
+              <Typography sx={{ color: 'error.main', fontSize: 14, fontWeight: 700 }}>{'\u2717'}</Typography>
+            )}
+            {section.status === 'pending' && (
+              <Typography sx={{ color: 'text.disabled', fontSize: 14 }}>{'\u2022'}</Typography>
+            )}
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, flex: 1 }}>
+              {section.title}
+            </Typography>
+            {section.tier && (
+              <Chip size="small" label={section.tier}
+                sx={{
+                  fontSize: '0.6rem', height: 18,
+                  bgcolor: alpha(section.tier === 'fast' ? '#66bb6a' : section.tier === 'heavy' ? '#ab47bc' : '#42a5f5', 0.1),
+                  color: section.tier === 'fast' ? '#66bb6a' : section.tier === 'heavy' ? '#ab47bc' : '#42a5f5',
+                }} />
+            )}
+          </Box>
+
+          {/* Section content */}
+          {section.status === 'running' && !section.content && (
+            <Box sx={{ px: 2, py: 2 }}>
+              {/* Skeleton shimmer */}
+              {[80, 60, 90, 45].map((w, i) => (
+                <Box key={i} sx={{
+                  height: 12, mb: 1, borderRadius: 1,
+                  width: `${w}%`,
+                  bgcolor: alpha(theme.palette.common.white, 0.05),
+                  animation: 'pulse 1.5s ease-in-out infinite',
+                  '@keyframes pulse': {
+                    '0%, 100%': { opacity: 0.4 },
+                    '50%': { opacity: 0.8 },
+                  },
+                }} />
+              ))}
+            </Box>
+          )}
+          {section.content && (
+            <Box sx={{ px: 2, py: 1.5 }}>
+              <FormattedText text={section.content} />
+            </Box>
+          )}
+          {section.status === 'failed' && !section.content && (
+            <Box sx={{ px: 2, py: 1.5 }}>
+              <Typography variant="body2" sx={{ color: 'error.main', fontStyle: 'italic' }}>
+                This section failed to complete. The orchestrator will synthesize available results.
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+/* ─── ClarificationPanel ───────────────────────────────────────────── */
+
+interface ClarificationState {
+  questions: Array<{
+    id: string;
+    prompt: string;
+    options?: Array<{ id: string; label: string }>;
+    allowFreeText?: boolean;
+  }>;
+  answers: Record<string, string>;
+  submitted: boolean;
+}
+
+function ClarificationPanel({
+  state,
+  sessionId,
+  onSubmitted,
+}: {
+  state: ClarificationState;
+  sessionId: string;
+  onSubmitted: () => void;
+}) {
+  const theme = useTheme();
+  const [answers, setAnswers] = useState<Record<string, string>>(state.answers);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (state.submitted) return null;
+
+  const setAnswer = (qId: string, value: string) => {
+    setAnswers((prev) => ({ ...prev, [qId]: value }));
+  };
+
+  const handleSubmit = async () => {
+    setSubmitting(true);
+    try {
+      await fetch('/api/chat/clarify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, answers }),
+      });
+      onSubmitted();
+    } catch (err) {
+      console.error('[ClarificationPanel] Submit failed:', err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Box sx={{
+      my: 2, p: 2, borderRadius: 2,
+      border: '1px solid',
+      borderColor: alpha(theme.palette.primary.main, 0.3),
+      bgcolor: alpha(theme.palette.primary.main, 0.03),
+    }}>
+      <Typography variant="subtitle2" sx={{ mb: 2, color: 'primary.main', fontWeight: 700 }}>
+        Before I proceed, I need a few details:
+      </Typography>
+
+      {state.questions.map((q) => (
+        <Box key={q.id} sx={{ mb: 2 }}>
+          <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+            {q.prompt}
+          </Typography>
+
+          {/* Option buttons */}
+          {q.options && q.options.length > 0 && (
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mb: q.allowFreeText ? 1 : 0 }}>
+              {q.options.map((opt) => (
+                <Chip
+                  key={opt.id}
+                  label={opt.label}
+                  clickable
+                  onClick={() => setAnswer(q.id, opt.label)}
+                  sx={{
+                    borderRadius: '16px',
+                    border: '1px solid',
+                    borderColor: answers[q.id] === opt.label
+                      ? 'primary.main'
+                      : alpha(theme.palette.common.white, 0.15),
+                    bgcolor: answers[q.id] === opt.label
+                      ? alpha(theme.palette.primary.main, 0.15)
+                      : 'transparent',
+                    color: answers[q.id] === opt.label ? 'primary.main' : 'text.secondary',
+                    fontWeight: answers[q.id] === opt.label ? 600 : 400,
+                    fontSize: '0.8rem',
+                    transition: 'all 0.2s',
+                    '&:hover': {
+                      bgcolor: alpha(theme.palette.primary.main, 0.1),
+                      borderColor: 'primary.main',
+                    },
+                  }}
+                />
+              ))}
+            </Box>
+          )}
+
+          {/* Free text input */}
+          {(q.allowFreeText || !q.options || q.options.length === 0) && (
+            <TextField
+              size="small"
+              fullWidth
+              placeholder="Type your answer..."
+              value={answers[q.id] ?? ''}
+              onChange={(e) => setAnswer(q.id, e.target.value)}
+              sx={{
+                '& .MuiOutlinedInput-root': {
+                  fontSize: '0.85rem',
+                  bgcolor: alpha(theme.palette.common.white, 0.03),
+                },
+              }}
+            />
+          )}
+        </Box>
+      ))}
+
+      <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+        <Chip
+          label={submitting ? 'Submitting...' : 'Submit Answers'}
+          clickable={!submitting}
+          onClick={handleSubmit}
+          disabled={submitting}
+          sx={{
+            bgcolor: 'primary.main',
+            color: 'primary.contrastText',
+            fontWeight: 600,
+            '&:hover': { bgcolor: 'primary.dark' },
+          }}
+        />
+        <Chip
+          label="Skip"
+          clickable={!submitting}
+          onClick={() => {
+            setAnswers({});
+            handleSubmit();
+          }}
+          variant="outlined"
+          sx={{ color: 'text.secondary', borderColor: alpha(theme.palette.common.white, 0.15) }}
+        />
+      </Box>
+    </Box>
+  );
+}
+
 /**
  * Image Gallery — responsive masonry-style grid for 2+ images.
  * Features: responsive columns, hover overlay with download, lightbox with
@@ -1294,6 +1619,8 @@ export default function ChatPage() {
   const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskInfo[]>([]);
+  const [activeReport, setActiveReport] = useState<ReportState | null>(null);
+  const [clarification, setClarification] = useState<ClarificationState | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1675,6 +2002,8 @@ export default function ChatPage() {
     setInput('');
     setAttachments([]);
     setSending(true);
+    setActiveReport(null);
+    setClarification(null);
 
     // Track per-agent message IDs: the backend will tell us which slot maps
     // to which agent via `agent_start` events. We start with a single
@@ -1834,6 +2163,76 @@ export default function ChatPage() {
               case 'tool':
               case 'status':
                 break;
+
+              // ── Orchestration / sub-agent events ──
+
+              case 'clarification_request': {
+                const questions = data.questions ?? [];
+                setClarification({
+                  questions,
+                  answers: {},
+                  submitted: false,
+                });
+                break;
+              }
+
+              case 'report_outline': {
+                const sections: ReportSectionState[] = (data.sections ?? []).map((s: any) => ({
+                  id: s.id,
+                  title: s.title,
+                  status: 'pending' as const,
+                  tier: s.tier,
+                }));
+                setActiveReport({
+                  title: data.title ?? 'Report',
+                  sections,
+                  completed: 0,
+                  total: sections.length,
+                });
+                break;
+              }
+
+              case 'report_section_update': {
+                setActiveReport((prev) => {
+                  if (!prev) return prev;
+                  const sections = prev.sections.map((s) =>
+                    s.id === data.sectionId
+                      ? { ...s, status: data.status as ReportSectionState['status'], content: data.content ?? s.content, tier: data.tier ?? s.tier }
+                      : s
+                  );
+                  const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
+                  return { ...prev, sections, completed };
+                });
+                break;
+              }
+
+              case 'report_section_added': {
+                setActiveReport((prev) => {
+                  if (!prev) return prev;
+                  const newSection: ReportSectionState = {
+                    id: data.section.id,
+                    title: data.section.title,
+                    status: 'complete',
+                    content: data.section.content,
+                  };
+                  return {
+                    ...prev,
+                    sections: [...prev.sections, newSection],
+                    total: prev.total + 1,
+                    completed: prev.completed + 1,
+                  };
+                });
+                break;
+              }
+
+              case 'subtask_complete': {
+                // Already handled by report_section_update, but we can update the count
+                setActiveReport((prev) => {
+                  if (!prev) return prev;
+                  return { ...prev, completed: data.completed ?? prev.completed };
+                });
+                break;
+              }
 
               case 'done': {
                 receivedDone = true;
@@ -2468,7 +2867,23 @@ export default function ChatPage() {
                               )}
                             </Box>
                           ) : (
-                            <MessageContent content={msg.content} attachments={msg.attachments} />
+                            <>
+                              {/* Clarification panel (shown when agent asks questions, on the last AI message) */}
+                              {msg.role === 'ai' && clarification && !clarification.submitted && sending && idx === messages.length - 1 && (
+                                <ClarificationPanel
+                                  state={clarification}
+                                  sessionId={sessionId ?? ''}
+                                  onSubmitted={() => setClarification((prev) => prev ? { ...prev, submitted: true } : null)}
+                                />
+                              )}
+
+                              {/* Dynamic report (shown when agent delegates tasks, on the last AI message) */}
+                              {msg.role === 'ai' && activeReport && idx === messages.length - 1 && (
+                                <DynamicReport report={activeReport} />
+                              )}
+
+                              <MessageContent content={msg.content} attachments={msg.attachments} />
+                            </>
                           )}
                         </Paper>
                         </Box>

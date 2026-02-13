@@ -209,6 +209,45 @@ export async function POST(request: NextRequest) {
                 case 'error':
                   send('error', { slot, message: event.message });
                   break;
+                // ── Orchestration / sub-agent events ──
+                case 'clarification_request':
+                  send('clarification_request', {
+                    slot,
+                    questions: (event as any).questions,
+                  });
+                  break;
+                case 'report_outline':
+                  send('report_outline', {
+                    slot,
+                    title: (event as any).title,
+                    sections: (event as any).sections,
+                  });
+                  break;
+                case 'report_section_update':
+                  send('report_section_update', {
+                    slot,
+                    sectionId: (event as any).sectionId,
+                    status: (event as any).status,
+                    content: (event as any).content,
+                    tier: (event as any).tier,
+                  });
+                  break;
+                case 'report_section_added':
+                  send('report_section_added', {
+                    slot,
+                    section: (event as any).section,
+                  });
+                  break;
+                case 'subtask_complete':
+                  send('subtask_complete', {
+                    slot,
+                    taskId: (event as any).taskId,
+                    success: (event as any).success,
+                    completed: (event as any).completed,
+                    total: (event as any).total,
+                    tier: (event as any).tier,
+                  });
+                  break;
               }
             } catch {
               // Stream closed

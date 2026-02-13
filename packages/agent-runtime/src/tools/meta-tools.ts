@@ -1,7 +1,20 @@
 import type { Tool, ToolContext, ToolResult } from '../types.js';
 import type { ToolIndex } from '../tool-index.js';
 import type { ToolExecutor } from '../tool-executor.js';
-import type { LLMToolDefinition } from '@ai-engine/shared';
+import type { LLMToolDefinition, LLMTier } from '@ai-engine/shared';
+import type { ChatExecutorOptions, ChatStreamEvent } from '../chat-executor.js';
+import type { SubAgentTask, SubAgentResult, DagProgressCallback } from '../sub-agent.js';
+
+// ---------------------------------------------------------------------------
+// Clarification question types
+// ---------------------------------------------------------------------------
+
+export interface ClarificationQuestion {
+  id: string;
+  prompt: string;
+  options?: Array<{ id: string; label: string }>;
+  allowFreeText?: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Meta-tool options
@@ -19,10 +32,40 @@ export interface MetaToolOptions {
   teamId?: string;
   /** Chat session ID (used for goal source tracking) */
   sessionId?: string;
+
+  // ── Sub-agent / orchestration support ──────────────────────────────
+
+  /**
+   * Parent ChatExecutor options, passed through so that sub-agents
+   * can be created with the same LLM pool, API keys, and tool access.
+   */
+  parentExecutorOptions?: ChatExecutorOptions;
+
+  /**
+   * Callback for emitting orchestration streaming events (report outline,
+   * section updates, subtask completions) back through the SSE stream.
+   */
+  onSubtaskEvent?: (event: ChatStreamEvent) => void;
+
+  /**
+   * Callback for sending clarification questions to the user and receiving
+   * answers. The function emits the questions via SSE and returns a Promise
+   * that resolves when the user responds.
+   */
+  onClarificationRequest?: (
+    questions: ClarificationQuestion[],
+    resolve: (answers: Record<string, string>) => void,
+  ) => void;
+
+  /**
+   * Setter for dynamically switching the parent executor's LLM tier.
+   * Called by ask_user (upgrade to Opus) and delegate_tasks (Opus then back to Sonnet).
+   */
+  setParentTier?: (tier: LLMTier) => void;
 }
 
 // ---------------------------------------------------------------------------
-// Create the 7 core meta-tools
+// Create the core meta-tools
 // ---------------------------------------------------------------------------
 
 /**
@@ -30,10 +73,11 @@ export interface MetaToolOptions {
  * These are the ONLY tools in the initial LLM context — everything
  * else is discovered and executed through them.
  *
- * Includes: discover_tools, execute_tool, search_memory, store_memory, create_skill, get_current_time
+ * Includes: discover_tools, execute_tool, search_memory, store_memory,
+ * create_skill, get_current_time, ask_user, delegate_tasks
  */
 export function createMetaTools(opts: MetaToolOptions): Tool[] {
-  return [
+  const tools: Tool[] = [
     createDiscoverTool(opts),
     createExecuteTool(opts),
     createMemoryTool(opts),
@@ -41,13 +85,27 @@ export function createMetaTools(opts: MetaToolOptions): Tool[] {
     createCreateSkillTool(opts),
     createCurrentTimeTool(),
   ];
+
+  // Orchestration tools — only available when the parent executor options are provided
+  // (sub-agents do NOT get these to prevent recursive delegation)
+  if (opts.parentExecutorOptions) {
+    tools.push(createDelegateTasksTool(opts));
+  }
+
+  // Clarification tool — only available when the callback is provided
+  if (opts.onClarificationRequest) {
+    tools.push(createAskUserTool(opts));
+  }
+
+  return tools;
 }
 
 /**
  * Get LLM-compatible tool definitions for all meta-tools.
+ * Pass `includeOrchestration: true` to include delegate_tasks and ask_user.
  */
-export function getMetaToolDefinitions(): LLMToolDefinition[] {
-  return [
+export function getMetaToolDefinitions(options?: { includeOrchestration?: boolean; includeClarification?: boolean }): LLMToolDefinition[] {
+  const defs: LLMToolDefinition[] = [
     {
       name: 'discover_tools',
       description:
@@ -197,6 +255,107 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
       },
     },
   ];
+
+  // Orchestration tool — only for parent agents, not sub-agents
+  if (options?.includeOrchestration) {
+    defs.push({
+      name: 'delegate_tasks',
+      description:
+        'Decompose a complex task into parallel sub-tasks executed by specialized sub-agents. ' +
+        'Each sub-task becomes a section in a dynamic report. Sub-agents run in parallel (respecting ' +
+        'dependencies) and can use all available tools. Use this for complex, multi-faceted requests ' +
+        'that benefit from parallel investigation. Each task should be ATOMIC and FOCUSED — one task = ' +
+        'one specific question to answer. Set tier per task: "fast" for lookups, "standard" for analysis, ' +
+        '"heavy" for deep synthesis. Use dependsOn to declare task dependencies (creates a DAG).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          reportTitle: {
+            type: 'string',
+            description: 'Title for the report (shown in the UI header).',
+          },
+          sections: {
+            type: 'array',
+            description: 'Array of sub-tasks / report sections. Each becomes a sub-agent.',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Unique task ID (referenced in dependsOn).' },
+                title: { type: 'string', description: 'Section title.' },
+                description: { type: 'string', description: 'Detailed description of what to research.' },
+                dependsOn: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'IDs of tasks that must complete first. Their outputs are injected as context.',
+                },
+                tier: {
+                  type: 'string',
+                  enum: ['fast', 'standard', 'heavy'],
+                  description: 'Model tier override. Defaults to auto-selected based on complexity.',
+                },
+                toolHints: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Suggested tools to discover (e.g. "web search", "SEO analysis").',
+                },
+              },
+              required: ['id', 'title', 'description'],
+            },
+          },
+        },
+        required: ['sections'],
+      },
+    });
+  }
+
+  // Clarification tool — only for parent agents with clarification callback
+  if (options?.includeClarification) {
+    defs.push({
+      name: 'ask_user',
+      description:
+        'Ask the user structured clarifying questions before starting a complex task. ' +
+        'Each question can have pre-defined options (rendered as clickable buttons) and/or ' +
+        'allow free-text input. Use this when a task is ambiguous, has multiple valid approaches, ' +
+        'or needs specific context (scope, goals, constraints). Ask 2-5 focused questions. ' +
+        'Do NOT ask "are you ready?" — auto-proceed once you have enough information.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            description: 'Array of questions to present to the user.',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Unique question ID.' },
+                prompt: { type: 'string', description: 'The question text.' },
+                options: {
+                  type: 'array',
+                  description: 'Pre-defined answer options (rendered as buttons).',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string', description: 'Option ID.' },
+                      label: { type: 'string', description: 'Display text for the option.' },
+                    },
+                    required: ['id', 'label'],
+                  },
+                },
+                allowFreeText: {
+                  type: 'boolean',
+                  description: 'If true, show a text input alongside options. Defaults to false.',
+                },
+              },
+              required: ['id', 'prompt'],
+            },
+          },
+        },
+        required: ['questions'],
+      },
+    });
+  }
+
+  return defs;
 }
 
 // ---------------------------------------------------------------------------
@@ -873,6 +1032,242 @@ async function upsertProfile(
   return {
     success: true,
     output: `Profile ${action}: "${key}" = "${value}" (confidence: ${confidence}). This will be remembered across all conversations.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// delegate_tasks meta-tool
+// ---------------------------------------------------------------------------
+
+function createDelegateTasksTool(opts: MetaToolOptions): Tool {
+  return {
+    name: 'delegate_tasks',
+    description: 'Decompose a complex task into parallel sub-agent tasks organized as a report.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reportTitle: { type: 'string' },
+        sections: { type: 'array' },
+      },
+      required: ['sections'],
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      if (!opts.parentExecutorOptions) {
+        return { success: false, output: 'Delegation is not available — missing executor configuration.' };
+      }
+
+      const reportTitle = String(input.reportTitle || 'Research Report');
+      const rawSections = input.sections;
+      if (!Array.isArray(rawSections) || rawSections.length === 0) {
+        return { success: false, output: 'At least one section is required in the sections array.' };
+      }
+
+      // Parse sections into SubAgentTask format
+      const tasks: SubAgentTask[] = rawSections.map((s: any) => ({
+        id: String(s.id ?? `section_${Math.random().toString(36).slice(2, 8)}`),
+        title: String(s.title ?? 'Untitled Section'),
+        description: String(s.description ?? ''),
+        dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.map(String) : undefined,
+        tier: ['fast', 'standard', 'heavy'].includes(s.tier) ? s.tier as LLMTier : undefined,
+        toolHints: Array.isArray(s.toolHints) ? s.toolHints.map(String) : undefined,
+      }));
+
+      // Upgrade to Opus for orchestration
+      opts.setParentTier?.('heavy');
+
+      // Emit report outline event for the UI
+      const { autoSelectTier } = await import('../sub-agent.js');
+      opts.onSubtaskEvent?.({
+        type: 'report_outline',
+        title: reportTitle,
+        sections: tasks.map(t => ({
+          id: t.id,
+          title: t.title,
+          tier: t.tier ?? autoSelectTier(t),
+          dependsOn: t.dependsOn,
+        })),
+      } as any);
+
+      console.log(`[delegate_tasks] Starting ${tasks.length} sub-agent tasks for "${reportTitle}"`);
+
+      // Build progress callbacks
+      const progress: DagProgressCallback = {
+        onTaskStart: (taskId, title, tier) => {
+          console.log(`[delegate_tasks] Starting: ${title} (${tier})`);
+          opts.onSubtaskEvent?.({
+            type: 'report_section_update',
+            sectionId: taskId,
+            status: 'running',
+            tier,
+          } as any);
+        },
+        onTaskComplete: (taskId, title, success, completed, total) => {
+          console.log(`[delegate_tasks] ${success ? 'Completed' : 'Failed'}: ${title} (${completed}/${total})`);
+          opts.onSubtaskEvent?.({
+            type: 'subtask_complete',
+            taskId,
+            success,
+            completed,
+            total,
+            tier: 'standard', // actual tier already logged
+          } as any);
+        },
+        onSectionAdded: (section) => {
+          console.log(`[delegate_tasks] New section discovered: ${section.title}`);
+          opts.onSubtaskEvent?.({
+            type: 'report_section_added',
+            section,
+          } as any);
+        },
+      };
+
+      // Execute the DAG
+      const { executeDag } = await import('../sub-agent.js');
+      let results: SubAgentResult[];
+      try {
+        results = await executeDag(tasks, {
+          parentOptions: opts.parentExecutorOptions,
+          onEvent: (taskId, event) => {
+            // Forward sub-agent events if needed
+            if (event.type === 'token') return; // Don't forward individual sub-agent tokens
+          },
+        }, progress);
+      } catch (err: any) {
+        // Drop back to Sonnet on failure
+        opts.setParentTier?.('standard');
+        return { success: false, output: `Delegation failed: ${err.message}` };
+      }
+
+      // Emit section updates with final content
+      for (const result of results) {
+        opts.onSubtaskEvent?.({
+          type: 'report_section_update',
+          sectionId: result.taskId,
+          status: result.success ? 'complete' : 'failed',
+          content: result.content,
+          tier: result.modelUsed,
+        } as any);
+      }
+
+      // Drop back to Sonnet for synthesis
+      opts.setParentTier?.('standard');
+
+      // Build aggregated results for the orchestrator
+      const successCount = results.filter(r => r.success).length;
+      const failCount = results.filter(r => !r.success).length;
+
+      const sectionsOutput = results.map(r => {
+        const status = r.success ? 'COMPLETE' : 'FAILED';
+        return `## ${r.title} [${status}] (${r.modelUsed})\n\n${r.content}`;
+      }).join('\n\n---\n\n');
+
+      const summary = [
+        `# ${reportTitle}`,
+        '',
+        `**${successCount}/${results.length} sections completed successfully.** ${failCount > 0 ? `${failCount} section(s) failed.` : ''}`,
+        '',
+        'Below are the findings from each section. Write an executive summary that synthesizes these findings.',
+        '',
+        '---',
+        '',
+        sectionsOutput,
+      ].join('\n');
+
+      return {
+        success: true,
+        output: summary,
+        data: {
+          reportTitle,
+          totalSections: results.length,
+          completedSections: successCount,
+          failedSections: failCount,
+          results: results.map(r => ({
+            taskId: r.taskId,
+            title: r.title,
+            success: r.success,
+            modelUsed: r.modelUsed,
+            iterations: r.iterations,
+            toolsUsed: r.toolsUsed,
+          })),
+        },
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ask_user meta-tool
+// ---------------------------------------------------------------------------
+
+function createAskUserTool(opts: MetaToolOptions): Tool {
+  return {
+    name: 'ask_user',
+    description: 'Ask the user structured clarifying questions before starting a complex task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        questions: { type: 'array' },
+      },
+      required: ['questions'],
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      if (!opts.onClarificationRequest) {
+        return { success: false, output: 'Clarification is not available — no callback configured.' };
+      }
+
+      const rawQuestions = input.questions;
+      if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
+        return { success: false, output: 'At least one question is required.' };
+      }
+
+      // Parse questions
+      const questions: ClarificationQuestion[] = rawQuestions.map((q: any) => ({
+        id: String(q.id ?? `q_${Math.random().toString(36).slice(2, 8)}`),
+        prompt: String(q.prompt ?? ''),
+        options: Array.isArray(q.options)
+          ? q.options.map((o: any) => ({ id: String(o.id ?? ''), label: String(o.label ?? '') }))
+          : undefined,
+        allowFreeText: q.allowFreeText === true,
+      }));
+
+      // Upgrade to Opus for planning
+      opts.setParentTier?.('heavy');
+
+      // Emit clarification request SSE event
+      opts.onSubtaskEvent?.({
+        type: 'clarification_request',
+        questions,
+      } as any);
+
+      console.log(`[ask_user] Asking ${questions.length} clarifying question(s)`);
+
+      // Block execution until the user responds
+      return new Promise<ToolResult>((resolve) => {
+        // Set up a 5-minute timeout
+        const timeout = setTimeout(() => {
+          console.log('[ask_user] Timeout — proceeding with empty answers');
+          resolve({
+            success: true,
+            output: 'User did not respond within 5 minutes. Proceeding with default assumptions. Make reasonable choices based on the original request.',
+          });
+        }, 5 * 60 * 1000);
+
+        opts.onClarificationRequest!(questions, (answers) => {
+          clearTimeout(timeout);
+          console.log(`[ask_user] Received answers:`, Object.keys(answers));
+
+          const formattedAnswers = questions.map(q => {
+            const answer = answers[q.id] ?? '(no answer)';
+            return `**${q.prompt}**\n→ ${answer}`;
+          }).join('\n\n');
+
+          resolve({
+            success: true,
+            output: `User's answers:\n\n${formattedAnswers}\n\nYou now have the information needed. Proceed with the task — do NOT ask "are you ready?" or "shall I begin?". Just start working.`,
+          });
+        });
+      });
+    },
   };
 }
 

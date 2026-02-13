@@ -15,4 +15,8 @@ export type { ImageServiceLike } from './tools/image-tools.js';
 export type { Tool, ToolResult, ToolContext, AgentRunnerOptions } from './types.js';
 export type { ToolManifestEntry, ToolSearchResult, EmbeddingProvider } from './tool-index.js';
 export type { ChatExecutorOptions, ChatExecutorResult, ChatStreamEvent, ChatStreamCallback } from './chat-executor.js';
-export type { MetaToolOptions } from './tools/meta-tools.js';
+export type { MetaToolOptions, ClarificationQuestion } from './tools/meta-tools.js';
+
+// Sub-agent / orchestration exports
+export { executeDag, runSubAgent, Blackboard, Semaphore, autoSelectTier, topologicalSort } from './sub-agent.js';
+export type { SubAgentTask, SubAgentResult, SubAgentOptions, DagProgressCallback } from './sub-agent.js';
