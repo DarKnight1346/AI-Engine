@@ -17,10 +17,23 @@ import {
 // Chart color palette
 // ---------------------------------------------------------------------------
 
+// Refined palette — softer, more cohesive tones that feel at home on dark backgrounds
 const CHART_COLORS = [
-  '#8884d8', '#82ca9d', '#ffc658', '#ff7300', '#0088FE',
-  '#00C49F', '#FFBB28', '#FF8042', '#a4de6c', '#d0ed57',
-  '#8dd1e1', '#83a6ed', '#8e4585', '#ff6b6b', '#4ecdc4',
+  '#818cf8', // indigo-400
+  '#34d399', // emerald-400
+  '#fbbf24', // amber-400
+  '#f472b6', // pink-400
+  '#38bdf8', // sky-400
+  '#a78bfa', // violet-400
+  '#fb923c', // orange-400
+  '#2dd4bf', // teal-400
+  '#e879f9', // fuchsia-400
+  '#facc15', // yellow-400
+  '#4ade80', // green-400
+  '#60a5fa', // blue-400
+  '#f87171', // red-400
+  '#c084fc', // purple-400
+  '#22d3ee', // cyan-400
 ];
 
 // ---------------------------------------------------------------------------
@@ -82,12 +95,12 @@ function MermaidDiagram({ code }: { code: string }) {
     <Box
       ref={containerRef}
       sx={{
-        my: 1.5, p: 2, borderRadius: 2,
-        bgcolor: 'rgba(255,255,255,0.02)',
-        border: '1px solid',
-        borderColor: 'divider',
+        my: 1.5, py: 1.5, px: 2, borderRadius: 2.5,
+        background: 'linear-gradient(135deg, rgba(255,255,255,0.015) 0%, transparent 100%)',
+        borderLeft: '2px solid',
+        borderColor: alpha('#818cf8', 0.3),
         overflow: 'auto',
-        '& svg': { maxWidth: '100%', height: 'auto' },
+        '& svg': { maxWidth: '100%', height: 'auto', display: 'block', margin: '0 auto' },
       }}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
@@ -113,7 +126,7 @@ function ChartRenderer({ spec }: { spec: ChartSpec }) {
 
   if (!spec.data || spec.data.length === 0) {
     return (
-      <Box sx={{ p: 2, color: 'text.secondary' }}>
+      <Box sx={{ p: 1.5, color: 'text.secondary' }}>
         <Typography variant="caption">No data available for chart</Typography>
       </Box>
     );
@@ -125,123 +138,175 @@ function ChartRenderer({ spec }: { spec: ChartSpec }) {
   const nameKey = spec.nameKey || xKey;
   const valueKey = spec.valueKey || (allKeys[0] ?? 'value');
 
+  // Adaptive height: compact for small data, slightly taller for larger sets
+  const dataLen = spec.data.length;
+  const chartHeight = spec.type === 'pie' || spec.type === 'radar'
+    ? Math.min(200, Math.max(160, dataLen * 20))
+    : Math.min(220, Math.max(140, dataLen * 18));
+
   const chartStyle = {
+    fontSize: 10,
+    fontFamily: '"Inter", -apple-system, sans-serif',
+  };
+
+  const tooltipStyle = {
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    backdropFilter: 'blur(12px)',
+    border: `1px solid ${alpha(theme.palette.common.white, 0.08)}`,
+    borderRadius: 10,
     fontSize: 11,
-    fontFamily: '"Inter", sans-serif',
+    padding: '6px 10px',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+    color: alpha(theme.palette.common.white, 0.9),
   };
 
   const commonAxisProps = {
-    stroke: alpha(theme.palette.common.white, 0.2),
-    tick: { fill: alpha(theme.palette.common.white, 0.5), fontSize: 11 },
+    stroke: 'transparent',
+    tick: { fill: alpha(theme.palette.common.white, 0.35), fontSize: 10 },
+    tickLine: false,
+    axisLine: false,
+  };
+
+  const showLegend = yKeys.length > 1;
+  const legendStyle = { fontSize: 10, paddingTop: 4, opacity: 0.7 };
+
+  // Custom pie label: only show on large-enough slices
+  const renderPieLabel = ({ name, percent }: { name?: string; percent?: number }) => {
+    if (!percent || percent < 0.05) return '';
+    return `${name ?? ''} ${(percent * 100).toFixed(0)}%`;
   };
 
   return (
     <Box sx={{
-      my: 2, p: 2, borderRadius: 2,
-      bgcolor: 'rgba(255,255,255,0.02)',
-      border: '1px solid',
-      borderColor: 'divider',
+      my: 1.5,
+      py: 1.5,
+      px: 1,
+      borderRadius: 2.5,
+      background: `linear-gradient(135deg, ${alpha(theme.palette.common.white, 0.015)} 0%, transparent 100%)`,
+      // Subtle left accent instead of full border
+      borderLeft: `2px solid ${alpha(CHART_COLORS[0], 0.4)}`,
     }}>
       {spec.title && (
-        <Typography variant="subtitle2" sx={{ mb: 1.5, fontWeight: 600, color: 'text.primary' }}>
+        <Typography
+          variant="caption"
+          sx={{
+            display: 'block',
+            mb: 1,
+            ml: 1,
+            fontWeight: 600,
+            fontSize: '0.75rem',
+            color: alpha(theme.palette.common.white, 0.6),
+            letterSpacing: 0.3,
+            textTransform: 'none',
+          }}
+        >
           {spec.title}
         </Typography>
       )}
-      <ResponsiveContainer width="100%" height={300}>
+      <ResponsiveContainer width="100%" height={chartHeight}>
         {spec.type === 'bar' ? (
-          <BarChart data={spec.data} style={chartStyle}>
-            <CartesianGrid strokeDasharray="3 3" stroke={alpha(theme.palette.common.white, 0.06)} />
+          <BarChart data={spec.data} style={chartStyle} margin={{ top: 4, right: 8, bottom: 0, left: -10 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={alpha(theme.palette.common.white, 0.04)} vertical={false} />
             <XAxis dataKey={xKey} {...commonAxisProps} />
-            <YAxis {...commonAxisProps} />
-            <RechartsTooltip
-              contentStyle={{
-                backgroundColor: theme.palette.background.paper,
-                border: `1px solid ${theme.palette.divider}`,
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <YAxis {...commonAxisProps} width={36} />
+            <RechartsTooltip contentStyle={tooltipStyle} cursor={{ fill: alpha(theme.palette.common.white, 0.04) }} />
+            {showLegend && <Legend wrapperStyle={legendStyle} />}
             {yKeys.map((key, i) => (
-              <Bar key={key} dataKey={key} fill={CHART_COLORS[i % CHART_COLORS.length]} radius={[4, 4, 0, 0]} />
+              <Bar
+                key={key}
+                dataKey={key}
+                fill={alpha(CHART_COLORS[i % CHART_COLORS.length], 0.75)}
+                radius={[3, 3, 0, 0]}
+                maxBarSize={32}
+              />
             ))}
           </BarChart>
         ) : spec.type === 'line' ? (
-          <LineChart data={spec.data} style={chartStyle}>
-            <CartesianGrid strokeDasharray="3 3" stroke={alpha(theme.palette.common.white, 0.06)} />
+          <LineChart data={spec.data} style={chartStyle} margin={{ top: 4, right: 8, bottom: 0, left: -10 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={alpha(theme.palette.common.white, 0.04)} vertical={false} />
             <XAxis dataKey={xKey} {...commonAxisProps} />
-            <YAxis {...commonAxisProps} />
-            <RechartsTooltip
-              contentStyle={{
-                backgroundColor: theme.palette.background.paper,
-                border: `1px solid ${theme.palette.divider}`,
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <YAxis {...commonAxisProps} width={36} />
+            <RechartsTooltip contentStyle={tooltipStyle} />
+            {showLegend && <Legend wrapperStyle={legendStyle} />}
             {yKeys.map((key, i) => (
-              <Line key={key} type="monotone" dataKey={key} stroke={CHART_COLORS[i % CHART_COLORS.length]} strokeWidth={2} dot={{ r: 3 }} />
+              <Line
+                key={key}
+                type="monotone"
+                dataKey={key}
+                stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                strokeWidth={1.5}
+                dot={{ r: 2, fill: CHART_COLORS[i % CHART_COLORS.length], strokeWidth: 0 }}
+                activeDot={{ r: 4, strokeWidth: 0 }}
+              />
             ))}
           </LineChart>
         ) : spec.type === 'area' ? (
-          <AreaChart data={spec.data} style={chartStyle}>
-            <CartesianGrid strokeDasharray="3 3" stroke={alpha(theme.palette.common.white, 0.06)} />
+          <AreaChart data={spec.data} style={chartStyle} margin={{ top: 4, right: 8, bottom: 0, left: -10 }}>
+            <defs>
+              {yKeys.map((key, i) => (
+                <linearGradient key={`grad-${key}`} id={`area-gradient-${i}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={CHART_COLORS[i % CHART_COLORS.length]} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={CHART_COLORS[i % CHART_COLORS.length]} stopOpacity={0.02} />
+                </linearGradient>
+              ))}
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={alpha(theme.palette.common.white, 0.04)} vertical={false} />
             <XAxis dataKey={xKey} {...commonAxisProps} />
-            <YAxis {...commonAxisProps} />
-            <RechartsTooltip
-              contentStyle={{
-                backgroundColor: theme.palette.background.paper,
-                border: `1px solid ${theme.palette.divider}`,
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <YAxis {...commonAxisProps} width={36} />
+            <RechartsTooltip contentStyle={tooltipStyle} />
+            {showLegend && <Legend wrapperStyle={legendStyle} />}
             {yKeys.map((key, i) => (
               <Area
-                key={key} type="monotone" dataKey={key}
-                fill={alpha(CHART_COLORS[i % CHART_COLORS.length], 0.3)}
+                key={key}
+                type="monotone"
+                dataKey={key}
+                fill={`url(#area-gradient-${i})`}
                 stroke={CHART_COLORS[i % CHART_COLORS.length]}
-                strokeWidth={2}
+                strokeWidth={1.5}
               />
             ))}
           </AreaChart>
         ) : spec.type === 'radar' ? (
-          <RadarChart data={spec.data} style={chartStyle} cx="50%" cy="50%" outerRadius="80%">
-            <PolarGrid stroke={alpha(theme.palette.common.white, 0.1)} />
-            <PolarAngleAxis dataKey={xKey} tick={{ fill: alpha(theme.palette.common.white, 0.5), fontSize: 11 }} />
-            <PolarRadiusAxis tick={{ fill: alpha(theme.palette.common.white, 0.3), fontSize: 10 }} />
+          <RadarChart data={spec.data} style={chartStyle} cx="50%" cy="50%" outerRadius="70%">
+            <PolarGrid stroke={alpha(theme.palette.common.white, 0.06)} />
+            <PolarAngleAxis dataKey={xKey} tick={{ fill: alpha(theme.palette.common.white, 0.4), fontSize: 9 }} />
+            <PolarRadiusAxis tick={{ fill: alpha(theme.palette.common.white, 0.2), fontSize: 9 }} />
             {yKeys.map((key, i) => (
-              <Radar key={key} dataKey={key} stroke={CHART_COLORS[i % CHART_COLORS.length]} fill={alpha(CHART_COLORS[i % CHART_COLORS.length], 0.3)} />
+              <Radar
+                key={key}
+                dataKey={key}
+                stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                fill={alpha(CHART_COLORS[i % CHART_COLORS.length], 0.15)}
+                strokeWidth={1.5}
+              />
             ))}
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            {showLegend && <Legend wrapperStyle={legendStyle} />}
           </RadarChart>
         ) : (
-          /* Pie chart */
+          /* Pie / donut chart */
           <PieChart style={chartStyle}>
             <Pie
               data={spec.data}
-              cx="50%" cy="50%"
+              cx="50%"
+              cy="50%"
               labelLine={false}
-              label={({ name, percent }: { name: string; percent: number }) => `${name} ${(percent * 100).toFixed(0)}%`}
-              outerRadius={100}
+              label={renderPieLabel}
+              innerRadius={chartHeight * 0.22}
+              outerRadius={chartHeight * 0.38}
+              paddingAngle={2}
               dataKey={valueKey}
               nameKey={nameKey}
+              stroke="transparent"
             >
               {spec.data.map((_, i) => (
-                <Cell key={`cell-${i}`} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                <Cell
+                  key={`cell-${i}`}
+                  fill={alpha(CHART_COLORS[i % CHART_COLORS.length], 0.85)}
+                />
               ))}
             </Pie>
-            <RechartsTooltip
-              contentStyle={{
-                backgroundColor: theme.palette.background.paper,
-                border: `1px solid ${theme.palette.divider}`,
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <RechartsTooltip contentStyle={tooltipStyle} />
+            <Legend wrapperStyle={legendStyle} />
           </PieChart>
         )}
       </ResponsiveContainer>
@@ -329,27 +394,28 @@ function MarkdownTable({ rows }: { rows: string[][] }) {
     <Box sx={{
       my: 1.5, overflow: 'auto',
       borderRadius: 2,
-      border: '1px solid',
-      borderColor: 'divider',
+      background: `linear-gradient(135deg, ${alpha(theme.palette.common.white, 0.012)} 0%, transparent 100%)`,
     }}>
       <Box component="table" sx={{
         width: '100%',
         borderCollapse: 'collapse',
-        fontSize: '0.85rem',
+        fontSize: '0.8rem',
         '& th, & td': {
-          px: 1.5, py: 1,
+          px: 1.5, py: 0.75,
           borderBottom: '1px solid',
-          borderColor: 'divider',
+          borderColor: alpha(theme.palette.common.white, 0.06),
           textAlign: 'left',
-          whiteSpace: 'nowrap',
         },
         '& th': {
           fontWeight: 600,
-          bgcolor: alpha(theme.palette.common.white, 0.04),
-          color: 'text.primary',
-          fontSize: '0.8rem',
+          color: alpha(theme.palette.common.white, 0.5),
+          fontSize: '0.7rem',
           textTransform: 'uppercase',
-          letterSpacing: 0.5,
+          letterSpacing: 0.8,
+          pb: 0.5,
+        },
+        '& td': {
+          color: 'text.primary',
         },
         '& tr:last-child td': { borderBottom: 'none' },
         '& tr:hover td': { bgcolor: alpha(theme.palette.common.white, 0.02) },
@@ -641,13 +707,13 @@ export default function RichMarkdown({ content }: { content: string }) {
           case 'blockquote':
             return (
               <Box key={i} sx={{
-                my: 1.5, pl: 2, py: 0.5,
-                borderLeft: '3px solid',
-                borderColor: 'primary.main',
-                bgcolor: alpha(theme.palette.primary.main, 0.04),
+                my: 1.5, pl: 2, py: 0.75,
+                borderLeft: '2px solid',
+                borderColor: alpha(theme.palette.primary.main, 0.4),
+                background: `linear-gradient(135deg, ${alpha(theme.palette.primary.main, 0.03)} 0%, transparent 100%)`,
                 borderRadius: '0 8px 8px 0',
               }}>
-                <Typography variant="body2" sx={{ color: 'text.secondary', fontStyle: 'italic', lineHeight: 1.7 }}>
+                <Typography variant="body2" sx={{ color: alpha(theme.palette.common.white, 0.55), fontStyle: 'italic', lineHeight: 1.7 }}>
                   <InlineFormatted text={block.content} />
                 </Typography>
               </Box>

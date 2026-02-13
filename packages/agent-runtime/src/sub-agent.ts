@@ -319,7 +319,7 @@ graph TD
     B -->|No| D[End]
 \`\`\`
 
-Use charts and diagrams when they communicate data more effectively than text or tables.`;
+Use charts ONLY when you have 3+ data points and a visual pattern (trend, comparison, distribution) communicates something text alone cannot. Most data is better presented inline or in a small table. Never chart for decoration.`;
 }
 
 // ---------------------------------------------------------------------------
