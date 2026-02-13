@@ -795,33 +795,90 @@ export class LLMPool {
     };
   }
 
-  // ── NVIDIA NIM (Kimi K2.5) ─────────────────────────────────────────
+  // ── NVIDIA NIM ─────────────────────────────────────────────────────
 
   /**
    * Build clean OpenAI-format messages for NVIDIA NIM.
    *
    * We intentionally do NOT use `toOpenAIMessages()` here because that
    * function injects a forceful identity-override preamble designed for
-   * the Claude Max API proxy.  Those extra messages confuse Kimi K2.5
-   * and waste tokens.  Instead we build a straightforward message list
-   * with a clean system prompt.
+   * the Claude Max API proxy.  Instead we build a proper OpenAI message
+   * list that correctly handles tool_use and tool_result blocks.
+   *
+   * Anthropic format → OpenAI format:
+   *   assistant + tool_use  → { role: 'assistant', tool_calls: [...] }
+   *   user + tool_result    → { role: 'tool', content: '...', tool_call_id: '...' }
    */
   private buildNvidiaMessages(
     messages: LLMMessage[], systemPrompt?: string,
-  ): Array<{ role: string; content: string }> {
-    const out: Array<{ role: string; content: string }> = [];
+  ): Array<Record<string, any>> {
+    const out: Array<Record<string, any>> = [];
     if (systemPrompt) {
       out.push({ role: 'system', content: systemPrompt });
     }
+
     for (const m of messages) {
-      const text = typeof m.content === 'string'
-        ? m.content
-        : m.content
-            .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-            .map((c) => c.text)
-            .join('\n');
-      out.push({ role: m.role, content: text });
+      // Simple string content — pass through
+      if (typeof m.content === 'string') {
+        out.push({ role: m.role, content: m.content });
+        continue;
+      }
+
+      // Complex content blocks — separate text, tool_use, and tool_result
+      const textParts: string[] = [];
+      const toolUseParts: Array<{ type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }> = [];
+      const toolResultParts: Array<{ type: 'tool_result'; toolUseId: string; content: string }> = [];
+
+      for (const block of m.content) {
+        if (block.type === 'text') {
+          textParts.push(block.text);
+        } else if (block.type === 'tool_use') {
+          toolUseParts.push(block);
+        } else if (block.type === 'tool_result') {
+          toolResultParts.push(block);
+        }
+        // Skip image blocks — NVIDIA models handle text only in this path
+      }
+
+      // ── Assistant message with tool calls ──
+      if (m.role === 'assistant' && toolUseParts.length > 0) {
+        const msg: Record<string, any> = {
+          role: 'assistant',
+          content: textParts.join('\n') || null,
+          tool_calls: toolUseParts.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.input),
+            },
+          })),
+        };
+        out.push(msg);
+        continue;
+      }
+
+      // ── User message with tool results ──
+      if (m.role === 'user' && toolResultParts.length > 0) {
+        // OpenAI format: each tool result is a separate message with role 'tool'
+        for (const tr of toolResultParts) {
+          out.push({
+            role: 'tool',
+            content: tr.content,
+            tool_call_id: tr.toolUseId,
+          });
+        }
+        // If there's also text alongside tool results, add it as a user message
+        if (textParts.length > 0 && textParts.join('').trim()) {
+          out.push({ role: 'user', content: textParts.join('\n') });
+        }
+        continue;
+      }
+
+      // ── Plain text message (no tool blocks) ──
+      out.push({ role: m.role, content: textParts.join('\n') || '' });
     }
+
     return out;
   }
 
