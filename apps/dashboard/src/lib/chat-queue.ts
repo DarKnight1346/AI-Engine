@@ -268,22 +268,25 @@ You MUST search memory for user preferences before every response — this is yo
       }
     };
 
-    // ── Load search API keys from config ────────────────────────────
+    // ── Load search API keys + fallback LLM key from config ─────────
     let serperApiKey: string | undefined;
     let xaiApiKey: string | undefined;
     let dataForSeoLogin: string | undefined;
     let dataForSeoPassword: string | undefined;
+    let nvidiaApiKey: string | undefined;
     try {
-      const [serperConfig, xaiConfig, dfsLoginConfig, dfsPasswordConfig] = await Promise.all([
+      const [serperConfig, xaiConfig, dfsLoginConfig, dfsPasswordConfig, nvidiaConfig] = await Promise.all([
         db.config.findUnique({ where: { key: 'serperApiKey' } }),
         db.config.findUnique({ where: { key: 'xaiApiKey' } }),
         db.config.findUnique({ where: { key: 'dataForSeoLogin' } }),
         db.config.findUnique({ where: { key: 'dataForSeoPassword' } }),
+        db.config.findUnique({ where: { key: 'nvidiaApiKey' } }),
       ]);
       if (serperConfig?.valueJson && typeof serperConfig.valueJson === 'string' && serperConfig.valueJson.trim()) serperApiKey = serperConfig.valueJson.trim();
       if (xaiConfig?.valueJson && typeof xaiConfig.valueJson === 'string' && xaiConfig.valueJson.trim()) xaiApiKey = xaiConfig.valueJson.trim();
       if (dfsLoginConfig?.valueJson && typeof dfsLoginConfig.valueJson === 'string' && dfsLoginConfig.valueJson.trim()) dataForSeoLogin = dfsLoginConfig.valueJson.trim();
       if (dfsPasswordConfig?.valueJson && typeof dfsPasswordConfig.valueJson === 'string' && dfsPasswordConfig.valueJson.trim()) dataForSeoPassword = dfsPasswordConfig.valueJson.trim();
+      if (nvidiaConfig?.valueJson && typeof nvidiaConfig.valueJson === 'string' && nvidiaConfig.valueJson.trim()) nvidiaApiKey = nvidiaConfig.valueJson.trim();
     } catch { /* Config not found */ }
 
     // ── Build conversation history (shared across agents) ──────────
@@ -650,6 +653,15 @@ Respond with ONLY the agent name (exactly as listed) or "none". Do not explain.`
       throw new Error('No API keys configured. Please add API keys in Settings > API Keys.');
     }
 
+    // Check for NVIDIA fallback key
+    let nvidiaFallback: { provider: 'nvidia'; apiKey: string } | undefined;
+    try {
+      const nvidiaConfig = await db.config.findUnique({ where: { key: 'nvidiaApiKey' } });
+      if (nvidiaConfig?.valueJson && typeof nvidiaConfig.valueJson === 'string' && nvidiaConfig.valueJson.trim()) {
+        nvidiaFallback = { provider: 'nvidia', apiKey: nvidiaConfig.valueJson.trim() };
+      }
+    } catch { /* Config not found */ }
+
     this._poolInstance = new LLMPool({
       keys: apiKeys.map((k: any) => {
         const stats = k.usageStats as any;
@@ -662,6 +674,7 @@ Respond with ONLY the agent name (exactly as listed) or "none". Do not explain.`
         };
       }),
       strategy: 'round-robin',
+      fallback: nvidiaFallback,
     });
 
     // Refresh the pool periodically (every 5 minutes)

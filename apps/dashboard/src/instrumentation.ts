@@ -221,6 +221,15 @@ async function executeTaskDirectly(
     throw new Error('No API keys configured');
   }
 
+  // Check for NVIDIA fallback key
+  let nvidiaFallback: { provider: 'nvidia'; apiKey: string } | undefined;
+  try {
+    const nvidiaConfig = await db.config.findUnique({ where: { key: 'nvidiaApiKey' } });
+    if (nvidiaConfig?.valueJson && typeof nvidiaConfig.valueJson === 'string' && nvidiaConfig.valueJson.trim()) {
+      nvidiaFallback = { provider: 'nvidia', apiKey: nvidiaConfig.valueJson.trim() };
+    }
+  } catch { /* Config not found */ }
+
   const pool = new LLMPool({
     keys: apiKeys.map((k) => {
       const stats = k.usageStats as any;
@@ -233,6 +242,7 @@ async function executeTaskDirectly(
       };
     }),
     strategy: 'round-robin',
+    fallback: nvidiaFallback,
   });
 
   // Build memory search function so the agent can search during execution

@@ -7,7 +7,7 @@ import { DEFAULT_CONFIG } from '@ai-engine/shared';
 // Types
 // ---------------------------------------------------------------------------
 
-export type LLMProvider = 'anthropic' | 'openai-compatible';
+export type LLMProvider = 'anthropic' | 'openai-compatible' | 'nvidia';
 
 export interface LLMKeyConfig {
   id: string;
@@ -30,6 +30,18 @@ export interface LLMPoolOptions {
   keys: LLMKeyConfig[];
   strategy?: LoadBalanceStrategy;
   defaultTierMapping?: Record<LLMTier, string>;
+  /**
+   * Optional fallback provider — used when ALL primary keys are exhausted
+   * or unhealthy. Currently supports NVIDIA NIM (Kimi K2.5).
+   */
+  fallback?: {
+    provider: 'nvidia';
+    apiKey: string;
+    /** Override the default NVIDIA base URL if needed */
+    baseUrl?: string;
+    /** Override the default model for each tier */
+    tierMapping?: Record<LLMTier, string>;
+  };
 }
 
 export interface KeyState {
@@ -38,8 +50,15 @@ export interface KeyState {
   tokensUsed: number;
   errorCount: number;
   isHealthy: boolean;
+  status: 'healthy' | 'rate_limited' | 'exhausted' | 'errored';
   lastUsedAt: Date | null;
   rateLimitedUntil: Date | null;
+  /** Top-of-hour cooldown for exhausted/errored keys */
+  cooldownUntil: Date | null;
+  /** Last error message */
+  lastError: string | null;
+  /** When the key was marked unhealthy */
+  markedUnhealthyAt: Date | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +191,13 @@ const PROXY_TIER_MAPPING: Record<LLMTier, string> = {
   heavy: 'claude-opus-4',
 };
 
+/** Tier mapping for NVIDIA NIM — Kimi K2.5 handles all tiers */
+const NVIDIA_TIER_MAPPING: Record<LLMTier, string> = {
+  fast: 'moonshotai/kimi-k2.5',
+  standard: 'moonshotai/kimi-k2.5',
+  heavy: 'moonshotai/kimi-k2.5',
+};
+
 /** Callback signature for streaming chunks from the LLM. */
 export type LLMStreamCallback = (event: LLMStreamEvent) => void;
 
@@ -208,9 +234,7 @@ export class LLMPool {
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const keyId = this.keyManager.getNextKey();
-      if (!keyId) {
-        throw new Error('No healthy API keys available');
-      }
+      if (!keyId) break; // No healthy keys — fall through to fallback
 
       const keyConfig = this.options.keys.find((k) => k.id === keyId);
       if (!keyConfig) continue;
@@ -234,18 +258,32 @@ export class LLMPool {
         return result;
       } catch (err: any) {
         lastError = err;
-        const statusCode = err?.status ?? err?.statusCode;
-
-        if (statusCode === 429) {
-          const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '60', 10);
-          this.keyManager.recordRateLimit(keyId, retryAfter * 1000);
-        } else {
-          this.keyManager.recordError(keyId);
-        }
+        this.classifyAndRecordError(keyId, err);
       }
     }
 
-    throw lastError ?? new Error('LLM call failed after retries');
+    // ── NVIDIA NIM fallback ──────────────────────────────────────────
+    if (this.options.fallback?.provider === 'nvidia') {
+      console.log(`[LLMPool] Primary keys exhausted, falling back to NVIDIA NIM (Kimi K2.5)`);
+      try {
+        const fb = this.options.fallback;
+        const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
+        const fbModel = fbTierMapping[tier];
+        const fbKeyConfig: LLMKeyConfig = {
+          id: 'nvidia-fallback',
+          apiKey: fb.apiKey,
+          provider: 'nvidia',
+          baseUrl: fb.baseUrl ?? 'https://integrate.api.nvidia.com/v1',
+        };
+        return await this.callNvidia(fbKeyConfig, fbModel, messages, options);
+      } catch (fbErr: any) {
+        console.error(`[LLMPool] NVIDIA fallback also failed:`, fbErr.message);
+        // If fallback also failed, throw the original error (more informative)
+        throw lastError ?? fbErr;
+      }
+    }
+
+    throw lastError ?? new Error('No healthy API keys available');
   }
 
   /**
@@ -266,7 +304,7 @@ export class LLMPool {
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const keyId = this.keyManager.getNextKey();
-      if (!keyId) throw new Error('No healthy API keys available');
+      if (!keyId) break; // No healthy keys — fall through to fallback
 
       const keyConfig = this.options.keys.find((k) => k.id === keyId);
       if (!keyConfig) continue;
@@ -291,13 +329,29 @@ export class LLMPool {
         return result;
       } catch (err: any) {
         lastError = err;
-        const statusCode = err?.status ?? err?.statusCode;
-        if (statusCode === 429) {
-          const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '60', 10);
-          this.keyManager.recordRateLimit(keyId, retryAfter * 1000);
-        } else {
-          this.keyManager.recordError(keyId);
-        }
+        this.classifyAndRecordError(keyId, err);
+      }
+    }
+
+    // ── NVIDIA NIM fallback (streaming) ──────────────────────────────
+    if (this.options.fallback?.provider === 'nvidia') {
+      console.log(`[LLMPool] Primary keys exhausted, falling back to NVIDIA NIM streaming (Kimi K2.5)`);
+      try {
+        const fb = this.options.fallback;
+        const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
+        const fbModel = fbTierMapping[tier];
+        const fbKeyConfig: LLMKeyConfig = {
+          id: 'nvidia-fallback',
+          apiKey: fb.apiKey,
+          provider: 'nvidia',
+          baseUrl: fb.baseUrl ?? 'https://integrate.api.nvidia.com/v1',
+        };
+        const result = await this.callNvidiaStreaming(fbKeyConfig, fbModel, messages, options, onEvent);
+        onEvent({ type: 'done', response: result });
+        return result;
+      } catch (fbErr: any) {
+        console.error(`[LLMPool] NVIDIA fallback streaming also failed:`, fbErr.message);
+        throw lastError ?? fbErr;
       }
     }
 
@@ -726,7 +780,329 @@ export class LLMPool {
     };
   }
 
+  // ── NVIDIA NIM (Kimi K2.5) ─────────────────────────────────────────
+
+  /**
+   * Build the request body for NVIDIA NIM API calls.
+   * Kimi K2.5 supports OpenAI-compatible chat completions with an extra
+   * `chat_template_kwargs` field for enabling thinking mode.
+   */
+  private buildNvidiaBody(
+    model: string, messages: LLMMessage[], options: LLMCallOptions, stream: boolean,
+  ): Record<string, any> {
+    const body: Record<string, any> = {
+      model,
+      max_tokens: options.maxTokens ?? 16384,
+      temperature: options.temperature ?? 1.0,
+      top_p: 1.0,
+      messages: toOpenAIMessages(messages, options.systemPrompt),
+      stream,
+      chat_template_kwargs: { thinking: true },
+    };
+
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools.map((t) => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      }));
+    }
+
+    return body;
+  }
+
+  /**
+   * Strip `<think>...</think>` blocks that Kimi K2.5 emits in thinking mode.
+   * We only want the final answer content to go through to the user.
+   */
+  private stripThinkingTags(text: string): string {
+    return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  }
+
+  private async callNvidia(
+    keyConfig: LLMKeyConfig, model: string, messages: LLMMessage[], options: LLMCallOptions,
+  ): Promise<LLMResponse> {
+    const baseUrl = (keyConfig.baseUrl ?? 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
+    const url = `${baseUrl}/chat/completions`;
+    const body = this.buildNvidiaBody(model, messages, options, false);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${keyConfig.apiKey}`,
+      'Accept': 'application/json',
+    };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      const err: any = new Error(`NVIDIA NIM API error (${res.status}): ${errText}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json() as any;
+    const choice = data.choices?.[0];
+    const rawContent = choice?.message?.content ?? '';
+    const content = this.stripThinkingTags(rawContent);
+
+    const openAIToolCalls = choice?.message?.tool_calls ?? [];
+    const toolCalls = openAIToolCalls.map((tc: any) => ({
+      id: tc.id ?? `call_${Date.now()}`,
+      name: tc.function?.name ?? '',
+      input: tc.function?.arguments
+        ? (typeof tc.function.arguments === 'string'
+            ? JSON.parse(tc.function.arguments)
+            : tc.function.arguments)
+        : {},
+    }));
+
+    return {
+      content,
+      toolCalls,
+      usage: {
+        inputTokens: data.usage?.prompt_tokens ?? 0,
+        outputTokens: data.usage?.completion_tokens ?? 0,
+      },
+      model: data.model ?? model,
+      stopReason: choice?.finish_reason ?? 'end_turn',
+    };
+  }
+
+  private async callNvidiaStreaming(
+    keyConfig: LLMKeyConfig, model: string, messages: LLMMessage[],
+    options: LLMCallOptions, onEvent: LLMStreamCallback,
+  ): Promise<LLMResponse> {
+    const baseUrl = (keyConfig.baseUrl ?? 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
+    const url = `${baseUrl}/chat/completions`;
+    const body = this.buildNvidiaBody(model, messages, options, true);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${keyConfig.apiKey}`,
+      'Accept': 'text/event-stream',
+    };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      const err: any = new Error(`NVIDIA NIM streaming API error (${res.status}): ${errText}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    let fullText = '';
+    const toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+    const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let responseModel = model;
+    let stopReason = 'end_turn';
+
+    // Track thinking mode — suppress <think>...</think> from streaming output
+    let insideThinking = false;
+    let thinkBuffer = '';
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      return this.callNvidia(keyConfig, model, messages, options);
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        if (!trimmed.startsWith('data: ')) continue;
+
+        try {
+          const data = JSON.parse(trimmed.slice(6));
+          const choice = data.choices?.[0];
+          if (!choice) continue;
+
+          const delta = choice.delta;
+          if (delta?.content) {
+            // Handle thinking tags in streaming mode:
+            // Buffer content that might be inside <think>...</think> and
+            // only emit tokens that are outside thinking blocks.
+            let chunk = delta.content;
+            let emitText = '';
+
+            while (chunk.length > 0) {
+              if (insideThinking) {
+                const closeIdx = chunk.indexOf('</think>');
+                if (closeIdx !== -1) {
+                  insideThinking = false;
+                  thinkBuffer = '';
+                  chunk = chunk.slice(closeIdx + 8);
+                } else {
+                  thinkBuffer += chunk;
+                  chunk = '';
+                }
+              } else {
+                const openIdx = chunk.indexOf('<think>');
+                if (openIdx !== -1) {
+                  emitText += chunk.slice(0, openIdx);
+                  insideThinking = true;
+                  thinkBuffer = '';
+                  chunk = chunk.slice(openIdx + 7);
+                } else {
+                  // Check for partial <think> tag at the end
+                  const partialCheck = '<think>';
+                  let partialLen = 0;
+                  for (let i = 1; i < partialCheck.length && i <= chunk.length; i++) {
+                    if (chunk.endsWith(partialCheck.slice(0, i))) {
+                      partialLen = i;
+                    }
+                  }
+                  if (partialLen > 0) {
+                    emitText += chunk.slice(0, -partialLen);
+                    thinkBuffer = chunk.slice(-partialLen);
+                    chunk = '';
+                  } else {
+                    emitText += chunk;
+                    chunk = '';
+                  }
+                }
+              }
+            }
+
+            if (emitText) {
+              fullText += emitText;
+              onEvent({ type: 'token', text: emitText });
+            }
+          }
+
+          // Tool call deltas
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (!toolCallBuffers.has(idx)) {
+                const id = tc.id ?? `call_${Date.now()}_${idx}`;
+                const name = tc.function?.name ?? '';
+                toolCallBuffers.set(idx, { id, name, args: '' });
+                if (name) {
+                  onEvent({ type: 'tool_use_start', id, name });
+                }
+              }
+              const buf = toolCallBuffers.get(idx)!;
+              if (tc.function?.name && !buf.name) buf.name = tc.function.name;
+              if (tc.id && !buf.id) buf.id = tc.id;
+              if (tc.function?.arguments) {
+                buf.args += tc.function.arguments;
+                onEvent({ type: 'tool_use_delta', id: buf.id, partialJson: tc.function.arguments });
+              }
+            }
+          }
+
+          if (choice.finish_reason) {
+            stopReason = choice.finish_reason;
+          }
+
+          if (data.usage) {
+            inputTokens = data.usage.prompt_tokens ?? inputTokens;
+            outputTokens = data.usage.completion_tokens ?? outputTokens;
+          }
+          if (data.model) {
+            responseModel = data.model;
+          }
+        } catch {
+          // Skip unparseable lines
+        }
+      }
+    }
+
+    // Flush any buffered partial tag that wasn't actually a thinking tag
+    if (thinkBuffer && !insideThinking) {
+      fullText += thinkBuffer;
+      onEvent({ type: 'token', text: thinkBuffer });
+    }
+
+    // Finalize tool calls
+    for (const [, buf] of toolCallBuffers) {
+      let input: Record<string, unknown> = {};
+      try { input = JSON.parse(buf.args); } catch { /* empty */ }
+      toolCalls.push({ id: buf.id, name: buf.name, input });
+      onEvent({ type: 'tool_use_end', id: buf.id, input });
+    }
+
+    return {
+      content: fullText,
+      toolCalls,
+      usage: { inputTokens, outputTokens },
+      model: responseModel,
+      stopReason,
+    };
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Classify an API error and record it against the key appropriately:
+   *   - 429          → rate-limited (short cooldown from retry-after header)
+   *   - 402/403/529  → exhausted / over-quota (top-of-hour cooldown)
+   *   - Other        → transient error (after 3 consecutive → top-of-hour cooldown)
+   *
+   * Also inspects the error body for keywords like "quota", "billing",
+   * "credit", "exceeded", "overloaded" to catch exhaustion from providers
+   * that return 400-level codes with descriptive messages.
+   */
+  private classifyAndRecordError(keyId: string, err: any): void {
+    const statusCode = err?.status ?? err?.statusCode ?? 0;
+    const errMsg = (err?.message ?? err?.error?.message ?? '').toLowerCase();
+
+    // Check for quota/billing/exhaustion signals in the error body
+    const exhaustionKeywords = [
+      'quota', 'billing', 'credit', 'exceeded', 'overloaded',
+      'insufficient', 'limit reached', 'budget', 'spend',
+      'token limit', 'tokens exceeded', 'out of', 'capacity',
+    ];
+    const looksExhausted = exhaustionKeywords.some((kw) => errMsg.includes(kw));
+
+    if (statusCode === 429) {
+      // Standard rate limit — use retry-after if available
+      const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '60', 10);
+      this.keyManager.recordRateLimit(keyId, retryAfter * 1000);
+    } else if (statusCode === 402 || statusCode === 529 || looksExhausted) {
+      // Quota exhaustion — shelve until top of hour
+      const reason = `HTTP ${statusCode}: ${err?.message ?? 'quota/capacity exhausted'}`;
+      this.keyManager.recordExhausted(keyId, reason);
+    } else if (statusCode === 403) {
+      // Could be auth or quota — check message
+      const reason = `HTTP 403: ${err?.message ?? 'forbidden'}`;
+      if (looksExhausted) {
+        this.keyManager.recordExhausted(keyId, reason);
+      } else {
+        // Likely an auth/permissions issue — treat as exhausted too since
+        // retrying won't fix it until something changes
+        this.keyManager.recordExhausted(keyId, reason);
+      }
+    } else {
+      // Transient error — KeyManager will escalate to 'errored' after 3 consecutive
+      this.keyManager.recordError(keyId, `HTTP ${statusCode}: ${err?.message ?? 'unknown error'}`);
+    }
+  }
 
   private resolveProvider(config: LLMKeyConfig): LLMProvider {
     return config.provider ?? 'anthropic';

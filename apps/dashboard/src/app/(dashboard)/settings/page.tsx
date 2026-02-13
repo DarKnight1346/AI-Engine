@@ -676,6 +676,55 @@ export default function SettingsPage() {
           </Paper>
 
           <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>LLM Fallback Provider</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              When all primary API keys are exhausted or rate-limited, the system can automatically fall back to
+              a secondary LLM provider. Currently supports <strong>NVIDIA NIM</strong> with the Kimi K2.5 model (256K context).
+            </Typography>
+
+            <Divider sx={{ my: 2 }} />
+
+            <Stack spacing={1.5}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip label="Fallback" size="small" color="info" variant="outlined" />
+                <Typography variant="subtitle1" fontWeight={600}>NVIDIA NIM — Kimi K2.5</Typography>
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                Moonshot AI's Kimi K2.5 via NVIDIA NIM. A powerful multimodal model with thinking capabilities
+                and 256K context window. Used automatically when primary keys run out of tokens.
+                Get an API key from{' '}
+                <a href="https://build.nvidia.com" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>build.nvidia.com</a>.
+              </Typography>
+              <TextField
+                label="NVIDIA NIM API Key"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('nvidiaApiKey', '')}
+                onChange={(e) => setConfig('nvidiaApiKey', e.target.value)}
+                placeholder="Enter your NVIDIA NIM API key (nvapi-...)..."
+                inputProps={{ spellCheck: false }}
+              />
+              {getConfig('nvidiaApiKey', '') !== '' && configEdits.nvidiaApiKey === undefined && (
+                <Chip label="Configured" size="small" color="success" variant="outlined" sx={{ alignSelf: 'flex-start' }} />
+              )}
+            </Stack>
+
+            {configEdits.nvidiaApiKey !== undefined && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
+                onClick={() => saveConfig()}
+                disabled={savingConfig}
+                sx={{ mt: 2 }}
+              >
+                Save Fallback Key
+              </Button>
+            )}
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>Claude Max Accounts</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               Manage Claude Max subscriptions for load-balanced, flat-rate AI access.
