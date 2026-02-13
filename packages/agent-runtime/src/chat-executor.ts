@@ -87,6 +87,21 @@ function stripXmlToolCalls(text: string): string {
   return text.replace(/<invoke\s+name="[^"]+">[\s\S]*?<\/invoke>/g, '').trim();
 }
 
+/**
+ * Count how many times the last element of `history` repeats consecutively
+ * from the tail.  e.g. ['a','b','b','b'] → 3
+ */
+function countTrailingRepeats(history: string[]): number {
+  if (history.length === 0) return 0;
+  const last = history[history.length - 1];
+  let count = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i] === last) count++;
+    else break;
+  }
+  return count;
+}
+
 // ---------------------------------------------------------------------------
 // Long-running tools — executed in the background so the user can continue
 // chatting. The agent gets a placeholder result and can respond immediately.
@@ -359,6 +374,9 @@ export class ChatExecutor {
     // Working copy of messages for the agentic loop
     const workingMessages = [...messages];
 
+    // Track consecutive calls to the same tool to detect loops
+    const toolCallHistory: string[] = [];
+
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       const callOpts: LLMCallOptions = {
         tier: this.currentTier,
@@ -394,6 +412,40 @@ export class ChatExecutor {
       if (effectiveToolCalls.length === 0) {
         return {
           content: effectiveContent,
+          toolCallsCount,
+          usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+          iterations: iteration + 1,
+        };
+      }
+
+      // ── Repeated tool-call loop detection ──
+      // If the model calls the same tool 3+ times in a row, it's stuck in a
+      // loop.  Inject a hint and strip tools to force a text response.
+      const currentToolSig = effectiveToolCalls.map((tc) => tc.name).sort().join(',');
+      toolCallHistory.push(currentToolSig);
+      const repeatedCount = countTrailingRepeats(toolCallHistory);
+      if (repeatedCount >= 3) {
+        console.warn(
+          `[ChatExecutor] Loop detected: "${currentToolSig}" called ${repeatedCount}x in a row. ` +
+          `Forcing text response.`
+        );
+        workingMessages.push({
+          role: 'user',
+          content: [{ type: 'text' as const, text:
+            `IMPORTANT: You have already called "${currentToolSig}" ${repeatedCount} times and received results each time. ` +
+            `You MUST now use the information you already have to respond to the user. ` +
+            `Do NOT call any more tools. Respond directly with a helpful answer based on the results you have.`
+          }],
+        });
+        // Make one more LLM call WITHOUT tools to force a text response
+        const forcedResponse = await this.options.llm.call(
+          workingMessages,
+          { tier: this.currentTier, systemPrompt },
+        );
+        totalInputTokens += forcedResponse.usage.inputTokens;
+        totalOutputTokens += forcedResponse.usage.outputTokens;
+        return {
+          content: forcedResponse.content || effectiveContent || 'I was unable to generate a response.',
           toolCallsCount,
           usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
           iterations: iteration + 1,
@@ -499,6 +551,9 @@ export class ChatExecutor {
 
     const workingMessages = [...messages];
 
+    // Track consecutive calls to the same tool to detect loops
+    const toolCallHistory: string[] = [];
+
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       onEvent({ type: 'iteration', iteration, maxIterations: this.maxIterations });
 
@@ -557,6 +612,46 @@ export class ChatExecutor {
 
       // The LLM wants to use tools — stop streaming text, start tool execution
       onEvent({ type: 'status', message: `Using ${effectiveToolCalls.length} tool(s)...` });
+
+      // ── Repeated tool-call loop detection (streaming) ──
+      const currentToolSig = effectiveToolCalls.map((tc) => tc.name).sort().join(',');
+      toolCallHistory.push(currentToolSig);
+      const repeatedCount = countTrailingRepeats(toolCallHistory);
+      if (repeatedCount >= 3) {
+        console.warn(
+          `[ChatExecutor] Loop detected (streaming): "${currentToolSig}" called ${repeatedCount}x in a row. ` +
+          `Forcing text response.`
+        );
+        onEvent({ type: 'status', message: 'Breaking out of tool loop...' });
+        workingMessages.push({
+          role: 'user',
+          content: [{ type: 'text' as const, text:
+            `IMPORTANT: You have already called "${currentToolSig}" ${repeatedCount} times and received results each time. ` +
+            `You MUST now use the information you already have to respond to the user. ` +
+            `Do NOT call any more tools. Respond directly with a helpful answer based on the results you have.`
+          }],
+        });
+        // Make one more LLM call WITHOUT tools to force a text response
+        const forcedResponse = await this.options.llm.callStreaming(
+          workingMessages,
+          { tier: this.currentTier, systemPrompt },
+          (llmEvent) => {
+            if (llmEvent.type === 'token') {
+              onEvent({ type: 'token', text: llmEvent.text });
+            }
+          },
+        );
+        totalInputTokens += forcedResponse.usage.inputTokens;
+        totalOutputTokens += forcedResponse.usage.outputTokens;
+        const loopResult: ChatExecutorResult = {
+          content: forcedResponse.content || effectiveContent || 'I was unable to generate a response.',
+          toolCallsCount,
+          usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+          iterations: iteration + 1,
+        };
+        onEvent({ type: 'done', result: loopResult });
+        return loopResult;
+      }
 
       // Append assistant message with tool calls
       workingMessages.push({
