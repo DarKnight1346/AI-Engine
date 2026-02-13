@@ -43,6 +43,18 @@ const nextConfig = {
   // NOTE: Do NOT add manual webpack externals for @prisma/client — that
   // emits bare require() calls that fail under pnpm's strict node_modules.
   // serverComponentsExternalPackages above handles it correctly.
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      // ioredis (and its Node built-in deps: stream, crypto, dns, net, tls)
+      // is only imported from instrumentation.ts at runtime.
+      // Keep it external so webpack doesn't try to bundle Node built-ins.
+      config.externals = config.externals || [];
+      if (Array.isArray(config.externals)) {
+        config.externals.push('ioredis');
+      }
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
