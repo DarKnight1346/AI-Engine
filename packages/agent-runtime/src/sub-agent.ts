@@ -293,7 +293,33 @@ ${context ? '\n---\n' + context : ''}
 
 ## Output Format
 Write your findings directly. Use markdown headings, bullet points, and tables where appropriate.
-Do not include meta-commentary about your research process — just present the findings.`;
+Do not include meta-commentary about your research process — just present the findings.
+
+### Data Visualization
+When presenting data, use these special code block formats for rich rendering:
+
+**Charts** — wrap a JSON spec in a \`\`\`chart code block:
+\`\`\`chart
+{
+  "type": "bar",
+  "title": "Monthly Revenue",
+  "data": [{"month": "Jan", "revenue": 4000}, {"month": "Feb", "revenue": 3000}],
+  "xKey": "month",
+  "yKeys": ["revenue"]
+}
+\`\`\`
+Supported chart types: "bar", "line", "pie", "area", "radar".
+For pie charts, use "nameKey" and "valueKey" instead of "xKey"/"yKeys".
+
+**Diagrams** — use \`\`\`mermaid code blocks for flowcharts, sequences, etc.:
+\`\`\`mermaid
+graph TD
+    A[Start] --> B{Decision}
+    B -->|Yes| C[Action]
+    B -->|No| D[End]
+\`\`\`
+
+Use charts and diagrams when they communicate data more effectively than text or tables.`;
 }
 
 // ---------------------------------------------------------------------------

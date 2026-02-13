@@ -1,12 +1,15 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, Fragment } from 'react';
+import { useState, useRef, useEffect, useCallback, Fragment, lazy, Suspense } from 'react';
 import {
   Box, TextField, IconButton, Typography, Paper, List, ListItemButton,
   ListItemText, Divider, Avatar, Chip, InputAdornment, Stack,
   CircularProgress, Tooltip, Snackbar, Alert, Popover, MenuItem,
   ListItemIcon, Fade, alpha, useTheme, Badge,
 } from '@mui/material';
+
+// Lazy-load RichMarkdown to avoid SSR issues with mermaid/recharts
+const RichMarkdown = lazy(() => import('@/components/RichMarkdown'));
 import SendIcon from '@mui/icons-material/Send';
 import AddIcon from '@mui/icons-material/Add';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
@@ -490,7 +493,9 @@ function DynamicReport({ report }: { report: ReportState }) {
           )}
           {section.content && (
             <Box sx={{ px: 2, py: 1.5 }}>
-              <FormattedText text={section.content} />
+              <Suspense fallback={<Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading...</Typography>}>
+                <RichMarkdown content={section.content} />
+              </Suspense>
             </Box>
           )}
           {section.status === 'failed' && !section.content && (
@@ -1345,9 +1350,6 @@ function MessageContent({ content, attachments }: { content: string; attachments
       .replace(/\n{3,}/g, '\n\n');                      // collapse excess blank lines
   }
 
-  // Split by code blocks
-  const segments = processedContent.split(/(```[\s\S]*?```)/g);
-
   return (
     <Box sx={{ '& > *:first-of-type': { mt: 0 }, '& > *:last-child': { mb: 0 } }}>
       {/* Render image gallery if 2+ image URLs were found */}
@@ -1386,109 +1388,12 @@ function MessageContent({ content, attachments }: { content: string; attachments
         </Box>
       )}
 
-      {segments.map((segment, idx) => {
-        if (segment.startsWith('```')) return <CodeBlock key={idx} content={segment} />;
-        if (!segment.trim()) return null;
-
-        // Split into paragraphs
-        const paragraphs = segment.split(/\n\n+/);
-        return (
-          <Fragment key={idx}>
-            {paragraphs.map((para, pIdx) => {
-              const trimmed = para.trim();
-              if (!trimmed) return null;
-
-              // Headers
-              const h3Match = trimmed.match(/^###\s+(.+)/);
-              if (h3Match) return (
-                <Typography key={pIdx} variant="subtitle2" sx={{ mt: 2, mb: 0.5, fontWeight: 700 }}>
-                  <FormattedText text={h3Match[1]} />
-                </Typography>
-              );
-              const h2Match = trimmed.match(/^##\s+(.+)/);
-              if (h2Match) return (
-                <Typography key={pIdx} variant="subtitle1" sx={{ mt: 2, mb: 0.5, fontWeight: 700 }}>
-                  <FormattedText text={h2Match[1]} />
-                </Typography>
-              );
-              const h1Match = trimmed.match(/^#\s+(.+)/);
-              if (h1Match) return (
-                <Typography key={pIdx} variant="h6" sx={{ mt: 2, mb: 0.5, fontWeight: 700 }}>
-                  <FormattedText text={h1Match[1]} />
-                </Typography>
-              );
-
-              // Lists (bullet or numbered)
-              const lines = trimmed.split('\n');
-              const isBulletList = lines.every(l => /^\s*[-*•]\s/.test(l) || !l.trim());
-              const isNumberedList = lines.every(l => /^\s*\d+[.)]\s/.test(l) || !l.trim());
-
-              if (isBulletList) return (
-                <Box component="ul" key={pIdx} sx={{ my: 1, pl: 2.5, '& li': { mb: 0.5 } }}>
-                  {lines.filter(l => l.trim()).map((line, j) => (
-                    <li key={j}>
-                      <Typography variant="body2" component="span" sx={{ lineHeight: 1.7 }}>
-                        <FormattedText text={line.replace(/^\s*[-*•]\s/, '')} />
-                      </Typography>
-                    </li>
-                  ))}
-                </Box>
-              );
-
-              if (isNumberedList) return (
-                <Box component="ol" key={pIdx} sx={{ my: 1, pl: 2.5, '& li': { mb: 0.5 } }}>
-                  {lines.filter(l => l.trim()).map((line, j) => (
-                    <li key={j}>
-                      <Typography variant="body2" component="span" sx={{ lineHeight: 1.7 }}>
-                        <FormattedText text={line.replace(/^\s*\d+[.)]\s/, '')} />
-                      </Typography>
-                    </li>
-                  ))}
-                </Box>
-              );
-
-              // Check for media URLs (images, videos) in the paragraph
-              const urlMatches = findAllUrls(trimmed);
-              const hasMediaUrls = urlMatches?.some(u => isImageUrl(u) || isVideoUrl(u));
-              if (hasMediaUrls) {
-                // Split around URLs and render media inline
-                const { parts, urls } = splitAroundUrls(trimmed);
-                const elements: React.ReactNode[] = [];
-                for (let pi = 0; pi < parts.length; pi++) {
-                  if (parts[pi].trim()) {
-                    elements.push(
-                      <Typography key={`t${pi}`} variant="body2" component="span" sx={{ lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
-                        <FormattedText text={parts[pi]} />
-                      </Typography>
-                    );
-                  }
-                  if (pi < urls.length) {
-                    if (isVideoUrl(urls[pi])) {
-                      elements.push(<InlineVideo key={`vid${pi}`} url={urls[pi]} />);
-                    } else if (isImageUrl(urls[pi])) {
-                      elements.push(<InlineImage key={`img${pi}`} url={urls[pi]} />);
-                    } else {
-                      elements.push(
-                        <Typography key={`u${pi}`} variant="body2" component="span" sx={{ lineHeight: 1.75 }}>
-                          <a href={urls[pi]} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9' }}>{urls[pi]}</a>
-                        </Typography>
-                      );
-                    }
-                  }
-                }
-                return <Box key={pIdx} sx={{ my: 0.75 }}>{elements}</Box>;
-              }
-
-              // Regular paragraph
-              return (
-                <Typography key={pIdx} variant="body2" sx={{ my: 0.75, lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
-                  <FormattedText text={trimmed} />
-                </Typography>
-              );
-            })}
-          </Fragment>
-        );
-      })}
+      {/* Render the processed text content with full markdown support */}
+      {processedContent.trim() && (
+        <Suspense fallback={<Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading...</Typography>}>
+          <RichMarkdown content={processedContent} />
+        </Suspense>
+      )}
     </Box>
   );
 }

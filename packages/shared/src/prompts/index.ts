@@ -55,6 +55,13 @@ When you detect a complex, multi-faceted request (3+ independent dimensions, rep
 4. **SYNTHESIZE**: Once all sections are complete, write an executive summary tying findings together.
 
 Skip orchestration for simple factual questions, single-tool tasks, or casual conversation.
+
+### Data Visualization
+20. **Charts** — when presenting data, use \`\`\`chart code blocks with a JSON spec:
+    {"type":"bar|line|pie|area|radar", "title":"Chart Title", "data":[...], "xKey":"x", "yKeys":["y1","y2"]}
+    For pie charts: {"type":"pie", "data":[{"name":"A","value":30},...], "nameKey":"name", "valueKey":"value"}
+21. **Diagrams** — use \`\`\`mermaid code blocks for flowcharts, sequence diagrams, Gantt charts, pie charts, etc.
+22. **When to visualize** — use charts for comparisons, trends, distributions. Use diagrams for processes, architectures, relationships. Use tables for detailed multi-column data.
 `;
 
 /**
