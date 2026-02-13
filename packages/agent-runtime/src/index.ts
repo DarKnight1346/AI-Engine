@@ -11,6 +11,6 @@ export type { SerperServiceLike, XaiServiceLike } from './tools/web-search-tools
 export { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
 export type { DataForSeoServiceLike } from './tools/dataforseo-tools.js';
 export type { Tool, ToolResult, ToolContext, AgentRunnerOptions } from './types.js';
-export type { ToolManifestEntry, ToolSearchResult } from './tool-index.js';
+export type { ToolManifestEntry, ToolSearchResult, EmbeddingProvider } from './tool-index.js';
 export type { ChatExecutorOptions, ChatExecutorResult, ChatStreamEvent, ChatStreamCallback } from './chat-executor.js';
 export type { MetaToolOptions } from './tools/meta-tools.js';

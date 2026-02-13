@@ -220,7 +220,7 @@ function createDiscoverTool(opts: MetaToolOptions): Tool {
         return { success: false, output: 'Please provide a query describing the capability you need.' };
       }
 
-      const results = await opts.toolIndex.search(query, opts.toolConfig, 10);
+      const results = await opts.toolIndex.search(query, opts.toolConfig, 20);
 
       if (results.length === 0) {
         return {

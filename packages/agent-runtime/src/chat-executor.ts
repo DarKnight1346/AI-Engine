@@ -7,6 +7,7 @@ import { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
 import { createWebSearchTools, createXaiSearchTools } from './tools/web-search-tools.js';
 import { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
 import { WebSearchService, XaiSearchService, DataForSeoService } from '@ai-engine/web-search';
+import { EmbeddingService } from '@ai-engine/memory';
 import type { Tool, ToolContext, ToolResult } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -124,6 +125,13 @@ export class ChatExecutor {
 
     // Initialize tool index with built-in dashboard-safe tools
     this.toolIndex = new ToolIndex();
+
+    // Wire up semantic search via local embedding model (768-dim, runs on CPU).
+    // Embeddings are computed lazily on first discover_tools call, not here.
+    // Note: EmbeddingService satisfies EmbeddingProvider at runtime; the cast
+    // works around stale .d.ts files that may not reflect the latest source.
+    this.toolIndex.setEmbeddingProvider(new EmbeddingService() as any);
+
     this.registerBuiltInTools();
 
     // Initialize hybrid executor with meta-tools
