@@ -169,9 +169,9 @@ export class EmbeddingService {
   }
 
   /**
-   * Store an embedding for a memory entry or skill in the database.
+   * Store an embedding for a memory entry, skill, or episode in the database.
    */
-  async storeEmbedding(entryId: string, entryType: 'memory' | 'skill', text: string): Promise<void> {
+  async storeEmbedding(entryId: string, entryType: 'memory' | 'skill' | 'episode', text: string): Promise<void> {
     // Ensure DB column matches model dimension before first write
     await this.ensureCorrectDimension();
 
