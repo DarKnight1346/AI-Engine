@@ -1124,14 +1124,55 @@ function createDelegateTasksTool(opts: MetaToolOptions): Tool {
       // Execute the DAG
       const { executeDag } = await import('../sub-agent.js');
       let results: SubAgentResult[];
+
+      // Batch sub-agent token streaming — flush every 100ms or 50 chars
+      // to avoid overwhelming the SSE stream with per-character updates
+      const tokenBuffers = new Map<string, string>();
+      const tokenTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+      const flushTokenBuffer = (taskId: string) => {
+        const buf = tokenBuffers.get(taskId);
+        if (buf) {
+          opts.onSubtaskEvent?.({
+            type: 'report_section_stream',
+            sectionId: taskId,
+            text: buf,
+          } as any);
+          tokenBuffers.delete(taskId);
+        }
+        const timer = tokenTimers.get(taskId);
+        if (timer) {
+          clearTimeout(timer);
+          tokenTimers.delete(taskId);
+        }
+      };
+
       try {
         results = await executeDag(tasks, {
           parentOptions: opts.parentExecutorOptions,
           onEvent: (taskId, event) => {
-            // Forward sub-agent events if needed
-            if (event.type === 'token') return; // Don't forward individual sub-agent tokens
+            // Stream sub-agent tokens to the UI in real-time (batched)
+            if (event.type === 'token' && event.text) {
+              const current = (tokenBuffers.get(taskId) ?? '') + event.text;
+              tokenBuffers.set(taskId, current);
+
+              // Flush immediately if buffer is large enough
+              if (current.length >= 50) {
+                flushTokenBuffer(taskId);
+              } else {
+                // Otherwise schedule a flush after 100ms
+                if (!tokenTimers.has(taskId)) {
+                  tokenTimers.set(taskId, setTimeout(() => flushTokenBuffer(taskId), 100));
+                }
+              }
+            }
           },
         }, progress);
+
+        // Flush any remaining buffered tokens
+        for (const taskId of tokenBuffers.keys()) {
+          flushTokenBuffer(taskId);
+        }
       } catch (err: any) {
         // Drop back to Sonnet on failure
         opts.setParentTier?.('standard');

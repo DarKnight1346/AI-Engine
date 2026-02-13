@@ -490,6 +490,56 @@ function InlineFormatted({ text }: { text: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Content normalizer — handles content that arrives without proper newlines
+// ---------------------------------------------------------------------------
+
+/**
+ * Some upstream pipelines may strip newlines from markdown content,
+ * collapsing headings, list items, and other block-level constructs into
+ * a single line.  This normalizer detects mid-line markdown tokens and
+ * re-inserts newlines so the block parser can handle them correctly.
+ *
+ * It only activates when heuristics suggest the content is abnormally
+ * compressed (e.g. a single long line that contains heading/list markers).
+ */
+function normalizeMarkdownContent(raw: string): string {
+  // Strip \r so we always work with \n
+  let text = raw.replace(/\r\n?/g, '\n');
+
+  // Quick check: if the content already has a reasonable number of
+  // newlines relative to its length, don't touch it.
+  const lineCount = text.split('\n').length;
+  if (lineCount > 3 || text.length < 80) return text;
+
+  // Heuristic: if there are heading markers (##) or list markers (- )
+  // appearing mid-line, the content likely lost its newlines.
+  const hasInlineHeadings = /[^\n]#{1,6}\s+\S/.test(text);
+  const hasInlineListItems = /[^\n]-\s+\*\*/.test(text) || /[^\n]\d+\.\s+\*\*/.test(text);
+  const hasInlineListDash = /[.!?:)]\s+-\s+[A-Z*]/.test(text);
+  const hasInlineNumberedList = /[.!?:)]\s+\d+[.)]\s+/.test(text);
+
+  if (!hasInlineHeadings && !hasInlineListItems && !hasInlineListDash && !hasInlineNumberedList) return text;
+
+  // Insert newlines before common block-level markdown tokens that appear
+  // mid-line (not at the start of the string or after an existing newline).
+  // Order matters — process headings first (## before -).
+
+  // Headings: ## ... ###### (must NOT be at start of string or after \n)
+  text = text.replace(/(?<=[^\n])\s*(#{1,6}\s+)/g, '\n\n$1');
+
+  // Unordered list items: "- " followed by bold or uppercase (common patterns)
+  text = text.replace(/(?<=[.!?:)>])\s*(-\s+(?:\*\*|[A-Z]))/g, '\n$1');
+
+  // Ordered list items: "1. ", "2. ", etc. after sentence endings
+  text = text.replace(/(?<=[.!?:)>])\s*(\d+[.)]\s+)/g, '\n$1');
+
+  // Blockquotes: "> " after sentence endings
+  text = text.replace(/(?<=[.!?])\s*(>\s+)/g, '\n$1');
+
+  return text.trim();
+}
+
+// ---------------------------------------------------------------------------
 // Block-level markdown parser
 // ---------------------------------------------------------------------------
 
@@ -506,7 +556,8 @@ interface MarkdownBlock {
 
 function parseMarkdownBlocks(text: string): MarkdownBlock[] {
   const blocks: MarkdownBlock[] = [];
-  const lines = text.split('\n');
+  const normalized = normalizeMarkdownContent(text);
+  const lines = normalized.split('\n');
   let i = 0;
 
   while (i < lines.length) {
@@ -648,9 +699,20 @@ export default function RichMarkdown({ content }: { content: string }) {
   const theme = useTheme();
   const blocks = useMemo(() => parseMarkdownBlocks(content), [content]);
 
+  // Generate stable keys: type + index + short content hash for chart/mermaid
+  // so React creates fresh components when a block changes type (e.g. code → chart)
+  const blockKey = (block: MarkdownBlock, i: number) => {
+    if (block.type === 'chart' || block.type === 'mermaid' || block.type === 'code') {
+      // Include content length + first 20 chars to differentiate partial vs complete
+      return `${block.type}-${i}-${block.content.length}-${block.content.slice(0, 20)}`;
+    }
+    return `${block.type}-${i}`;
+  };
+
   return (
     <Box sx={{ '& > *:first-of-type': { mt: 0 }, '& > *:last-child': { mb: 0 } }}>
       {blocks.map((block, i) => {
+        const key = blockKey(block, i);
         switch (block.type) {
           case 'heading': {
             const variant = block.level === 1 ? 'h5'
@@ -662,7 +724,7 @@ export default function RichMarkdown({ content }: { content: string }) {
                 ? { fontWeight: 700, mt: 2.5, mb: 1, color: 'text.primary' }
                 : { fontWeight: 600, mt: 2, mb: 0.75, color: 'text.secondary' };
             return (
-              <Typography key={i} variant={variant} sx={sx}>
+              <Typography key={key} variant={variant} sx={sx}>
                 <InlineFormatted text={block.content} />
               </Typography>
             );
@@ -670,27 +732,27 @@ export default function RichMarkdown({ content }: { content: string }) {
 
           case 'paragraph':
             return (
-              <Typography key={i} variant="body2" sx={{ mb: 1.5, lineHeight: 1.75, color: 'text.primary' }}>
+              <Typography key={key} variant="body2" sx={{ mb: 1.5, lineHeight: 1.75, color: 'text.primary' }}>
                 <InlineFormatted text={block.content} />
               </Typography>
             );
 
           case 'code':
-            return <CodeBlock key={i} lang={block.lang ?? ''} code={block.content} />;
+            return <CodeBlock key={key} lang={block.lang ?? ''} code={block.content} />;
 
           case 'chart':
-            return block.chartSpec ? <ChartRenderer key={i} spec={block.chartSpec} /> : null;
+            return block.chartSpec ? <ChartRenderer key={key} spec={block.chartSpec} /> : null;
 
           case 'mermaid':
-            return <MermaidDiagram key={i} code={block.content} />;
+            return <MermaidDiagram key={key} code={block.content} />;
 
           case 'table':
-            return block.rows ? <MarkdownTable key={i} rows={block.rows} /> : null;
+            return block.rows ? <MarkdownTable key={key} rows={block.rows} /> : null;
 
           case 'list':
             return (
               <Box
-                key={i}
+                key={key}
                 component={block.ordered ? 'ol' : 'ul'}
                 sx={{
                   my: 1, pl: 3,
@@ -706,7 +768,7 @@ export default function RichMarkdown({ content }: { content: string }) {
 
           case 'blockquote':
             return (
-              <Box key={i} sx={{
+              <Box key={key} sx={{
                 my: 1.5, pl: 2, py: 0.75,
                 borderLeft: '2px solid',
                 borderColor: alpha(theme.palette.primary.main, 0.4),
@@ -721,7 +783,7 @@ export default function RichMarkdown({ content }: { content: string }) {
 
           case 'hr':
             return (
-              <Box key={i} sx={{
+              <Box key={key} sx={{
                 my: 2, height: '1px',
                 background: `linear-gradient(90deg, transparent, ${alpha(theme.palette.common.white, 0.15)}, transparent)`,
               }} />

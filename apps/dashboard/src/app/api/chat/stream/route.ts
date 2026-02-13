@@ -232,6 +232,13 @@ export async function POST(request: NextRequest) {
                     tier: (event as any).tier,
                   });
                   break;
+                case 'report_section_stream':
+                  send('report_section_stream', {
+                    slot,
+                    sectionId: (event as any).sectionId,
+                    text: (event as any).text,
+                  });
+                  break;
                 case 'report_section_added':
                   send('report_section_added', {
                     slot,

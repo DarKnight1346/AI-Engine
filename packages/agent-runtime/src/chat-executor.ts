@@ -229,6 +229,7 @@ export type ChatStreamEvent =
   | { type: 'clarification_request'; questions: Array<{ id: string; prompt: string; options?: Array<{ id: string; label: string }>; allowFreeText?: boolean }> }
   | { type: 'report_outline'; title: string; sections: Array<{ id: string; title: string; tier: string; dependsOn?: string[] }> }
   | { type: 'report_section_update'; sectionId: string; status: 'running' | 'complete' | 'failed'; content?: string; tier?: string }
+  | { type: 'report_section_stream'; sectionId: string; text: string }
   | { type: 'report_section_added'; section: { id: string; title: string; content: string } }
   | { type: 'subtask_complete'; taskId: string; success: boolean; completed: number; total: number; tier: string };
 

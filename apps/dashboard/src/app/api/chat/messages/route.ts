@@ -26,6 +26,7 @@ export async function GET(request: NextRequest) {
           timestamp: m.createdAt.toISOString(),
           agentName: embeds?.agentName ?? undefined,
           attachments: embeds?.attachments ?? undefined,
+          reportData: embeds?.reportData ?? undefined,
         };
       }),
     });

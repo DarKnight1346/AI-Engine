@@ -56,6 +56,8 @@ interface Message {
   timestamp: Date;
   agentName?: string;
   attachments?: Attachment[];
+  /** Report data from sub-agent orchestration (persisted in embedsJson) */
+  reportData?: ReportState;
 }
 
 interface ChatSession {
@@ -496,6 +498,24 @@ function DynamicReport({ report }: { report: ReportState }) {
               <Suspense fallback={<Typography variant="body2" sx={{ color: 'text.secondary' }}>Loading...</Typography>}>
                 <RichMarkdown content={section.content} />
               </Suspense>
+              {/* Subtle streaming cursor when the section is still generating */}
+              {section.status === 'running' && (
+                <Box
+                  component="span"
+                  sx={{
+                    display: 'inline-block',
+                    width: 6, height: 14,
+                    ml: 0.5,
+                    bgcolor: 'info.main',
+                    borderRadius: 0.5,
+                    animation: 'blink 1s step-end infinite',
+                    '@keyframes blink': {
+                      '0%, 100%': { opacity: 1 },
+                      '50%': { opacity: 0 },
+                    },
+                  }}
+                />
+              )}
             </Box>
           )}
           {section.status === 'failed' && !section.content && (
@@ -1533,6 +1553,38 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const recoverySessionRef = useRef<string | null>(null);
 
+  // ── Report persistence helpers ──
+  // Save/restore report & clarification state to sessionStorage so they
+  // survive chat switches and page navigations within the session.
+  const REPORT_STORAGE_PREFIX = 'ai_report_';
+  const saveReportState = useCallback((sid: string | null, report: ReportState | null, clarify: ClarificationState | null) => {
+    if (!sid) return;
+    try {
+      if (report) {
+        sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${sid}`, JSON.stringify(report));
+      } else {
+        sessionStorage.removeItem(`${REPORT_STORAGE_PREFIX}${sid}`);
+      }
+      if (clarify) {
+        sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}clarify_${sid}`, JSON.stringify(clarify));
+      } else {
+        sessionStorage.removeItem(`${REPORT_STORAGE_PREFIX}clarify_${sid}`);
+      }
+    } catch { /* storage full or unavailable */ }
+  }, []);
+
+  const restoreReportState = useCallback((sid: string) => {
+    try {
+      const reportJson = sessionStorage.getItem(`${REPORT_STORAGE_PREFIX}${sid}`);
+      const clarifyJson = sessionStorage.getItem(`${REPORT_STORAGE_PREFIX}clarify_${sid}`);
+      setActiveReport(reportJson ? JSON.parse(reportJson) : null);
+      setClarification(clarifyJson ? JSON.parse(clarifyJson) : null);
+    } catch {
+      setActiveReport(null);
+      setClarification(null);
+    }
+  }, []);
+
   // ── File attachment handlers ──
   const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
   const ACCEPTED_TYPES = 'image/*,video/*,.pdf,.txt,.csv,.json,.md,.html,.xml,.doc,.docx,.xls,.xlsx';
@@ -1684,9 +1736,25 @@ export default function ChatPage() {
           url: a.url,
           size: a.size ?? 0,
         })),
+        reportData: m.reportData ?? undefined,
       }));
       setMessages(loaded);
       setContextTokens(estimateTokensFromMessages(loaded));
+
+      // Restore report state: check DB-stored report data on messages first,
+      // then fall back to sessionStorage
+      const lastAiWithReport = [...loaded].reverse().find((m: Message) => m.role === 'ai' && m.reportData);
+      if (lastAiWithReport?.reportData) {
+        setActiveReport(lastAiWithReport.reportData);
+      } else {
+        // Try sessionStorage fallback
+        try {
+          const stored = sessionStorage.getItem(`${REPORT_STORAGE_PREFIX}${sid}`);
+          setActiveReport(stored ? JSON.parse(stored) : null);
+        } catch {
+          setActiveReport(null);
+        }
+      }
 
       // Check if the last message is from the user (AI response might be in-flight)
       if (loaded.length > 0 && loaded[loaded.length - 1].role === 'user') {
@@ -1773,6 +1841,9 @@ export default function ChatPage() {
 
   // ── Switch session ──
   const switchSession = useCallback((sid: string) => {
+    // Save current session's report state before switching
+    saveReportState(sessionId, activeReport, clarification);
+
     // Abort any in-flight stream or recovery polling
     abortRef.current?.abort();
     abortRef.current = null;
@@ -1783,7 +1854,10 @@ export default function ChatPage() {
     acknowledgedTasksRef.current.clear();
     loadMessages(sid);
     loadBackgroundTasks(sid);
-  }, [loadMessages, loadBackgroundTasks]);
+
+    // Restore report state for the target session
+    restoreReportState(sid);
+  }, [loadMessages, loadBackgroundTasks, saveReportState, restoreReportState, sessionId, activeReport, clarification]);
 
   // ── New conversation ──
   const startNewConversation = useCallback(() => {
@@ -1907,6 +1981,10 @@ export default function ChatPage() {
     setInput('');
     setAttachments([]);
     setSending(true);
+    // Save current report state before clearing so it persists in sessionStorage
+    if (activeReport && sessionId) {
+      try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${sessionId}`, JSON.stringify(activeReport)); } catch {}
+    }
     setActiveReport(null);
     setClarification(null);
 
@@ -2097,6 +2175,20 @@ export default function ChatPage() {
                 break;
               }
 
+              case 'report_section_stream': {
+                // Incremental token from a sub-agent — append to the section's content
+                setActiveReport((prev) => {
+                  if (!prev) return prev;
+                  const sections = prev.sections.map((s) =>
+                    s.id === data.sectionId
+                      ? { ...s, content: (s.content ?? '') + (data.text ?? '') }
+                      : s
+                  );
+                  return { ...prev, sections };
+                });
+                break;
+              }
+
               case 'report_section_update': {
                 setActiveReport((prev) => {
                   if (!prev) return prev;
@@ -2106,7 +2198,12 @@ export default function ChatPage() {
                       : s
                   );
                   const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
-                  return { ...prev, sections, completed };
+                  const updated = { ...prev, sections, completed };
+                  // Persist when sections complete so report survives navigation
+                  if (data.status === 'complete' || data.status === 'failed') {
+                    try { if (streamSessionId) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(updated)); } catch {}
+                  }
+                  return updated;
                 });
                 break;
               }
@@ -2143,11 +2240,35 @@ export default function ChatPage() {
                 receivedDone = true;
                 const msgId = slotMessages.get(slot);
                 if (msgId) {
-                  setMessages((msgs) => msgs.map((m) =>
-                    m.id === msgId
-                      ? { ...m, content: data.content, agentName: data.agentName || m.agentName }
-                      : m
-                  ));
+                  // Attach report data to the message so it persists with the message
+                  setActiveReport((curReport) => {
+                    setMessages((msgs) => msgs.map((m) =>
+                      m.id === msgId
+                        ? { ...m, content: data.content, agentName: data.agentName || m.agentName, reportData: curReport ?? undefined }
+                        : m
+                    ));
+                    // Persist to sessionStorage for quick restore
+                    if (curReport && streamSessionId) {
+                      try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(curReport)); } catch {}
+                    }
+                    // Also save report to DB by updating the message's metadata
+                    if (curReport && streamSessionId) {
+                      fetch('/api/chat/messages/metadata', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sessionId: streamSessionId, reportData: curReport }),
+                      }).catch(() => { /* fire-and-forget */ });
+                    }
+                    return curReport;
+                  });
+                } else {
+                  // Persist report state
+                  setActiveReport((cur) => {
+                    if (cur && streamSessionId) {
+                      try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(cur)); } catch {}
+                    }
+                    return cur;
+                  });
                 }
                 if (data.usage) {
                   const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
@@ -2782,10 +2903,15 @@ export default function ChatPage() {
                                 />
                               )}
 
-                              {/* Dynamic report (shown when agent delegates tasks, on the last AI message) */}
-                              {msg.role === 'ai' && activeReport && idx === messages.length - 1 && (
-                                <DynamicReport report={activeReport} />
-                              )}
+                              {/* Dynamic report: live report on last AI msg, persisted report on historical msgs */}
+                              {msg.role === 'ai' && (() => {
+                                const isLastAi = idx === messages.length - 1;
+                                // Live report takes priority on the last AI message
+                                if (isLastAi && activeReport) return <DynamicReport report={activeReport} />;
+                                // Historical report data on any message that had one
+                                if (msg.reportData) return <DynamicReport report={msg.reportData} />;
+                                return null;
+                              })()}
 
                               <MessageContent content={msg.content} attachments={msg.attachments} />
                             </>
