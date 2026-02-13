@@ -17,12 +17,16 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json({
-      messages: messages.map((m) => ({
-        id: m.id,
-        role: m.senderType === 'user' ? 'user' : 'ai',
-        content: m.content,
-        timestamp: m.createdAt.toISOString(),
-      })),
+      messages: messages.map((m) => {
+        const embeds = m.embedsJson as any;
+        return {
+          id: m.id,
+          role: m.senderType === 'user' ? 'user' : 'ai',
+          content: m.content,
+          timestamp: m.createdAt.toISOString(),
+          agentName: embeds?.agentName ?? undefined,
+        };
+      }),
     });
   } catch (err: any) {
     return NextResponse.json({ messages: [], error: err.message }, { status: 500 });
