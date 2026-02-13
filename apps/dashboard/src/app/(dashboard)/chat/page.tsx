@@ -384,7 +384,7 @@ function SubtaskTracker({ report }: { report: ReportState }) {
             const statusColor = s.status === 'complete' ? '#66bb6a'
               : s.status === 'failed' ? '#ef5350'
               : s.status === 'running' ? '#42a5f5'
-              : 'text.disabled';
+              : '#757575';
             return (
               <Chip
                 key={s.id}
@@ -394,8 +394,8 @@ function SubtaskTracker({ report }: { report: ReportState }) {
                   fontSize: '0.7rem',
                   height: 22,
                   color: statusColor,
-                  borderColor: alpha(statusColor as string, 0.3),
-                  bgcolor: alpha(statusColor as string, 0.08),
+                  borderColor: alpha(statusColor, 0.3),
+                  bgcolor: alpha(statusColor, 0.08),
                   border: '1px solid',
                   '& .MuiChip-label': { px: 1 },
                 }}
