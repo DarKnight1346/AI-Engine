@@ -14,8 +14,11 @@ import type Redis from 'ioredis';
 
 const XAI_BASE_URL = 'https://api.x.ai/v1';
 
-/** Default model for xAI web search */
-const DEFAULT_MODEL = 'grok-3-mini-fast';
+/** Default model for xAI web search.
+ * grok-3-mini is the stable alias for the latest Grok 3 Mini.
+ * The Responses API with web_search tool requires a model that supports
+ * server-side agentic tools — grok-3-mini and grok-4* models do. */
+const DEFAULT_MODEL = 'grok-3-mini';
 
 /** Cache TTL: 15 minutes for AI-synthesized results */
 const CACHE_TTL = 15 * 60 * 1000;
@@ -90,16 +93,18 @@ export class XaiSearchService {
 
     const model = options.model ?? DEFAULT_MODEL;
 
-    // Build the web_search tool config
+    // Build the web_search tool config.
+    // Per xAI docs, allowed_domains / excluded_domains / enable_image_understanding
+    // are direct properties on the tool object (not nested under "filters").
     const webSearchTool: Record<string, unknown> = {
       type: 'web_search',
     };
 
-    // Domain filtering
+    // Domain filtering (max 5 each, mutually exclusive)
     if (options.allowedDomains && options.allowedDomains.length > 0) {
-      webSearchTool.filters = { allowed_domains: options.allowedDomains.slice(0, 5) };
+      webSearchTool.allowed_domains = options.allowedDomains.slice(0, 5);
     } else if (options.excludedDomains && options.excludedDomains.length > 0) {
-      webSearchTool.filters = { excluded_domains: options.excludedDomains.slice(0, 5) };
+      webSearchTool.excluded_domains = options.excludedDomains.slice(0, 5);
     }
 
     // Image understanding
@@ -133,7 +138,13 @@ export class XaiSearchService {
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      throw new Error(`xAI API error (${response.status}): ${errorText || response.statusText}`);
+      // Parse structured error if available
+      let detail = errorText || response.statusText;
+      try {
+        const errJson = JSON.parse(errorText);
+        detail = errJson.error?.message || errJson.detail || errJson.message || detail;
+      } catch { /* use raw text */ }
+      throw new Error(`xAI API error (${response.status}): ${detail}`);
     }
 
     const data = await response.json() as any;
