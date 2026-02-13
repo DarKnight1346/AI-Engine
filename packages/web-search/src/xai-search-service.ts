@@ -15,10 +15,10 @@ import type Redis from 'ioredis';
 const XAI_BASE_URL = 'https://api.x.ai/v1';
 
 /** Default model for xAI web search.
- * grok-3-mini is the stable alias for the latest Grok 3 Mini.
- * The Responses API with web_search tool requires a model that supports
- * server-side agentic tools — grok-3-mini and grok-4* models do. */
-const DEFAULT_MODEL = 'grok-3-mini';
+ * Server-side tools (web_search, x_search, etc.) require grok-4 family models.
+ * grok-4-1-fast-reasoning is the fastest/cheapest grok-4 variant that supports
+ * agentic tools via the Responses API. */
+const DEFAULT_MODEL = 'grok-4-1-fast-reasoning';
 
 /** Cache TTL: 15 minutes for AI-synthesized results */
 const CACHE_TTL = 15 * 60 * 1000;
