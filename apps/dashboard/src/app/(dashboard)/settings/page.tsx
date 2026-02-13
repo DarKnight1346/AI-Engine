@@ -90,7 +90,7 @@ export default function SettingsPage() {
   const [tab, setTab] = useState(0);
   const [data, setData] = useState<SettingsData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
+  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'warning' }>({ open: false, message: '', severity: 'success' });
 
   // ── API Key dialog ──
   const [addKeyOpen, setAddKeyOpen] = useState(false);
@@ -242,14 +242,18 @@ export default function SettingsPage() {
         body: JSON.stringify({
           label: newKeyLabel.trim(),
           key: newKeyValue.trim(),
-          provider: 'anthropic', // Both API keys and setup-tokens use the Anthropic provider
+          provider: 'anthropic',
+          keyType: newKeyProvider === 'setup-token' ? 'bearer' : 'api-key',
         }),
       });
       const result = await res.json();
       if (result.error) {
         setSnack({ open: true, message: result.error, severity: 'error' });
       } else {
-        setSnack({ open: true, message: newKeyProvider === 'setup-token' ? 'Setup token added' : 'API key added', severity: 'success' });
+        const msg = result.warning
+          ? result.warning
+          : newKeyProvider === 'setup-token' ? 'Setup token added successfully' : 'API key added successfully';
+        setSnack({ open: true, message: msg, severity: result.warning ? 'warning' : 'success' });
         setAddKeyOpen(false);
         setNewKeyLabel('');
         setNewKeyValue('');
