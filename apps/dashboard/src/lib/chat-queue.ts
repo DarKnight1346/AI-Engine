@@ -228,46 +228,6 @@ When listing items, use bullet points or numbered lists.`;
 
     if (signal.aborted) throw new Error('Aborted');
 
-    // ── Enrich with memory & goals ─────────────────────────────────
-    try {
-      const goals = await db.userGoal.findMany({
-        where: { status: 'active' },
-        orderBy: { priority: 'asc' },
-        take: 10,
-      });
-
-      if (goals.length > 0) {
-        const goalsText = goals
-          .map((g: any) => `- [${g.priority.toUpperCase()}] ${g.description}`)
-          .join('\n');
-        systemPrompt += `\n\n## Active Goals\n${goalsText}`;
-      }
-
-      const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
-      const embeddingSvc = new EmbeddingService();
-      const memService = new MemoryService(embeddingSvc);
-
-      const memories = await memService.searchAllScopes(
-        job.message,
-        contextUser?.id ?? null,
-        contextMembership?.teamId ?? null,
-        10,
-        { strengthenOnRecall: true },
-      );
-
-      if (memories.length > 0) {
-        const memText = memories.map((m: any) => {
-          const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
-          return `- [${confidence} relevance] ${m.content}`;
-        }).join('\n');
-        systemPrompt += `\n\n## Relevant Context from Memory\n${memText}`;
-      }
-    } catch {
-      // Memory/goals not available — continue
-    }
-
-    if (signal.aborted) throw new Error('Aborted');
-
     // ── Skill detection ────────────────────────────────────────────
     try {
       const relevantSkills = await db.skill.findMany({
@@ -331,18 +291,26 @@ When listing items, use bullet points or numbered lists.`;
     const pool = await this.getSharedPool();
 
     // ── Build memory search function ───────────────────────────────
+    // This runs the actual vector search against pgvector embeddings.
     const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
       try {
         const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
         const embeddings = new EmbeddingService();
         const memSvc = new MemoryService(embeddings);
+
+        console.log(`[search_memory] Vector search: query="${query.slice(0, 80)}" scope=${scope} owner=${scopeOwnerId ?? 'none'}`);
+
         const results = await memSvc.search(query, scope as any, scopeOwnerId, 5, { strengthenOnRecall: true });
+
+        console.log(`[search_memory] Found ${results.length} result(s), top score: ${results[0]?.finalScore?.toFixed(3) ?? 'n/a'}`);
+
         if (results.length === 0) return 'No matching memories found.';
         return results.map((m: any) => {
           const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
           return `- [${m.scope}/${confidence}] ${m.content}`;
         }).join('\n');
-      } catch {
+      } catch (err: any) {
+        console.error(`[search_memory] Error:`, err.message);
         return 'Memory search unavailable.';
       }
     };
@@ -406,6 +374,28 @@ When listing items, use bullet points or numbered lists.`;
         embedsJson: job.agentId ? { agentId: job.agentId, agentName } : undefined,
       },
     });
+
+    // ── Auto-extract memories from conversation (fire-and-forget) ──
+    try {
+      const { MemoryExtractor, MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
+      const embSvc = new EmbSvc();
+      const memSvc = new MemSvc(embSvc);
+      const extractor = new MemoryExtractor(memSvc);
+      extractor.extractAndStore(
+        job.message,
+        result.content,
+        contextUser?.id ?? null,
+        contextMembership?.teamId ?? null,
+      ).then((r) => {
+        if (r.profileUpdates > 0 || r.memoriesStored > 0) {
+          console.log(`[memory-extract] Auto-extracted: ${r.profileUpdates} profile update(s), ${r.memoriesStored} memory(ies)`);
+        }
+      }).catch((err) => {
+        console.error(`[memory-extract] Error:`, err.message);
+      });
+    } catch {
+      // Memory extraction not available — continue
+    }
   }
 
   // -----------------------------------------------------------------------

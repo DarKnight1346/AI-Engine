@@ -92,18 +92,20 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
     {
       name: 'search_memory',
       description:
-        'Search your memory for relevant context, past conversations, user preferences, ' +
-        'or previously learned information. Returns matching memory entries ranked by relevance.',
+        'Search your persistent memory, user profile, and goals. Searches ALL scopes by default ' +
+        '(personal + team + global). Returns profile data, semantic memory matches, and relevant goals. ' +
+        'ALWAYS call this before saying "I don\'t know" or "I don\'t remember". ' +
+        'Use for: recalling user info, past conversations, stored facts, preferences, goals.',
       inputSchema: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: 'What to search for in memory.',
+            description: 'Natural-language search query (e.g., "user name", "what brokerage", "project goals").',
           },
           scope: {
             type: 'string',
-            description: 'Memory scope: "personal" (user-specific), "team", or "global". Defaults to "global".',
+            description: 'Optional. "personal", "team", "global", or omit to search all scopes.',
           },
         },
         required: ['query'],
@@ -146,10 +148,9 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
     {
       name: 'store_memory',
       description:
-        'Store information in memory for future reference. Use this proactively to remember ' +
-        'important facts, decisions, user preferences, patterns, or any knowledge gained during ' +
-        'conversation. Stored memories are available to all agents across sessions. ' +
-        'Types: "knowledge" (learned info), "decision" (choices made), "fact" (verified truths), "pattern" (recurring observations).',
+        'Store information in persistent semantic memory. Use proactively when the user shares ' +
+        'facts, decisions, preferences, or context worth remembering across sessions. ' +
+        'Types: "knowledge", "decision", "fact", "pattern". Use scope "personal" for user-specific data.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -214,10 +215,9 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
     {
       name: 'update_profile',
       description:
-        'Store or update user profile information. Use this to remember user preferences, traits, ' +
-        'communication style, expertise, roles, or any personal information the user shares. ' +
-        'Profile entries are key-value pairs that persist across sessions. If a key already exists, ' +
-        'it will be updated with the new value.',
+        'Store or update a user profile attribute (key-value pair). Use when the user shares personal ' +
+        'details: name, role, location, tools/services, accounts, preferences, expertise. ' +
+        'Profile data is searchable via search_memory. Persists across all sessions.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -328,27 +328,110 @@ function createMemoryTool(opts: MetaToolOptions): Tool {
     },
     execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
       const query = String(input.query || '');
-      const scope = String(input.scope || 'global');
+      const scope = String(input.scope || '').toLowerCase();
 
       if (!query) {
         return { success: false, output: 'Please provide a search query.' };
       }
 
-      if (opts.searchMemory) {
+      const sections: string[] = [];
+
+      // ── 1. Search user profile (always include for personal context) ──
+      if (opts.userId) {
         try {
-          const scopeOwnerId = scope === 'personal'
-            ? opts.userId ?? null
-            : scope === 'team'
-              ? opts.teamId ?? null
-              : null;
-          const result = await opts.searchMemory(query, scope, scopeOwnerId);
-          return { success: true, output: result || 'No matching memories found.' };
-        } catch (err: any) {
-          return { success: false, output: `Memory search failed: ${err.message}` };
+          const { getDb } = await import('@ai-engine/db');
+          const db = getDb();
+          const profileEntries = await db.userProfile.findMany({
+            where: { userId: opts.userId },
+          });
+
+          if (profileEntries.length > 0) {
+            // Filter profile entries by keyword relevance to the query
+            const queryLower = query.toLowerCase();
+            const queryWords = queryLower.split(/\s+/).filter((w: string) => w.length > 2);
+            const relevant = profileEntries.filter((p: any) => {
+              const entryText = `${p.key} ${p.value}`.toLowerCase();
+              // Include if query words match, or if it's a broad recall query
+              return queryWords.some((w: string) => entryText.includes(w))
+                || queryLower.includes(p.key.toLowerCase())
+                || /\b(who am i|my name|about me|my profile|what do you know|remember)\b/i.test(query);
+            });
+
+            if (relevant.length > 0) {
+              const lines = relevant.map((p: any) => `- ${p.key}: ${p.value}`);
+              sections.push(`**User Profile:**\n${lines.join('\n')}`);
+            }
+          }
+        } catch {
+          // Profile lookup failed — continue with memory search
         }
       }
 
-      return { success: true, output: 'Memory search is not configured.' };
+      // ── 2. Search semantic memory across scopes ───────────────────
+      if (opts.searchMemory) {
+        try {
+          if (scope && scope !== 'all') {
+            // Specific scope requested
+            const scopeOwnerId = scope === 'personal'
+              ? opts.userId ?? null
+              : scope === 'team'
+                ? opts.teamId ?? null
+                : null;
+            const result = await opts.searchMemory(query, scope, scopeOwnerId);
+            if (result && result !== 'No matching memories found.') {
+              sections.push(`**Memory (${scope}):**\n${result}`);
+            }
+          } else {
+            // Search ALL scopes — personal, team, and global
+            const scopes: Array<{ name: string; id: string | null }> = [];
+            if (opts.userId) scopes.push({ name: 'personal', id: opts.userId });
+            if (opts.teamId) scopes.push({ name: 'team', id: opts.teamId });
+            scopes.push({ name: 'global', id: null });
+
+            for (const s of scopes) {
+              try {
+                const result = await opts.searchMemory(query, s.name, s.id);
+                if (result && result !== 'No matching memories found.') {
+                  sections.push(`**Memory (${s.name}):**\n${result}`);
+                }
+              } catch {
+                // Individual scope search failed — continue
+              }
+            }
+          }
+        } catch (err: any) {
+          sections.push(`Memory search error: ${err.message}`);
+        }
+      }
+
+      // ── 3. Search active goals ────────────────────────────────────
+      try {
+        const { getDb } = await import('@ai-engine/db');
+        const db = getDb();
+        const queryLower = query.toLowerCase();
+        if (/\b(goal|objective|target|aim|plan|working on|priority)\b/i.test(query)) {
+          const goals = await db.userGoal.findMany({
+            where: { status: 'active' },
+            orderBy: { priority: 'asc' },
+            take: 10,
+          });
+          if (goals.length > 0) {
+            const lines = goals.map((g: any) => `- [${g.priority}] ${g.description}`);
+            sections.push(`**Active Goals:**\n${lines.join('\n')}`);
+          }
+        }
+      } catch {
+        // Goal search failed — continue
+      }
+
+      if (sections.length === 0) {
+        console.log(`[search_memory] No results for query="${query}" scope="${scope || 'all'}"`);
+        return { success: true, output: 'No matching memories, profile data, or goals found for this query.' };
+      }
+
+      const output = sections.join('\n\n');
+      console.log(`[search_memory] Found ${sections.length} section(s) for query="${query}" scope="${scope || 'all'}"`);
+      return { success: true, output };
     },
   };
 }
@@ -493,6 +576,8 @@ function createStoreMemoryTool(opts: MetaToolOptions): Tool {
         const embeddings = new EmbeddingService();
         const memService = new MemoryService(embeddings);
 
+        console.log(`[store_memory] Storing: scope=${scope}, type=${type}, importance=${importance}, content="${content.slice(0, 80)}"`);
+
         const entry = await memService.store(
           scope as any,
           scopeOwnerId || null,
@@ -502,11 +587,14 @@ function createStoreMemoryTool(opts: MetaToolOptions): Tool {
           'explicit',
         );
 
+        console.log(`[store_memory] Stored successfully (id: ${entry.id})`);
+
         return {
           success: true,
           output: `Memory stored (id: ${entry.id}, type: ${type}, scope: ${scope}, importance: ${importance}). Semantic embedding generated and associative links created. This information will be available in future conversations.`,
         };
       } catch (err: any) {
+        console.error(`[store_memory] Failed:`, err.message);
         return { success: false, output: `Failed to store memory: ${err.message}` };
       }
     },
@@ -736,6 +824,8 @@ async function upsertProfile(
     });
     action = 'created';
   }
+
+  console.log(`[update_profile] ${action}: "${key}" = "${value}" (confidence: ${confidence}, user: ${userId})`);
 
   return {
     success: true,

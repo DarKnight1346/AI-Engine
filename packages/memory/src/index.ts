@@ -6,6 +6,8 @@ export type { AgentContext } from './context-builder.js';
 export { EmbeddingService } from './embedding-service.js';
 export { ConsolidationService } from './consolidation-service.js';
 export type { ConsolidationResult } from './consolidation-service.js';
+export { MemoryExtractor } from './memory-extractor.js';
+export type { ExtractionResult } from './memory-extractor.js';
 export {
   computeEffectiveStrength,
   computeRecencyScore,

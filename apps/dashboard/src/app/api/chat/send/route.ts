@@ -100,47 +100,6 @@ export async function POST(request: NextRequest) {
     // system and how to use store_memory, search_memory, discover_tools, etc.
     systemPrompt = withMemoryPrompt(systemPrompt);
 
-    // ── Enrich system prompt with memory & goals ─────────────────────
-    try {
-      // Load active goals
-      const goals = await db.userGoal.findMany({
-        where: { status: 'active' },
-        orderBy: { priority: 'asc' },
-        take: 10,
-      });
-
-      if (goals.length > 0) {
-        const goalsText = goals
-          .map((g: any) => `- [${g.priority.toUpperCase()}] ${g.description}`)
-          .join('\n');
-        systemPrompt += `\n\n## Active Goals\n${goalsText}`;
-      }
-
-      // Hybrid memory retrieval: semantic search + decay + importance + recency
-      // Uses the user's message as the query for relevance-based retrieval
-      const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
-      const embeddingSvc = new EmbeddingService();
-      const memService = new MemoryService(embeddingSvc);
-
-      const memories = await memService.searchAllScopes(
-        message,
-        contextUser?.id ?? null,
-        contextMembership?.teamId ?? null,
-        10,
-        { strengthenOnRecall: true },
-      );
-
-      if (memories.length > 0) {
-        const memText = memories.map((m: any) => {
-          const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
-          return `- [${confidence} relevance] ${m.content}`;
-        }).join('\n');
-        systemPrompt += `\n\n## Relevant Context from Memory\n${memText}`;
-      }
-    } catch {
-      // Memory/goals not available — continue with base prompt
-    }
-
     // ── Store user message ───────────────────────────────────────────
     const userMessage = await db.chatMessage.create({
       data: {
@@ -260,19 +219,27 @@ export async function POST(request: NextRequest) {
       // Agents have access to all tools — no toolConfig filtering
       // (empty config = all tools available per ToolIndex logic)
 
-      // Build memory search function for the search_memory meta-tool
+      // Build memory search function for the search_memory meta-tool.
+      // This runs the actual vector search against pgvector embeddings.
       const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
         try {
           const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
           const embeddings = new EmbeddingService();
           const memService = new MemoryService(embeddings);
+
+          console.log(`[search_memory] Vector search: query="${query.slice(0, 80)}" scope=${scope} owner=${scopeOwnerId ?? 'none'}`);
+
           const results = await memService.search(query, scope as any, scopeOwnerId, 5, { strengthenOnRecall: true });
+
+          console.log(`[search_memory] Found ${results.length} result(s), top score: ${results[0]?.finalScore?.toFixed(3) ?? 'n/a'}`);
+
           if (results.length === 0) return 'No matching memories found.';
           return results.map((m: any) => {
             const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
             return `- [${m.scope}/${confidence}] ${m.content}`;
           }).join('\n');
-        } catch {
+        } catch (err: any) {
+          console.error(`[search_memory] Error:`, err.message);
           return 'Memory search unavailable.';
         }
       };
@@ -327,6 +294,29 @@ export async function POST(request: NextRequest) {
         embedsJson: agentId ? { agentId, agentName } : undefined,
       },
     });
+
+    // ── Auto-extract memories from conversation (fire-and-forget) ──
+    try {
+      const { MemoryExtractor, MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
+      const embSvc = new EmbSvc();
+      const memSvc = new MemSvc(embSvc);
+      const extractor = new MemoryExtractor(memSvc);
+      // Run async without blocking the response
+      extractor.extractAndStore(
+        message,
+        aiContent,
+        contextUser?.id ?? null,
+        contextMembership?.teamId ?? null,
+      ).then((r) => {
+        if (r.profileUpdates > 0 || r.memoriesStored > 0) {
+          console.log(`[memory-extract] Auto-extracted: ${r.profileUpdates} profile update(s), ${r.memoriesStored} memory(ies)`);
+        }
+      }).catch((err) => {
+        console.error(`[memory-extract] Error:`, err.message);
+      });
+    } catch {
+      // Memory extraction not available — continue
+    }
 
     return NextResponse.json({
       sessionId: session.id,
