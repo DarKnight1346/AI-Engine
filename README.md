@@ -591,7 +591,7 @@ All configuration is managed through the dashboard **Settings** page. Changes ar
 |-----|---------|-------------|
 | `memory.contextWindowTokenLimit` | `180000` | Max context window tokens |
 | `memory.maxRetrievedMemories` | `10` | Memories returned per query |
-| `memory.embeddingDimension` | `1536` | Vector embedding dimensions |
+| `memory.embeddingDimension` | `768` | Vector embedding dimensions (bge-base-en-v1.5) |
 
 ### Browser
 

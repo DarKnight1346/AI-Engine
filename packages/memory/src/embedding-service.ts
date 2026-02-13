@@ -73,6 +73,67 @@ async function loadPipeline(): Promise<Pipeline> {
 }
 
 export class EmbeddingService {
+  /** Tracks whether we've verified the DB column dimension matches EMBEDDING_DIM */
+  private static dimensionChecked = false;
+
+  /**
+   * Verify (once per process) that the memory_embeddings column uses the
+   * correct vector dimension. If the column was created with a different
+   * size (e.g. 1536 from an older config), alter it to match the current
+   * embedding model. This is a no-op when dimensions already match.
+   */
+  async ensureCorrectDimension(): Promise<void> {
+    if (EmbeddingService.dimensionChecked) return;
+    EmbeddingService.dimensionChecked = true;
+
+    try {
+      const db = getDb();
+
+      // Query the actual column dimension from pg_attribute + information_schema
+      const result = await db.$queryRawUnsafe<Array<{ udt_name: string }>>(
+        `SELECT udt_name FROM information_schema.columns
+         WHERE table_name = 'memory_embeddings' AND column_name = 'embedding'`,
+      );
+
+      if (result.length === 0) {
+        // Table or column doesn't exist yet — Prisma will create it
+        return;
+      }
+
+      // The udt_name for vector columns is just 'vector' — we need to check the actual dimension
+      // by querying the atttypmod which stores the dimension for vector types
+      const dimResult = await db.$queryRawUnsafe<Array<{ dim: number }>>(
+        `SELECT atttypmod AS dim
+         FROM pg_attribute
+         WHERE attrelid = 'memory_embeddings'::regclass
+         AND attname = 'embedding'
+         AND atttypmod > 0`,
+      );
+
+      if (dimResult.length === 0) return;
+
+      const currentDim = Number(dimResult[0].dim);
+      if (currentDim === EMBEDDING_DIM) return;
+
+      console.warn(
+        `[EmbeddingService] Vector dimension mismatch: DB has vector(${currentDim}), model needs vector(${EMBEDDING_DIM}). Auto-fixing...`,
+      );
+
+      // Drop existing embeddings (they're the wrong dimension and unusable)
+      await db.$executeRawUnsafe(`DELETE FROM memory_embeddings`);
+
+      // Alter the column to the correct dimension
+      await db.$executeRawUnsafe(
+        `ALTER TABLE memory_embeddings ALTER COLUMN embedding TYPE vector(${EMBEDDING_DIM})`,
+      );
+
+      console.log(`[EmbeddingService] Fixed: column altered to vector(${EMBEDDING_DIM})`);
+    } catch (err) {
+      console.error('[EmbeddingService] Dimension check failed:', (err as Error).message);
+      // Non-fatal — the store/search will fail with a clear error if dimensions are still wrong
+    }
+  }
+
   /**
    * Generate a semantic embedding vector for the given text.
    * Returns a normalized 768-dimensional vector.
@@ -111,6 +172,9 @@ export class EmbeddingService {
    * Store an embedding for a memory entry or skill in the database.
    */
   async storeEmbedding(entryId: string, entryType: 'memory' | 'skill', text: string): Promise<void> {
+    // Ensure DB column matches model dimension before first write
+    await this.ensureCorrectDimension();
+
     const embedding = await this.generateEmbedding(text);
     const db = getDb();
 

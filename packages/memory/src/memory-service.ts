@@ -116,6 +116,9 @@ export class MemoryService {
     const w = { ...this.weights, ...options?.weights };
     const shouldStrengthen = options?.strengthenOnRecall ?? true;
 
+    // Ensure DB column dimension matches model before first vector query
+    await this.embeddings.ensureCorrectDimension();
+
     // Generate query embedding
     const embedding = await this.embeddings.generateEmbedding(query);
 

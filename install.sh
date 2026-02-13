@@ -285,6 +285,28 @@ if [[ -f "$ENV_FILE" ]] && grep -q "DATABASE_URL" "$ENV_FILE" 2>/dev/null; then
   set -a; source "$ENV_FILE"; set +a
   if pnpm --filter @ai-engine/db exec prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3; then
     ok "Database schema up to date"
+
+    # Fix vector dimension mismatch: prisma db push uses Unsupported("vector(768)")
+    # but cannot alter an existing column from a different dimension (e.g. 1536).
+    # This idempotent SQL ensures the column matches the embedding model.
+    info "Verifying vector embedding dimensions..."
+    psql "$DATABASE_URL" -c "
+      DO \$\$
+      BEGIN
+        -- Check if the column exists and has the wrong dimension
+        IF EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = 'memory_embeddings'::regclass
+          AND attname = 'embedding'
+          AND atttypmod > 0
+          AND atttypmod != 768
+        ) THEN
+          DELETE FROM memory_embeddings;
+          ALTER TABLE memory_embeddings ALTER COLUMN embedding TYPE vector(768);
+          RAISE NOTICE 'Fixed: memory_embeddings.embedding altered to vector(768)';
+        END IF;
+      END \$\$;
+    " 2>/dev/null && ok "Vector dimensions verified" || warn "Could not verify vector dimensions (will auto-fix at runtime)"
   else
     warn "prisma db push failed — the setup wizard will handle this on next visit"
   fi
