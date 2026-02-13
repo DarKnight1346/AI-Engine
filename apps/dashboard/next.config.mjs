@@ -18,7 +18,13 @@ const nextConfig = {
     //
     // IMPORTANT: @prisma/client must also be a direct dependency of the
     // dashboard package.json so pnpm links it where Next.js can find it.
-    serverComponentsExternalPackages: ['@prisma/client', '.prisma/client'],
+    serverComponentsExternalPackages: [
+      '@prisma/client',
+      '.prisma/client',
+      'ioredis',
+      '@ai-engine/scheduler',
+      '@ai-engine/cluster',
+    ],
     // Point Next.js at the monorepo root so standalone output tracing can
     // find packages in the hoisted node_modules.
     outputFileTracingRoot: resolve(__dirname, '../../'),
