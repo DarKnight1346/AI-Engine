@@ -638,7 +638,7 @@ export interface ConsoleLogEntry {
 }
 
 // ============================================================
-// Web Search
+// Web Search (Serper.dev)
 // ============================================================
 export interface WebSearchResult {
   title: string;
@@ -649,10 +649,16 @@ export interface WebSearchResult {
 }
 
 export interface WebSearchOptions {
-  count?: number;
-  freshness?: 'day' | 'week' | 'month';
-  country?: string;
-  language?: string;
+  /** Number of results (default 10) */
+  num?: number;
+  /** Country code, e.g. 'us' */
+  gl?: string;
+  /** Language code, e.g. 'en' */
+  hl?: string;
+  /** Location string, e.g. 'New York, NY' */
+  location?: string;
+  /** Time filter: 'qdr:h' (hour), 'qdr:d' (day), 'qdr:w' (week), 'qdr:m' (month), 'qdr:y' (year) */
+  tbs?: string;
 }
 
 // ============================================================

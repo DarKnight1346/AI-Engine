@@ -15,6 +15,7 @@
     "@ai-engine/db": "workspace:*",
     "@ai-engine/llm": "workspace:*",
     "@ai-engine/memory": "workspace:*",
+    "@ai-engine/web-search": "workspace:*",
     "ioredis": "^5.4.0"
   },
   "devDependencies": {

@@ -316,6 +316,17 @@ You MUST search memory for user preferences before every response — this is yo
       }
     };
 
+    // ── Load Serper API key from config ─────────────────────────────
+    let serperApiKey: string | undefined;
+    try {
+      const serperConfig = await db.config.findUnique({ where: { key: 'serperApiKey' } });
+      if (serperConfig?.valueJson && typeof serperConfig.valueJson === 'string' && serperConfig.valueJson.trim()) {
+        serperApiKey = serperConfig.valueJson.trim();
+      }
+    } catch {
+      // Config not found — web search tools will be unavailable
+    }
+
     // ── Create ChatExecutor with worker dispatcher ─────────────────
     const { ChatExecutor } = await import('@ai-engine/agent-runtime');
     const { WorkerHub } = await import('@/lib/worker-hub');
@@ -329,6 +340,7 @@ You MUST search memory for user preferences before every response — this is yo
       teamId: contextMembership?.teamId,
       sessionId: job.sessionId,
       workerDispatcher: workerHub,
+      serperApiKey,
     });
 
     // ── Load conversation history ──────────────────────────────────

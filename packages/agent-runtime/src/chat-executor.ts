@@ -4,6 +4,8 @@ import { ToolIndex, type ToolManifestEntry } from './tool-index.js';
 import { ToolExecutor, type WorkerToolDispatcher } from './tool-executor.js';
 import { EnvironmentTools } from './tools/environment.js';
 import { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
+import { createWebSearchTools } from './tools/web-search-tools.js';
+import { WebSearchService } from '@ai-engine/web-search';
 import type { Tool, ToolContext, ToolResult } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,11 @@ export interface ChatExecutorOptions {
   agentId?: string;
   /** Work item ID for execution logging */
   workItemId?: string;
+  /**
+   * Serper.dev API key for web search tools.
+   * When provided, all Serper-powered search tools are registered.
+   */
+  serperApiKey?: string;
   /**
    * Per-execution tools (e.g. browser tools scoped to a task).
    * These are registered for both discovery and execution alongside
@@ -438,9 +445,98 @@ export class ChatExecutor {
         executionTarget: 'dashboard',
         source: 'tool',
       },
+      // ── Serper.dev Web Search Tools ──
       {
         name: 'webSearch',
-        description: 'Search the web for real-time information, news, data, and research.',
+        description: 'Search the web using Google via Serper. Returns organic results with titles, links, and snippets.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchImages',
+        description: 'Search for images on Google. Returns image URLs, dimensions, and sources.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchVideos',
+        description: 'Search for videos on Google. Returns video links, titles, durations, and channels.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchPlaces',
+        description: 'Search for local businesses and places. Returns names, addresses, ratings, and contact info.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchMaps',
+        description: 'Search Google Maps for locations and points of interest with coordinates and details.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchReviews',
+        description: 'Search for reviews on Google. Returns review ratings, sources, and snippets.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchNews',
+        description: 'Search Google News for current events and recent articles with dates and sources.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchShopping',
+        description: 'Search Google Shopping for products and prices with ratings and delivery info.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchLens',
+        description: 'Reverse image search using Google Lens. Find visually similar images by URL.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchScholar',
+        description: 'Search Google Scholar for academic papers, citations, and research publications.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webSearchPatents',
+        description: 'Search Google Patents for patents and patent applications with inventor and filing info.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webAutocomplete',
+        description: 'Get Google autocomplete suggestions for a query to discover related searches.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -448,7 +544,7 @@ export class ChatExecutor {
       },
       {
         name: 'webGetPage',
-        description: 'Fetch and read the content of a web page by URL.',
+        description: 'Fetch and extract the content of a web page by URL. Returns title and text/markdown.',
         category: 'web',
         inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
         executionTarget: 'dashboard',
@@ -544,6 +640,18 @@ export class ChatExecutor {
     // Environment tools — lightweight, safe to run in dashboard
     const envTools = EnvironmentTools.getAll();
     this.toolExecutor.registerAllLocal(envTools);
+
+    // Serper.dev web search tools — register when API key is available
+    if (this.options.serperApiKey) {
+      try {
+        const searchService = new WebSearchService();
+        searchService.setApiKey(this.options.serperApiKey);
+        const searchTools = createWebSearchTools(searchService);
+        this.toolExecutor.registerAllLocal(searchTools);
+      } catch (err: any) {
+        console.warn('[ChatExecutor] Failed to initialize web search tools:', err.message);
+      }
+    }
 
     // Skill search is handled by the execute_tool meta-tool (skill: prefix)
     // No additional registration needed

@@ -555,6 +555,40 @@ export default function SettingsPage() {
           </Paper>
 
           <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>Web Search (Serper.dev)</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Power your agents with Google search capabilities. Get an API key from{' '}
+              <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>serper.dev</a>.
+              Enables web search, images, videos, news, maps, shopping, scholar, patents, and more.
+            </Typography>
+            <TextField
+              label="Serper API Key"
+              fullWidth
+              type="password"
+              value={getConfig('serperApiKey', '')}
+              onChange={(e) => setConfig('serperApiKey', e.target.value)}
+              placeholder="Enter your Serper.dev API key..."
+              inputProps={{ spellCheck: false }}
+              helperText="Used for all web search tools. Stored securely in the database."
+              sx={{ mb: 2 }}
+            />
+            {(getConfig('serperApiKey', '') !== '' && configEdits.serperApiKey !== undefined) && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
+                onClick={() => saveConfig()}
+                disabled={savingConfig}
+              >
+                Save API Key
+              </Button>
+            )}
+            {getConfig('serperApiKey', '') !== '' && configEdits.serperApiKey === undefined && (
+              <Chip label="Configured" size="small" color="success" variant="outlined" />
+            )}
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>Claude Max Accounts</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               Manage Claude Max subscriptions for load-balanced, flat-rate AI access.

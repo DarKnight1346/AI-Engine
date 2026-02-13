@@ -24,11 +24,20 @@ const DASHBOARD_SAFE_TOOLS = new Set([
   // Skills
   'searchSkills',
   'loadSkill',
-  // Web (HTTP-based, no persistent state)
+  // Web — Serper.dev powered (HTTP-based, no persistent state)
   'webSearch',
+  'webSearchImages',
+  'webSearchVideos',
+  'webSearchPlaces',
+  'webSearchMaps',
+  'webSearchReviews',
   'webSearchNews',
+  'webSearchShopping',
+  'webSearchLens',
+  'webSearchScholar',
+  'webSearchPatents',
+  'webAutocomplete',
   'webGetPage',
-  'webGetPageStructured',
   // Notifications
   'sendNotification',
 ]);
