@@ -91,35 +91,29 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Attempt 2: Bearer token auth (OAuth tokens)
+      // Attempt 2: Bearer / OAuth token auth (setup-tokens from `claude setup-token`)
+      // Use the Anthropic SDK's `authToken` parameter — this is how OpenClaw does it.
       if (!validated) {
         try {
-          const res = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${key}`,
-              'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify({
-              model: 'claude-3-5-haiku-latest',
-              max_tokens: 10,
-              messages: [{ role: 'user', content: 'Hi' }],
-            }),
+          const Anthropic = (await import('@anthropic-ai/sdk')).default;
+          const client = new Anthropic({ authToken: key });
+          await client.messages.create({
+            model: 'claude-3-5-haiku-latest',
+            max_tokens: 10,
+            messages: [{ role: 'user', content: 'Hi' }],
           });
-
-          if (res.status === 401 || res.status === 403) {
+          validated = true;
+          keyType = 'bearer';
+        } catch (err: any) {
+          if (err?.status === 401 || err?.status === 403) {
             return NextResponse.json(
               { error: 'Invalid API key or token. Authentication failed.' },
               { status: 400 },
             );
           }
+          // Non-auth error (rate limit, overloaded, model error) — token is valid
           validated = true;
           keyType = 'bearer';
-        } catch {
-          // Network error — can't validate, don't block the user
-          validated = true;
-          keyType = isStandardKey ? 'api-key' : 'bearer';
         }
       }
     }
