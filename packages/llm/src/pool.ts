@@ -264,7 +264,12 @@ export class LLMPool {
 
     // ── NVIDIA NIM fallback ──────────────────────────────────────────
     if (this.options.fallback?.provider === 'nvidia') {
-      console.log(`[LLMPool] Primary keys exhausted, falling back to NVIDIA NIM (Kimi K2.5)`);
+      const keyStates = this.keyManager.getStates();
+      const statesSummary = keyStates.map((k) => `${k.id.slice(0, 8)}…=${k.status}`).join(', ');
+      console.log(
+        `[LLMPool] All primary keys unavailable [${statesSummary}], ` +
+        `falling back to NVIDIA NIM (Kimi K2.5). Last error: ${lastError?.message ?? 'none'}`
+      );
       try {
         const fb = this.options.fallback;
         const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
@@ -335,7 +340,12 @@ export class LLMPool {
 
     // ── NVIDIA NIM fallback (streaming) ──────────────────────────────
     if (this.options.fallback?.provider === 'nvidia') {
-      console.log(`[LLMPool] Primary keys exhausted, falling back to NVIDIA NIM streaming (Kimi K2.5)`);
+      const keyStates = this.keyManager.getStates();
+      const statesSummary = keyStates.map((k) => `${k.id.slice(0, 8)}…=${k.status}`).join(', ');
+      console.log(
+        `[LLMPool] All primary keys unavailable [${statesSummary}], ` +
+        `falling back to NVIDIA NIM streaming (Kimi K2.5). Last error: ${lastError?.message ?? 'none'}`
+      );
       try {
         const fb = this.options.fallback;
         const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
@@ -783,9 +793,37 @@ export class LLMPool {
   // ── NVIDIA NIM (Kimi K2.5) ─────────────────────────────────────────
 
   /**
+   * Build clean OpenAI-format messages for NVIDIA NIM.
+   *
+   * We intentionally do NOT use `toOpenAIMessages()` here because that
+   * function injects a forceful identity-override preamble designed for
+   * the Claude Max API proxy.  Those extra messages confuse Kimi K2.5
+   * and waste tokens.  Instead we build a straightforward message list
+   * with a clean system prompt.
+   */
+  private buildNvidiaMessages(
+    messages: LLMMessage[], systemPrompt?: string,
+  ): Array<{ role: string; content: string }> {
+    const out: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) {
+      out.push({ role: 'system', content: systemPrompt });
+    }
+    for (const m of messages) {
+      const text = typeof m.content === 'string'
+        ? m.content
+        : m.content
+            .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+            .map((c) => c.text)
+            .join('\n');
+      out.push({ role: m.role, content: text });
+    }
+    return out;
+  }
+
+  /**
    * Build the request body for NVIDIA NIM API calls.
-   * Kimi K2.5 supports OpenAI-compatible chat completions with an extra
-   * `chat_template_kwargs` field for enabling thinking mode.
+   * Kimi K2.5 supports OpenAI-compatible chat completions.
+   * Thinking mode is disabled for faster, more predictable responses.
    */
   private buildNvidiaBody(
     model: string, messages: LLMMessage[], options: LLMCallOptions, stream: boolean,
@@ -793,12 +831,16 @@ export class LLMPool {
     const body: Record<string, any> = {
       model,
       max_tokens: options.maxTokens ?? 16384,
-      temperature: options.temperature ?? 1.0,
-      top_p: 1.0,
-      messages: toOpenAIMessages(messages, options.systemPrompt),
+      temperature: options.temperature ?? 0.7,
+      top_p: 0.95,
+      messages: this.buildNvidiaMessages(messages, options.systemPrompt),
       stream,
-      chat_template_kwargs: { thinking: true },
     };
+
+    // Only add stream_options for streaming to get usage stats in the final chunk
+    if (stream) {
+      body.stream_options = { include_usage: true };
+    }
 
     if (options.tools && options.tools.length > 0) {
       body.tools = options.tools.map((t) => ({
@@ -815,7 +857,7 @@ export class LLMPool {
   }
 
   /**
-   * Strip `<think>...</think>` blocks that Kimi K2.5 emits in thinking mode.
+   * Strip `<think>...</think>` blocks that Kimi K2.5 may emit.
    * We only want the final answer content to go through to the user.
    */
   private stripThinkingTags(text: string): string {
@@ -829,51 +871,65 @@ export class LLMPool {
     const url = `${baseUrl}/chat/completions`;
     const body = this.buildNvidiaBody(model, messages, options, false);
 
+    console.log(`[NVIDIA] Non-streaming call to ${model}, ${body.messages.length} messages`);
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${keyConfig.apiKey}`,
       'Accept': 'application/json',
     };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    // 120-second timeout for non-streaming calls
+    const controller = new AbortController();
+    const timeout = globalThis.setTimeout(() => controller.abort(), 120_000);
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      const err: any = new Error(`NVIDIA NIM API error (${res.status}): ${errText}`);
-      err.status = res.status;
-      throw err;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.error(`[NVIDIA] API error (${res.status}): ${errText}`);
+        const err: any = new Error(`NVIDIA NIM API error (${res.status}): ${errText}`);
+        err.status = res.status;
+        throw err;
+      }
+
+      const data = await res.json() as any;
+      const choice = data.choices?.[0];
+      const rawContent = choice?.message?.content ?? '';
+      const content = this.stripThinkingTags(rawContent);
+
+      console.log(`[NVIDIA] Response: ${content.length} chars, model=${data.model}, usage=${JSON.stringify(data.usage ?? {})}`);
+
+      const openAIToolCalls = choice?.message?.tool_calls ?? [];
+      const toolCalls = openAIToolCalls.map((tc: any) => ({
+        id: tc.id ?? `call_${Date.now()}`,
+        name: tc.function?.name ?? '',
+        input: tc.function?.arguments
+          ? (typeof tc.function.arguments === 'string'
+              ? JSON.parse(tc.function.arguments)
+              : tc.function.arguments)
+          : {},
+      }));
+
+      return {
+        content,
+        toolCalls,
+        usage: {
+          inputTokens: data.usage?.prompt_tokens ?? 0,
+          outputTokens: data.usage?.completion_tokens ?? 0,
+        },
+        model: data.model ?? model,
+        stopReason: choice?.finish_reason ?? 'end_turn',
+      };
+    } finally {
+      globalThis.clearTimeout(timeout);
     }
-
-    const data = await res.json() as any;
-    const choice = data.choices?.[0];
-    const rawContent = choice?.message?.content ?? '';
-    const content = this.stripThinkingTags(rawContent);
-
-    const openAIToolCalls = choice?.message?.tool_calls ?? [];
-    const toolCalls = openAIToolCalls.map((tc: any) => ({
-      id: tc.id ?? `call_${Date.now()}`,
-      name: tc.function?.name ?? '',
-      input: tc.function?.arguments
-        ? (typeof tc.function.arguments === 'string'
-            ? JSON.parse(tc.function.arguments)
-            : tc.function.arguments)
-        : {},
-    }));
-
-    return {
-      content,
-      toolCalls,
-      usage: {
-        inputTokens: data.usage?.prompt_tokens ?? 0,
-        outputTokens: data.usage?.completion_tokens ?? 0,
-      },
-      model: data.model ?? model,
-      stopReason: choice?.finish_reason ?? 'end_turn',
-    };
   }
 
   private async callNvidiaStreaming(
@@ -884,24 +940,45 @@ export class LLMPool {
     const url = `${baseUrl}/chat/completions`;
     const body = this.buildNvidiaBody(model, messages, options, true);
 
+    console.log(`[NVIDIA] Streaming call to ${model}, ${body.messages.length} messages, tools=${(body.tools ?? []).length}`);
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${keyConfig.apiKey}`,
       'Accept': 'text/event-stream',
     };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    // 30-second timeout for the initial connection; we'll manage read timeouts separately
+    const controller = new AbortController();
+    const connectTimeout = globalThis.setTimeout(() => {
+      console.error(`[NVIDIA] Connection timeout after 30s`);
+      controller.abort();
+    }, 30_000);
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (fetchErr: any) {
+      globalThis.clearTimeout(connectTimeout);
+      console.error(`[NVIDIA] Fetch failed:`, fetchErr.message);
+      throw fetchErr;
+    }
+    globalThis.clearTimeout(connectTimeout);
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
+      console.error(`[NVIDIA] Streaming API error (${res.status}): ${errText}`);
       const err: any = new Error(`NVIDIA NIM streaming API error (${res.status}): ${errText}`);
       err.status = res.status;
       throw err;
     }
+
+    console.log(`[NVIDIA] Stream connected (${res.status}), reading chunks...`);
 
     let fullText = '';
     const toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
@@ -910,126 +987,162 @@ export class LLMPool {
     let outputTokens = 0;
     let responseModel = model;
     let stopReason = 'end_turn';
+    let chunkCount = 0;
 
-    // Track thinking mode — suppress <think>...</think> from streaming output
+    // Track thinking tags — suppress <think>...</think> from output
     let insideThinking = false;
     let thinkBuffer = '';
 
     const reader = res.body?.getReader();
     if (!reader) {
+      console.warn(`[NVIDIA] No streaming body, falling back to non-streaming`);
       return this.callNvidia(keyConfig, model, messages, options);
     }
 
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    // Per-read timeout: if no data arrives for 120s, abort
+    const readTimeoutMs = 120_000;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+    try {
+      while (true) {
+        // Create a per-read timeout that aborts if no data for 120s
+        const readTimeout = globalThis.setTimeout(() => {
+          console.error(`[NVIDIA] Read timeout: no data for ${readTimeoutMs / 1000}s after ${chunkCount} chunks`);
+          reader.cancel().catch(() => {});
+        }, readTimeoutMs);
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed === 'data: [DONE]') continue;
-        if (!trimmed.startsWith('data: ')) continue;
+        const { done, value } = await reader.read();
+        globalThis.clearTimeout(readTimeout);
 
-        try {
-          const data = JSON.parse(trimmed.slice(6));
-          const choice = data.choices?.[0];
-          if (!choice) continue;
+        if (done) break;
+        chunkCount++;
 
-          const delta = choice.delta;
-          if (delta?.content) {
-            // Handle thinking tags in streaming mode:
-            // Buffer content that might be inside <think>...</think> and
-            // only emit tokens that are outside thinking blocks.
-            let chunk = delta.content;
-            let emitText = '';
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-            while (chunk.length > 0) {
-              if (insideThinking) {
-                const closeIdx = chunk.indexOf('</think>');
-                if (closeIdx !== -1) {
-                  insideThinking = false;
-                  thinkBuffer = '';
-                  chunk = chunk.slice(closeIdx + 8);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === 'data: [DONE]') continue;
+          if (!trimmed.startsWith('data: ')) continue;
+
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            const choice = data.choices?.[0];
+            if (!choice) {
+              // Might be a usage-only chunk at the end
+              if (data.usage) {
+                inputTokens = data.usage.prompt_tokens ?? inputTokens;
+                outputTokens = data.usage.completion_tokens ?? outputTokens;
+              }
+              continue;
+            }
+
+            const delta = choice.delta;
+            if (delta?.content) {
+              // Handle thinking tags in streaming mode
+              let chunk = delta.content;
+              let emitText = '';
+
+              while (chunk.length > 0) {
+                if (insideThinking) {
+                  const closeIdx = chunk.indexOf('</think>');
+                  if (closeIdx !== -1) {
+                    insideThinking = false;
+                    thinkBuffer = '';
+                    chunk = chunk.slice(closeIdx + 8);
+                    if (chunkCount <= 5 || chunkCount % 50 === 0) {
+                      console.log(`[NVIDIA] Thinking complete, emitting answer tokens...`);
+                    }
+                  } else {
+                    thinkBuffer += chunk;
+                    chunk = '';
+                  }
                 } else {
-                  thinkBuffer += chunk;
-                  chunk = '';
-                }
-              } else {
-                const openIdx = chunk.indexOf('<think>');
-                if (openIdx !== -1) {
-                  emitText += chunk.slice(0, openIdx);
-                  insideThinking = true;
-                  thinkBuffer = '';
-                  chunk = chunk.slice(openIdx + 7);
-                } else {
-                  // Check for partial <think> tag at the end
-                  const partialCheck = '<think>';
-                  let partialLen = 0;
-                  for (let i = 1; i < partialCheck.length && i <= chunk.length; i++) {
-                    if (chunk.endsWith(partialCheck.slice(0, i))) {
-                      partialLen = i;
+                  const openIdx = chunk.indexOf('<think>');
+                  if (openIdx !== -1) {
+                    emitText += chunk.slice(0, openIdx);
+                    insideThinking = true;
+                    thinkBuffer = '';
+                    chunk = chunk.slice(openIdx + 7);
+                    if (chunkCount <= 5) {
+                      console.log(`[NVIDIA] Model entered thinking mode...`);
+                    }
+                  } else {
+                    // Check for partial <think> tag at the end
+                    const partialCheck = '<think>';
+                    let partialLen = 0;
+                    for (let i = 1; i < partialCheck.length && i <= chunk.length; i++) {
+                      if (chunk.endsWith(partialCheck.slice(0, i))) {
+                        partialLen = i;
+                      }
+                    }
+                    if (partialLen > 0) {
+                      emitText += chunk.slice(0, -partialLen);
+                      thinkBuffer = chunk.slice(-partialLen);
+                      chunk = '';
+                    } else {
+                      emitText += chunk;
+                      chunk = '';
                     }
                   }
-                  if (partialLen > 0) {
-                    emitText += chunk.slice(0, -partialLen);
-                    thinkBuffer = chunk.slice(-partialLen);
-                    chunk = '';
-                  } else {
-                    emitText += chunk;
-                    chunk = '';
+                }
+              }
+
+              if (emitText) {
+                fullText += emitText;
+                onEvent({ type: 'token', text: emitText });
+              }
+            }
+
+            // Tool call deltas
+            if (delta?.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                if (!toolCallBuffers.has(idx)) {
+                  const id = tc.id ?? `call_${Date.now()}_${idx}`;
+                  const name = tc.function?.name ?? '';
+                  toolCallBuffers.set(idx, { id, name, args: '' });
+                  if (name) {
+                    console.log(`[NVIDIA] Tool call started: ${name}`);
+                    onEvent({ type: 'tool_use_start', id, name });
                   }
                 }
-              }
-            }
-
-            if (emitText) {
-              fullText += emitText;
-              onEvent({ type: 'token', text: emitText });
-            }
-          }
-
-          // Tool call deltas
-          if (delta?.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? 0;
-              if (!toolCallBuffers.has(idx)) {
-                const id = tc.id ?? `call_${Date.now()}_${idx}`;
-                const name = tc.function?.name ?? '';
-                toolCallBuffers.set(idx, { id, name, args: '' });
-                if (name) {
-                  onEvent({ type: 'tool_use_start', id, name });
+                const buf = toolCallBuffers.get(idx)!;
+                if (tc.function?.name && !buf.name) buf.name = tc.function.name;
+                if (tc.id && !buf.id) buf.id = tc.id;
+                if (tc.function?.arguments) {
+                  buf.args += tc.function.arguments;
+                  onEvent({ type: 'tool_use_delta', id: buf.id, partialJson: tc.function.arguments });
                 }
               }
-              const buf = toolCallBuffers.get(idx)!;
-              if (tc.function?.name && !buf.name) buf.name = tc.function.name;
-              if (tc.id && !buf.id) buf.id = tc.id;
-              if (tc.function?.arguments) {
-                buf.args += tc.function.arguments;
-                onEvent({ type: 'tool_use_delta', id: buf.id, partialJson: tc.function.arguments });
-              }
             }
-          }
 
-          if (choice.finish_reason) {
-            stopReason = choice.finish_reason;
-          }
+            if (choice.finish_reason) {
+              stopReason = choice.finish_reason;
+            }
 
-          if (data.usage) {
-            inputTokens = data.usage.prompt_tokens ?? inputTokens;
-            outputTokens = data.usage.completion_tokens ?? outputTokens;
+            if (data.usage) {
+              inputTokens = data.usage.prompt_tokens ?? inputTokens;
+              outputTokens = data.usage.completion_tokens ?? outputTokens;
+            }
+            if (data.model) {
+              responseModel = data.model;
+            }
+          } catch (parseErr) {
+            console.warn(`[NVIDIA] Failed to parse SSE chunk: ${trimmed.slice(0, 200)}`);
           }
-          if (data.model) {
-            responseModel = data.model;
-          }
-        } catch {
-          // Skip unparseable lines
         }
+      }
+    } catch (streamErr: any) {
+      console.error(`[NVIDIA] Stream error after ${chunkCount} chunks, ${fullText.length} chars emitted:`, streamErr.message);
+      // If we have some content already, return what we have rather than failing completely
+      if (fullText.length > 0) {
+        console.warn(`[NVIDIA] Returning partial response (${fullText.length} chars)`);
+      } else {
+        throw streamErr;
       }
     }
 
@@ -1046,6 +1159,11 @@ export class LLMPool {
       toolCalls.push({ id: buf.id, name: buf.name, input });
       onEvent({ type: 'tool_use_end', id: buf.id, input });
     }
+
+    console.log(
+      `[NVIDIA] Stream complete: ${chunkCount} chunks, ${fullText.length} chars, ` +
+      `${toolCalls.length} tool calls, usage=${inputTokens}/${outputTokens}, stop=${stopReason}`
+    );
 
     return {
       content: fullText,
