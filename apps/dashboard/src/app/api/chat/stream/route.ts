@@ -32,16 +32,17 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { message, sessionId: incomingSessionId, userId, agentId } = body as {
+    const { message, sessionId: incomingSessionId, userId, agentId, attachments: rawAttachments } = body as {
       message: string;
       sessionId?: string;
       userId?: string;
       agentId?: string;
+      attachments?: Array<{ name: string; type: string; url: string; size: number }>;
     };
 
-    if (!message) {
+    if (!message && (!rawAttachments || rawAttachments.length === 0)) {
       return new Response(
-        JSON.stringify({ error: 'message is required' }),
+        JSON.stringify({ error: 'message or attachments required' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } },
       );
     }
@@ -95,13 +96,18 @@ export async function POST(request: NextRequest) {
       if (agent) agentName = agent.name;
     }
 
+    // Build embedsJson with agent info + attachments
+    const embedsData: Record<string, unknown> = {};
+    if (agentId) { embedsData.agentId = agentId; embedsData.agentName = agentName; }
+    if (rawAttachments?.length) { embedsData.attachments = rawAttachments; }
+
     const userMessage = await db.chatMessage.create({
       data: {
         sessionId: session.id,
         senderType: 'user',
         senderUserId: userId ?? session.createdByUserId,
-        content: message,
-        embedsJson: agentId ? { agentId, agentName } : undefined,
+        content: message || '',
+        embedsJson: Object.keys(embedsData).length > 0 ? embedsData : undefined,
       },
     });
 
@@ -142,9 +148,10 @@ export async function POST(request: NextRequest) {
         queue.enqueue({
           jobId,
           sessionId: session!.id,
-          message,
+          message: message || '',
           userId,
           agentId: agentId ?? undefined,
+          attachments: rawAttachments,
           signal: request.signal,
           onEvent: (event: ChatStreamEvent) => {
             try {

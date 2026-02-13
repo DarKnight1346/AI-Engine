@@ -6,9 +6,86 @@ import { EnvironmentTools } from './tools/environment.js';
 import { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
 import { createWebSearchTools, createXaiSearchTools } from './tools/web-search-tools.js';
 import { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
-import { WebSearchService, XaiSearchService, DataForSeoService } from '@ai-engine/web-search';
+import { createImageTools, getImageToolManifest } from './tools/image-tools.js';
+import { WebSearchService, XaiSearchService, DataForSeoService, XaiImageService } from '@ai-engine/web-search';
 import { EmbeddingService } from '@ai-engine/memory';
 import type { Tool, ToolContext, ToolResult } from './types.js';
+
+// ---------------------------------------------------------------------------
+// XML tool-call fallback parser
+//
+// Some LLM providers (OpenAI-compatible proxies, etc.) don't reliably
+// return structured tool_use blocks. Claude may fall back to emitting
+// XML-formatted tool calls as plain text:
+//
+//   <invoke name="execute_tool">
+//   <parameter name="tool">seoKeywordVolume</parameter>
+//   <parameter name="input">{"keywords":["foo"]}</parameter>
+//   </invoke>
+//
+// This parser extracts those from the response text and converts them
+// into proper LLMToolCall objects so the agentic loop can execute them.
+// ---------------------------------------------------------------------------
+
+interface ParsedXmlToolCall {
+  name: string;
+  input: Record<string, unknown>;
+}
+
+function parseXmlToolCalls(text: string): ParsedXmlToolCall[] {
+  const results: ParsedXmlToolCall[] = [];
+  // Match <invoke name="...">...</invoke> blocks (non-greedy)
+  const invokeRegex = /<invoke\s+name="([^"]+)">([\s\S]*?)<\/invoke>/g;
+  let match;
+
+  while ((match = invokeRegex.exec(text)) !== null) {
+    const toolName = match[1];
+    const body = match[2];
+
+    // Extract <parameter name="...">value</parameter> pairs
+    const params: Record<string, string> = {};
+    const paramRegex = /<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>/g;
+    let paramMatch;
+    while ((paramMatch = paramRegex.exec(body)) !== null) {
+      params[paramMatch[1]] = paramMatch[2].trim();
+    }
+
+    // For meta-tools like execute_tool, the 'input' parameter is JSON
+    let input: Record<string, unknown> = {};
+    if (params.input) {
+      try {
+        input = JSON.parse(params.input);
+      } catch {
+        input = { raw: params.input };
+      }
+    }
+
+    // Build the final input: if the tool is execute_tool, wrap properly
+    if (toolName === 'execute_tool') {
+      results.push({
+        name: 'execute_tool',
+        input: {
+          tool: params.tool ?? '',
+          input,
+        },
+      });
+    } else {
+      // Generic tool — all params become the input
+      const genericInput: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(params)) {
+        try { genericInput[key] = JSON.parse(val); } catch { genericInput[key] = val; }
+      }
+      results.push({ name: toolName, input: genericInput });
+    }
+  }
+
+  return results;
+}
+
+/** Strip XML tool call blocks from text content so it isn't shown to the user */
+function stripXmlToolCalls(text: string): string {
+  return text.replace(/<invoke\s+name="[^"]+">[\s\S]*?<\/invoke>/g, '').trim();
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -206,10 +283,29 @@ export class ChatExecutor {
       totalInputTokens += response.usage.inputTokens;
       totalOutputTokens += response.usage.outputTokens;
 
-      // If no tool calls, we have the final response
-      if (response.toolCalls.length === 0) {
+      // ── XML tool-call fallback ──
+      // If the LLM returned no structured tool calls but the text contains
+      // XML <invoke> blocks, parse them and treat them as tool calls.
+      let effectiveToolCalls = response.toolCalls;
+      let effectiveContent = response.content;
+
+      if (effectiveToolCalls.length === 0 && response.content) {
+        const xmlCalls = parseXmlToolCalls(response.content);
+        if (xmlCalls.length > 0) {
+          effectiveToolCalls = xmlCalls.map((xc, i) => ({
+            id: `xml_${Date.now()}_${i}`,
+            name: xc.name,
+            input: xc.input,
+          }));
+          effectiveContent = stripXmlToolCalls(response.content);
+          console.log(`[ChatExecutor] Recovered ${xmlCalls.length} tool call(s) from XML text fallback`);
+        }
+      }
+
+      // If no tool calls (even after XML fallback), we have the final response
+      if (effectiveToolCalls.length === 0) {
         return {
-          content: response.content,
+          content: effectiveContent,
           toolCallsCount,
           usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
           iterations: iteration + 1,
@@ -221,8 +317,8 @@ export class ChatExecutor {
         role: 'assistant',
         content: [
           // Include any text the assistant generated alongside tool calls
-          ...(response.content ? [{ type: 'text' as const, text: response.content }] : []),
-          ...response.toolCalls.map((tc: LLMToolCall) => ({
+          ...(effectiveContent ? [{ type: 'text' as const, text: effectiveContent }] : []),
+          ...effectiveToolCalls.map((tc: LLMToolCall) => ({
             type: 'tool_use' as const,
             id: tc.id,
             name: tc.name,
@@ -234,7 +330,7 @@ export class ChatExecutor {
       // Execute each tool call
       const toolResults: Array<{ type: 'tool_result'; toolUseId: string; content: string }> = [];
 
-      for (const toolCall of response.toolCalls) {
+      for (const toolCall of effectiveToolCalls) {
         toolCallsCount++;
 
         const metaTool = this.metaTools.find((t) => t.name === toolCall.name);
@@ -335,10 +431,27 @@ export class ChatExecutor {
       totalInputTokens += response.usage.inputTokens;
       totalOutputTokens += response.usage.outputTokens;
 
+      // ── XML tool-call fallback (streaming) ──
+      let effectiveToolCalls = response.toolCalls;
+      let effectiveContent = response.content;
+
+      if (effectiveToolCalls.length === 0 && response.content) {
+        const xmlCalls = parseXmlToolCalls(response.content);
+        if (xmlCalls.length > 0) {
+          effectiveToolCalls = xmlCalls.map((xc, i) => ({
+            id: `xml_${Date.now()}_${i}`,
+            name: xc.name,
+            input: xc.input,
+          }));
+          effectiveContent = stripXmlToolCalls(response.content);
+          console.log(`[ChatExecutor] Recovered ${xmlCalls.length} tool call(s) from XML text fallback (streaming)`);
+        }
+      }
+
       // If no tool calls, we have the final response
-      if (response.toolCalls.length === 0) {
+      if (effectiveToolCalls.length === 0) {
         const result: ChatExecutorResult = {
-          content: response.content,
+          content: effectiveContent,
           toolCallsCount,
           usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
           iterations: iteration + 1,
@@ -348,14 +461,14 @@ export class ChatExecutor {
       }
 
       // The LLM wants to use tools — stop streaming text, start tool execution
-      onEvent({ type: 'status', message: `Using ${response.toolCalls.length} tool(s)...` });
+      onEvent({ type: 'status', message: `Using ${effectiveToolCalls.length} tool(s)...` });
 
       // Append assistant message with tool calls
       workingMessages.push({
         role: 'assistant',
         content: [
-          ...(response.content ? [{ type: 'text' as const, text: response.content }] : []),
-          ...response.toolCalls.map((tc: LLMToolCall) => ({
+          ...(effectiveContent ? [{ type: 'text' as const, text: effectiveContent }] : []),
+          ...effectiveToolCalls.map((tc: LLMToolCall) => ({
             type: 'tool_use' as const,
             id: tc.id,
             name: tc.name,
@@ -367,7 +480,7 @@ export class ChatExecutor {
       // Execute each tool call
       const toolResults: Array<{ type: 'tool_result'; toolUseId: string; content: string }> = [];
 
-      for (const toolCall of response.toolCalls) {
+      for (const toolCall of effectiveToolCalls) {
         toolCallsCount++;
         onEvent({ type: 'tool_call_start', name: toolCall.name, id: toolCall.id });
 
@@ -673,7 +786,10 @@ export class ChatExecutor {
     // ── Tier 3: DataForSEO deep research tools (~122 endpoints) ──
     const dataForSeoTools = getDataForSeoManifest();
 
-    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dataForSeoTools]);
+    // ── Image generation tools ──
+    const imageGenTools = getImageToolManifest();
+
+    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dataForSeoTools, ...imageGenTools]);
   }
 
   /**
@@ -706,6 +822,18 @@ export class ChatExecutor {
         this.toolExecutor.registerAllLocal(xaiTools);
       } catch (err: any) {
         console.warn('[ChatExecutor] Failed to initialize xAI web search tools:', err.message);
+      }
+    }
+
+    // Image generation: xAI Grok Imagine (uses same API key as Tier 2)
+    if (this.options.xaiApiKey) {
+      try {
+        const imgService = new XaiImageService();
+        imgService.setApiKey(this.options.xaiApiKey);
+        const imgTools = createImageTools(imgService);
+        this.toolExecutor.registerAllLocal(imgTools);
+      } catch (err: any) {
+        console.warn('[ChatExecutor] Failed to initialize image generation tools:', err.message);
       }
     }
 

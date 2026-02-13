@@ -23,6 +23,13 @@ import type { ChatStreamEvent } from '@ai-engine/agent-runtime';
 // Types
 // ---------------------------------------------------------------------------
 
+export interface ChatJobAttachment {
+  name: string;
+  type: string;      // MIME type
+  url: string;       // data URL (base64)
+  size: number;
+}
+
 export interface ChatJob {
   /** Unique job ID (used to track/cancel) */
   jobId: string;
@@ -34,6 +41,8 @@ export interface ChatJob {
   userId?: string;
   /** Optional agent ID */
   agentId?: string;
+  /** Optional file/image attachments */
+  attachments?: ChatJobAttachment[];
   /** Streaming event callback — called for every token, status, tool call, etc. */
   onEvent: (event: ChatStreamEvent) => void;
   /** Called when the job finishes (success or error) */
@@ -370,15 +379,75 @@ You MUST search memory for user preferences before every response — this is yo
       take: 50,
     });
 
-    const llmMessages = history.map((m: any) => ({
-      role: m.senderType === 'user' ? ('user' as const) : ('assistant' as const),
-      content: m.content,
-    }));
+    // Build LLM messages, converting attachments to multimodal content blocks
+    // Uses the LLMMessageContent types from @ai-engine/shared
+    const buildContentWithAttachments = (
+      text: string,
+      attachmentList?: ChatJobAttachment[],
+    ): string | Array<{ type: string; text?: string; source?: { type: string; mediaType: string; data: string } }> => {
+      if (!attachmentList || attachmentList.length === 0) return text;
+
+      const blocks: Array<any> = [];
+
+      // Add image attachments as image content blocks
+      for (const att of attachmentList) {
+        if (att.type.startsWith('image/')) {
+          // Extract base64 data from data URL
+          const match = att.url.match(/^data:([^;]+);base64,(.+)$/);
+          if (match) {
+            blocks.push({
+              type: 'image',
+              source: {
+                type: 'base64',
+                mediaType: match[1],  // matches LLMMessageContent type
+                data: match[2],
+              },
+            });
+          }
+        } else {
+          // Non-image files — include as text context
+          const match = att.url.match(/^data:[^;]+;base64,(.+)$/);
+          if (match) {
+            try {
+              const decoded = Buffer.from(match[1], 'base64').toString('utf-8');
+              blocks.push({
+                type: 'text',
+                text: `[Attached file: ${att.name}]\n${decoded.slice(0, 50000)}`,
+              });
+            } catch {
+              blocks.push({
+                type: 'text',
+                text: `[Attached file: ${att.name} — binary file, cannot display as text]`,
+              });
+            }
+          }
+        }
+      }
+
+      // Add the text message
+      if (text) {
+        blocks.push({ type: 'text', text });
+      }
+
+      return blocks.length > 0 ? blocks : text;
+    };
+
+    const llmMessages = history.map((m: any) => {
+      const embeds = m.embedsJson as Record<string, any> | null;
+      const historyAttachments = embeds?.attachments as ChatJobAttachment[] | undefined;
+      return {
+        role: m.senderType === 'user' ? ('user' as const) : ('assistant' as const),
+        content: buildContentWithAttachments(m.content, historyAttachments),
+      };
+    });
 
     // Ensure the new user message is in the list
     const userMsgInHistory = history.some((m: any) => m.content === job.message && m.senderType === 'user');
     if (!userMsgInHistory) {
-      llmMessages.push({ role: 'user' as const, content: job.message });
+      llmMessages.push({
+        role: 'user' as const,
+        content: buildContentWithAttachments(job.message, job.attachments),
+      });
     }
 
     if (signal.aborted) throw new Error('Aborted');

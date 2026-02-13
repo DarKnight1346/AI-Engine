@@ -25,6 +25,7 @@ export async function GET(request: NextRequest) {
           content: m.content,
           timestamp: m.createdAt.toISOString(),
           agentName: embeds?.agentName ?? undefined,
+          attachments: embeds?.attachments ?? undefined,
         };
       }),
     });

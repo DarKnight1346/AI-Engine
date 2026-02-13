@@ -10,6 +10,8 @@ export { createWebSearchTools, createXaiSearchTools } from './tools/web-search-t
 export type { SerperServiceLike, XaiServiceLike } from './tools/web-search-tools.js';
 export { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
 export type { DataForSeoServiceLike } from './tools/dataforseo-tools.js';
+export { createImageTools, getImageToolManifest } from './tools/image-tools.js';
+export type { ImageServiceLike } from './tools/image-tools.js';
 export type { Tool, ToolResult, ToolContext, AgentRunnerOptions } from './types.js';
 export type { ToolManifestEntry, ToolSearchResult, EmbeddingProvider } from './tool-index.js';
 export type { ChatExecutorOptions, ChatExecutorResult, ChatStreamEvent, ChatStreamCallback } from './chat-executor.js';

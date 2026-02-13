@@ -73,6 +73,8 @@ export function routeTool(toolName: string): ToolExecutionRoute {
   if (toolName.startsWith('browser_')) return 'worker';
   // Tier 3: DataForSEO tools (prefix convention avoids listing ~125 tools individually)
   if (toolName.startsWith('seo')) return 'dashboard';
+  // xAI media generation tools (images + video)
+  if (toolName.startsWith('xaiGenerate')) return 'dashboard';
   return 'unknown';
 }
 

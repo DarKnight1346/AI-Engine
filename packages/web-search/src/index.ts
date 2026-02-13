@@ -19,6 +19,11 @@ export type {
 export { XaiSearchService } from './xai-search-service.js';
 export type { XaiSearchOptions, XaiSearchResult } from './xai-search-service.js';
 export { DataForSeoService } from './dataforseo-service.js';
+export { XaiImageService } from './xai-image-service.js';
+export type {
+  XaiImageOptions, XaiImageResult, XaiGeneratedImage, XaiImageModel, XaiAspectRatio,
+  XaiVideoOptions, XaiVideoResult, XaiVideoAspectRatio, XaiVideoResolution,
+} from './xai-image-service.js';
 export type { DataForSeoCredentials, DataForSeoResult } from './dataforseo-service.js';
 export { PageFetcher } from './page-fetcher.js';
 export { SearchCache } from './search-cache.js';

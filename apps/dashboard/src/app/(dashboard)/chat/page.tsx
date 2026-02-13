@@ -16,8 +16,19 @@ import CloseIcon from '@mui/icons-material/Close';
 import PersonIcon from '@mui/icons-material/Person';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
+import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
+import DownloadIcon from '@mui/icons-material/Download';
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
+
+interface Attachment {
+  id: string;
+  name: string;
+  type: string;      // MIME type
+  url: string;       // data URL for preview, or uploaded URL
+  size: number;
+}
 
 interface Message {
   id: string;
@@ -25,6 +36,7 @@ interface Message {
   content: string;
   timestamp: Date;
   agentName?: string;
+  attachments?: Attachment[];
 }
 
 interface ChatSession {
@@ -140,12 +152,189 @@ function FormattedText({ text }: { text: string }) {
   );
 }
 
-function MessageContent({ content }: { content: string }) {
+/** Detect image URLs in text (common image hosting patterns + xAI image CDN) */
+/** Detect image URLs in text (common extensions + xAI CDN) */
+function isImageUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  if (/\.(png|jpg|jpeg|gif|webp|svg)(\?|$)/i.test(lower)) return true;
+  if (/images\.x\.ai|imgen\.x\.ai|cdn\.x\.ai/i.test(lower)) return true;
+  return false;
+}
+
+/** Detect video URLs in text */
+function isVideoUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  if (/\.(mp4|webm|mov|ogg)(\?|$)/i.test(lower)) return true;
+  if (/vidgen\.x\.ai/i.test(lower)) return true;
+  return false;
+}
+
+/** Match any URL in text */
+const URL_REGEX = /https?:\/\/[^\s)<>]+/g;
+
+/** Trigger a download for a URL */
+function downloadUrl(url: string, filename?: string) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || url.split('/').pop()?.split('?')[0] || 'download';
+  a.target = '_blank';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+/** Render an inline image with lightbox + download */
+function InlineImage({ url }: { url: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      <Box sx={{ position: 'relative', display: 'inline-block', my: 1, '&:hover .media-actions': { opacity: 1 } }}>
+        <Box
+          component="img"
+          src={url}
+          alt="Generated image"
+          onClick={() => setExpanded(true)}
+          sx={{
+            maxWidth: '100%',
+            maxHeight: 400,
+            borderRadius: 2,
+            cursor: 'pointer',
+            display: 'block',
+            transition: 'transform 0.2s',
+            '&:hover': { transform: 'scale(1.01)', boxShadow: 3 },
+          }}
+        />
+        <Box
+          className="media-actions"
+          sx={{
+            position: 'absolute', bottom: 8, right: 8,
+            display: 'flex', gap: 0.5,
+            opacity: 0, transition: 'opacity 0.2s',
+          }}
+        >
+          <Tooltip title="Download image">
+            <IconButton
+              size="small"
+              onClick={(e) => { e.stopPropagation(); downloadUrl(url, 'generated-image.png'); }}
+              sx={{
+                bgcolor: 'rgba(0,0,0,0.65)', color: 'white',
+                backdropFilter: 'blur(4px)',
+                '&:hover': { bgcolor: 'rgba(0,0,0,0.85)' },
+              }}
+            >
+              <DownloadIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      </Box>
+      {expanded && (
+        <Box
+          onClick={() => setExpanded(false)}
+          sx={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            bgcolor: 'rgba(0,0,0,0.85)', zIndex: 9999,
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            cursor: 'zoom-out', p: 4,
+          }}
+        >
+          <Box
+            component="img"
+            src={url}
+            alt="Generated image (full)"
+            sx={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 2 }}
+          />
+          <Box sx={{ mt: 2 }}>
+            <IconButton
+              onClick={(e) => { e.stopPropagation(); downloadUrl(url, 'generated-image.png'); }}
+              sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.1)', '&:hover': { bgcolor: 'rgba(255,255,255,0.2)' } }}
+            >
+              <DownloadIcon />
+            </IconButton>
+          </Box>
+        </Box>
+      )}
+    </>
+  );
+}
+
+/** Render an inline video player with controls + download */
+function InlineVideo({ url }: { url: string }) {
+  return (
+    <Box sx={{ position: 'relative', my: 1, '&:hover .media-actions': { opacity: 1 } }}>
+      <Box
+        component="video"
+        src={url}
+        controls
+        preload="metadata"
+        sx={{
+          maxWidth: '100%',
+          maxHeight: 400,
+          borderRadius: 2,
+          display: 'block',
+          bgcolor: 'black',
+        }}
+      />
+      <Box
+        className="media-actions"
+        sx={{
+          position: 'absolute', top: 8, right: 8,
+          display: 'flex', gap: 0.5,
+          opacity: 0, transition: 'opacity 0.2s',
+        }}
+      >
+        <Tooltip title="Download video">
+          <IconButton
+            size="small"
+            onClick={() => downloadUrl(url, 'generated-video.mp4')}
+            sx={{
+              bgcolor: 'rgba(0,0,0,0.65)', color: 'white',
+              backdropFilter: 'blur(4px)',
+              '&:hover': { bgcolor: 'rgba(0,0,0,0.85)' },
+            }}
+          >
+            <DownloadIcon sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
+    </Box>
+  );
+}
+
+function MessageContent({ content, attachments }: { content: string; attachments?: Attachment[] }) {
   // Split by code blocks first
   const segments = content.split(/(```[\s\S]*?```)/g);
 
   return (
     <Box sx={{ '& > *:first-of-type': { mt: 0 }, '& > *:last-child': { mb: 0 } }}>
+      {/* Render any explicit attachments (images, videos, files) */}
+      {attachments && attachments.length > 0 && (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 1.5 }}>
+          {attachments.filter(a => a.type.startsWith('image/')).map((att) => (
+            <InlineImage key={att.id} url={att.url} />
+          ))}
+          {attachments.filter(a => a.type.startsWith('video/')).map((att) => (
+            <InlineVideo key={att.id} url={att.url} />
+          ))}
+          {attachments.filter(a => !a.type.startsWith('image/') && !a.type.startsWith('video/')).map((att) => (
+            <Chip
+              key={att.id}
+              icon={<InsertDriveFileIcon />}
+              label={att.name}
+              size="small"
+              component="a"
+              href={att.url}
+              target="_blank"
+              clickable
+              deleteIcon={<DownloadIcon sx={{ fontSize: '16px !important' }} />}
+              onDelete={() => downloadUrl(att.url, att.name)}
+              sx={{ maxWidth: 280 }}
+            />
+          ))}
+        </Box>
+      )}
+
       {segments.map((segment, idx) => {
         if (segment.startsWith('```')) return <CodeBlock key={idx} content={segment} />;
         if (!segment.trim()) return null;
@@ -206,6 +395,39 @@ function MessageContent({ content }: { content: string }) {
                   ))}
                 </Box>
               );
+
+              // Check for media URLs (images, videos) in the paragraph
+              const urlMatches = trimmed.match(URL_REGEX);
+              const hasMediaUrls = urlMatches?.some(u => isImageUrl(u) || isVideoUrl(u));
+              if (hasMediaUrls) {
+                // Split around URLs and render media inline
+                const parts = trimmed.split(URL_REGEX);
+                const urls = trimmed.match(URL_REGEX) ?? [];
+                const elements: React.ReactNode[] = [];
+                for (let pi = 0; pi < parts.length; pi++) {
+                  if (parts[pi].trim()) {
+                    elements.push(
+                      <Typography key={`t${pi}`} variant="body2" component="span" sx={{ lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
+                        <FormattedText text={parts[pi]} />
+                      </Typography>
+                    );
+                  }
+                  if (pi < urls.length) {
+                    if (isVideoUrl(urls[pi])) {
+                      elements.push(<InlineVideo key={`vid${pi}`} url={urls[pi]} />);
+                    } else if (isImageUrl(urls[pi])) {
+                      elements.push(<InlineImage key={`img${pi}`} url={urls[pi]} />);
+                    } else {
+                      elements.push(
+                        <Typography key={`u${pi}`} variant="body2" component="span" sx={{ lineHeight: 1.75 }}>
+                          <a href={urls[pi]} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9' }}>{urls[pi]}</a>
+                        </Typography>
+                      );
+                    }
+                  }
+                }
+                return <Box key={pIdx} sx={{ my: 0.75 }}>{elements}</Box>;
+              }
 
               // Regular paragraph
               return (
@@ -345,8 +567,115 @@ export default function ChatPage() {
   const [mentionAnchor, setMentionAnchor] = useState<HTMLElement | null>(null);
   const [mentionQuery, setMentionQuery] = useState('');
   const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── File attachment handlers ──
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
+  const ACCEPTED_TYPES = 'image/*,video/*,.pdf,.txt,.csv,.json,.md,.html,.xml,.doc,.docx,.xls,.xlsx';
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
+
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        setSnack({ open: true, message: `File "${file.name}" exceeds 20 MB limit`, severity: 'error' });
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            name: file.name,
+            type: file.type || 'application/octet-stream',
+            url: dataUrl,
+            size: file.size,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Reset file input so the same file can be re-selected
+    e.target.value = '';
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  // Handle paste events (paste images from clipboard)
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const files = items
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f !== null);
+
+    if (files.length === 0) return;
+    // Don't prevent default for text paste
+    e.preventDefault();
+
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        setSnack({ open: true, message: `Pasted file exceeds 20 MB limit`, severity: 'error' });
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            name: file.name || `pasted-${file.type.split('/')[1] || 'file'}`,
+            type: file.type || 'application/octet-stream',
+            url: reader.result as string,
+            size: file.size,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+  }, []);
+
+  // Handle drag and drop
+  const [isDragOver, setIsDragOver] = useState(false);
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  }, []);
+  const handleDragLeave = useCallback(() => setIsDragOver(false), []);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        setSnack({ open: true, message: `File "${file.name}" exceeds 20 MB limit`, severity: 'error' });
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            name: file.name,
+            type: file.type || 'application/octet-stream',
+            url: reader.result as string,
+            size: file.size,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+  }, []);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -385,6 +714,13 @@ export default function ChatPage() {
         content: m.content,
         timestamp: new Date(m.timestamp),
         agentName: m.agentName,
+        attachments: m.attachments?.map((a: any) => ({
+          id: a.id || crypto.randomUUID(),
+          name: a.name,
+          type: a.type,
+          url: a.url,
+          size: a.size ?? 0,
+        })),
       }));
       setMessages(loaded);
       setContextTokens(estimateTokensFromMessages(loaded));
@@ -477,13 +813,15 @@ export default function ChatPage() {
 
   // ── Send message (streaming via SSE) ──
   const handleSend = async () => {
-    if (!input.trim() || sending) return;
+    if ((!input.trim() && attachments.length === 0) || sending) return;
 
+    const currentAttachments = [...attachments];
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: 'user',
       content: input,
       timestamp: new Date(),
+      attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
     // Update estimated context with the new user message
@@ -491,6 +829,7 @@ export default function ChatPage() {
     const currentInput = input;
     const currentAgent = selectedAgent;
     setInput('');
+    setAttachments([]);
     setSending(true);
 
     // Create a placeholder AI message that we'll stream into
@@ -517,6 +856,9 @@ export default function ChatPage() {
           message: currentInput,
           sessionId,
           agentId: currentAgent?.id ?? null,
+          attachments: currentAttachments.length > 0
+            ? currentAttachments.map(a => ({ name: a.name, type: a.type, url: a.url, size: a.size }))
+            : undefined,
         }),
         signal: controller.signal,
       });
@@ -836,6 +1178,11 @@ export default function ChatPage() {
             <Box sx={{ maxWidth: 800, width: '100%', mx: 'auto', py: 3, px: { xs: 0, md: 3 } }}>
               {messages.map((msg, idx) => {
                 const isUser = msg.role === 'user';
+
+                // Skip rendering AI placeholder messages with no content yet
+                // (the typing indicator below handles the visual for this state)
+                if (!isUser && !msg.content && (!msg.attachments || msg.attachments.length === 0)) return null;
+
                 const showAvatar = idx === 0 || messages[idx - 1].role !== msg.role;
 
                 return (
@@ -891,11 +1238,49 @@ export default function ChatPage() {
                           }}
                         >
                           {isUser ? (
-                            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
-                              {msg.content}
-                            </Typography>
+                            <Box>
+                              {/* User attachments (images, videos, files) */}
+                              {msg.attachments && msg.attachments.length > 0 && (
+                                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: msg.content ? 1 : 0 }}>
+                                  {msg.attachments.filter(a => a.type.startsWith('image/')).map((att) => (
+                                    <Box
+                                      key={att.id}
+                                      component="img"
+                                      src={att.url}
+                                      alt={att.name}
+                                      sx={{ maxWidth: 200, maxHeight: 150, borderRadius: 1.5, objectFit: 'cover' }}
+                                    />
+                                  ))}
+                                  {msg.attachments.filter(a => a.type.startsWith('video/')).map((att) => (
+                                    <Box
+                                      key={att.id}
+                                      component="video"
+                                      src={att.url}
+                                      controls
+                                      preload="metadata"
+                                      sx={{ maxWidth: 250, maxHeight: 180, borderRadius: 1.5, bgcolor: 'black' }}
+                                    />
+                                  ))}
+                                  {msg.attachments.filter(a => !a.type.startsWith('image/') && !a.type.startsWith('video/')).map((att) => (
+                                    <Chip
+                                      key={att.id}
+                                      icon={<InsertDriveFileIcon />}
+                                      label={att.name}
+                                      size="small"
+                                      variant="outlined"
+                                      sx={{ maxWidth: 200 }}
+                                    />
+                                  ))}
+                                </Box>
+                              )}
+                              {msg.content && (
+                                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+                                  {msg.content}
+                                </Typography>
+                              )}
+                            </Box>
                           ) : (
-                            <MessageContent content={msg.content} />
+                            <MessageContent content={msg.content} attachments={msg.attachments} />
                           )}
                         </Paper>
                       </Box>
@@ -951,80 +1336,177 @@ export default function ChatPage() {
 
             <Paper
               elevation={0}
+              onPaste={handlePaste}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
               sx={{
-                display: 'flex', alignItems: 'flex-end', gap: 0.5,
+                display: 'flex', flexDirection: 'column',
                 p: 0.75,
                 borderRadius: 3,
-                border: '1px solid', borderColor: 'divider',
-                bgcolor: alpha(theme.palette.background.paper, 0.6),
-                transition: 'border-color 0.2s',
+                border: '2px solid',
+                borderColor: isDragOver
+                  ? alpha(theme.palette.primary.main, 0.6)
+                  : alpha(theme.palette.divider, 1),
+                borderStyle: isDragOver ? 'dashed' : 'solid',
+                bgcolor: isDragOver
+                  ? alpha(theme.palette.primary.main, 0.04)
+                  : alpha(theme.palette.background.paper, 0.6),
+                transition: 'border-color 0.2s, background-color 0.2s',
                 '&:focus-within': {
-                  borderColor: alpha(theme.palette.primary.main, 0.4),
+                  borderColor: isDragOver
+                    ? alpha(theme.palette.primary.main, 0.6)
+                    : alpha(theme.palette.primary.main, 0.4),
                 },
               }}
             >
-              {/* @ mention button */}
-              <Tooltip title="Tag an agent">
+              {/* Attachment previews */}
+              {attachments.length > 0 && (
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, px: 0.75, pt: 0.5, pb: 0.75 }}>
+                  {attachments.map((att) => (
+                    <Box
+                      key={att.id}
+                      sx={{
+                        position: 'relative',
+                        display: 'inline-flex',
+                        borderRadius: 1.5,
+                        overflow: 'hidden',
+                        border: '1px solid',
+                        borderColor: 'divider',
+                      }}
+                    >
+                      {att.type.startsWith('image/') ? (
+                        <Box
+                          component="img"
+                          src={att.url}
+                          alt={att.name}
+                          sx={{ width: 64, height: 64, objectFit: 'cover' }}
+                        />
+                      ) : (
+                        <Box sx={{
+                          width: 64, height: 64,
+                          display: 'flex', flexDirection: 'column',
+                          alignItems: 'center', justifyContent: 'center',
+                          bgcolor: alpha(theme.palette.primary.main, 0.06),
+                          px: 0.5,
+                        }}>
+                          <InsertDriveFileIcon sx={{ fontSize: 20, color: 'text.secondary', mb: 0.25 }} />
+                          <Typography variant="caption" sx={{
+                            fontSize: 8, maxWidth: 56,
+                            overflow: 'hidden', textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap', textAlign: 'center',
+                          }}>
+                            {att.name}
+                          </Typography>
+                        </Box>
+                      )}
+                      <IconButton
+                        size="small"
+                        onClick={() => removeAttachment(att.id)}
+                        sx={{
+                          position: 'absolute', top: 1, right: 1,
+                          bgcolor: 'rgba(0,0,0,0.6)', color: 'white',
+                          width: 18, height: 18,
+                          '&:hover': { bgcolor: 'rgba(0,0,0,0.8)' },
+                        }}
+                      >
+                        <CloseIcon sx={{ fontSize: 12 }} />
+                      </IconButton>
+                    </Box>
+                  ))}
+                </Box>
+              )}
+
+              <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 0.5 }}>
+                {/* Hidden file input */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={ACCEPTED_TYPES}
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleFileSelect}
+                />
+
+                {/* Attach file button */}
+                <Tooltip title="Attach files or images">
+                  <IconButton
+                    size="small"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={sending}
+                    sx={{
+                      mb: 0.25,
+                      color: 'text.disabled',
+                      '&:hover': { color: 'primary.main' },
+                    }}
+                  >
+                    <AttachFileIcon sx={{ fontSize: 20 }} />
+                  </IconButton>
+                </Tooltip>
+
+                {/* @ mention button */}
+                <Tooltip title="Tag an agent">
+                  <IconButton
+                    size="small"
+                    onClick={handleMentionOpen}
+                    sx={{
+                      mb: 0.25,
+                      color: selectedAgent ? 'primary.main' : 'text.disabled',
+                      '&:hover': { color: 'primary.main' },
+                    }}
+                  >
+                    <AlternateEmailIcon sx={{ fontSize: 20 }} />
+                  </IconButton>
+                </Tooltip>
+
+                <TextField
+                  inputRef={inputRef}
+                  fullWidth
+                  placeholder={selectedAgent ? `Message ${selectedAgent.name}...` : 'Message AI Engine...'}
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  multiline
+                  maxRows={6}
+                  disabled={sending}
+                  variant="standard"
+                  InputProps={{
+                    disableUnderline: true,
+                    sx: {
+                      fontSize: 14, py: 0.75, px: 0.5,
+                      '& textarea': { lineHeight: 1.6 },
+                    },
+                  }}
+                />
+
                 <IconButton
-                  size="small"
-                  onClick={handleMentionOpen}
+                  onClick={handleSend}
+                  disabled={(!input.trim() && attachments.length === 0) || sending}
                   sx={{
                     mb: 0.25,
-                    color: selectedAgent ? 'primary.main' : 'text.disabled',
-                    '&:hover': { color: 'primary.main' },
+                    bgcolor: (input.trim() || attachments.length > 0) && !sending
+                      ? 'primary.main'
+                      : 'transparent',
+                    color: (input.trim() || attachments.length > 0) && !sending
+                      ? 'primary.contrastText'
+                      : 'text.disabled',
+                    width: 32, height: 32,
+                    '&:hover': {
+                      bgcolor: (input.trim() || attachments.length > 0) ? 'primary.dark' : 'transparent',
+                    },
+                    '&.Mui-disabled': {
+                      color: 'text.disabled',
+                    },
                   }}
                 >
-                  <AlternateEmailIcon sx={{ fontSize: 20 }} />
+                  <SendIcon sx={{ fontSize: 16 }} />
                 </IconButton>
-              </Tooltip>
-
-              <TextField
-                inputRef={inputRef}
-                fullWidth
-                placeholder={selectedAgent ? `Message ${selectedAgent.name}...` : 'Message AI Engine...'}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                multiline
-                maxRows={6}
-                disabled={sending}
-                variant="standard"
-                InputProps={{
-                  disableUnderline: true,
-                  sx: {
-                    fontSize: 14, py: 0.75, px: 0.5,
-                    '& textarea': { lineHeight: 1.6 },
-                  },
-                }}
-              />
-
-              <IconButton
-                onClick={handleSend}
-                disabled={!input.trim() || sending}
-                sx={{
-                  mb: 0.25,
-                  bgcolor: input.trim() && !sending
-                    ? 'primary.main'
-                    : 'transparent',
-                  color: input.trim() && !sending
-                    ? 'primary.contrastText'
-                    : 'text.disabled',
-                  width: 32, height: 32,
-                  '&:hover': {
-                    bgcolor: input.trim() ? 'primary.dark' : 'transparent',
-                  },
-                  '&.Mui-disabled': {
-                    color: 'text.disabled',
-                  },
-                }}
-              >
-                <SendIcon sx={{ fontSize: 16 }} />
-              </IconButton>
+              </Box>
             </Paper>
 
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mt: 1, position: 'relative' }}>
