@@ -172,7 +172,7 @@ export class WorkerHub {
 
   private async handleAuth(worker: ConnectedWorker, token: string): Promise<void> {
     try {
-      const jwt = await import('jsonwebtoken');
+      const jwt = await import(/* webpackIgnore: true */ 'jsonwebtoken');
       const secret = process.env.INSTANCE_SECRET ?? 'dev-secret';
       const decoded = jwt.default.verify(token, secret) as { workerId: string; [k: string]: unknown };
 

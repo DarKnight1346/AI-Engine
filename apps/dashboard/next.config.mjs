@@ -60,6 +60,7 @@ const nextConfig = {
       // NOTE: @prisma/client is handled via serverComponentsExternalPackages.
       const serverOnlyPackages = new Set([
         'ioredis',
+        'jsonwebtoken',
         '@ai-engine/scheduler',
         '@ai-engine/cluster',
         '@ai-engine/llm',
