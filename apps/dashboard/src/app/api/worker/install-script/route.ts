@@ -191,7 +191,9 @@ ok "Bundle extracted to \$INSTALL_DIR"
 
 info "Installing Node.js dependencies..."
 cd "\$INSTALL_DIR"
-pnpm install --prod --frozen-lockfile 2>/dev/null || pnpm install --prod 2>/dev/null || npm install --production 2>/dev/null
+# The bundle ships without a lockfile (the monorepo lockfile doesn't match the
+# worker's trimmed package.json), so we skip --frozen-lockfile entirely.
+pnpm install --prod --no-frozen-lockfile 2>&1 | tail -5 || npm install --production 2>&1 | tail -5
 ok "Dependencies installed"
 
 # ── 7. Register with the dashboard ──────────────────────────────────────────
@@ -272,6 +274,8 @@ if [[ "\$OS" == "Linux" ]]; then
 Description=AI Engine Worker (\$WORKER_ID)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -280,8 +284,6 @@ WorkingDirectory=\$INSTALL_DIR
 ExecStart=/usr/bin/env bash \$INSTALL_DIR/start-worker.sh
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ai-engine-worker

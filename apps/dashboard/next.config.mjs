@@ -39,6 +39,7 @@ const nextConfig = {
     '@ai-engine/skills',
     '@ai-engine/vault',
     '@ai-engine/planner',
+    '@ai-engine/agent-runtime',
   ],
   // NOTE: Do NOT add manual webpack externals for @prisma/client — that
   // emits bare require() calls that fail under pnpm's strict node_modules.
@@ -62,6 +63,8 @@ const nextConfig = {
         '@ai-engine/cluster',
         '@ai-engine/llm',
         '@ai-engine/shared',
+        '@ai-engine/agent-runtime',
+        '@ai-engine/memory',
       ]);
       config.externals = config.externals || [];
       config.externals.push(({ request }, callback) => {

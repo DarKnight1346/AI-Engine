@@ -286,12 +286,27 @@ export class LLMPool {
       systemPrompt = options.systemPrompt;
     }
 
-    const response = await client.messages.create({
+    // Build Anthropic API request params
+    const baseParams = {
       model,
       max_tokens: options.maxTokens ?? DEFAULT_CONFIG.llm.defaultMaxTokens,
       temperature: options.temperature ?? DEFAULT_CONFIG.llm.defaultTemperature,
       system: systemPrompt,
       messages: messages.map(toAnthropicMessage),
+    };
+
+    // Pass tools if provided — convert from LLMToolDefinition to Anthropic format
+    const anthropicTools = options.tools && options.tools.length > 0
+      ? options.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema as Anthropic.Messages.Tool.InputSchema,
+        }))
+      : undefined;
+
+    const response = await client.messages.create({
+      ...baseParams,
+      ...(anthropicTools ? { tools: anthropicTools } : {}),
     });
 
     const textContent = response.content
@@ -323,13 +338,25 @@ export class LLMPool {
     const baseUrl = (keyConfig.baseUrl ?? 'http://localhost:3456/v1').replace(/\/+$/, '');
     const url = `${baseUrl}/chat/completions`;
 
-    const body = {
+    const body: Record<string, any> = {
       model,
       max_tokens: options.maxTokens ?? DEFAULT_CONFIG.llm.defaultMaxTokens,
       temperature: options.temperature ?? DEFAULT_CONFIG.llm.defaultTemperature,
       messages: toOpenAIMessages(messages, options.systemPrompt),
       stream: false,
     };
+
+    // Pass tools in OpenAI format if provided
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools.map((t) => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      }));
+    }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (keyConfig.apiKey && keyConfig.apiKey !== 'not-needed') {
@@ -353,9 +380,21 @@ export class LLMPool {
     const choice = data.choices?.[0];
     const content = choice?.message?.content ?? '';
 
+    // Extract tool calls from OpenAI format if present
+    const openAIToolCalls = choice?.message?.tool_calls ?? [];
+    const toolCalls = openAIToolCalls.map((tc: any) => ({
+      id: tc.id ?? `call_${Date.now()}`,
+      name: tc.function?.name ?? '',
+      input: tc.function?.arguments
+        ? (typeof tc.function.arguments === 'string'
+            ? JSON.parse(tc.function.arguments)
+            : tc.function.arguments)
+        : {},
+    }));
+
     return {
       content,
-      toolCalls: [], // Proxy doesn't support tool use currently
+      toolCalls,
       usage: {
         inputTokens: data.usage?.prompt_tokens ?? 0,
         outputTokens: data.usage?.completion_tokens ?? 0,

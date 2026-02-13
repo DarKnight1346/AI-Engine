@@ -20,6 +20,9 @@ importers:
 
   apps/dashboard:
     dependencies:
+      '@ai-engine/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
       '@ai-engine/auth':
         specifier: workspace:*
         version: link:../../packages/auth

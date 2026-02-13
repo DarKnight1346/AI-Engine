@@ -95,6 +95,8 @@ async function registerSystemd(opts: WorkerServiceOptions): Promise<void> {
 Description=AI Engine Worker (${opts.workerId})
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -103,8 +105,6 @@ WorkingDirectory=${opts.projectDir}
 ExecStart=/usr/bin/env bash "${wrapperPath}"
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ai-engine-worker

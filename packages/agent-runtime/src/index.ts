@@ -1,4 +1,11 @@
 export { AgentRunner } from './agent-runner.js';
 export { ToolRegistry } from './tool-registry.js';
+export { ToolIndex } from './tool-index.js';
+export { ToolExecutor, routeTool } from './tool-executor.js';
+export { ChatExecutor } from './chat-executor.js';
 export { EnvironmentTools } from './tools/environment.js';
-export type { Tool, ToolResult, AgentRunnerOptions } from './types.js';
+export { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
+export type { Tool, ToolResult, ToolContext, AgentRunnerOptions } from './types.js';
+export type { ToolManifestEntry, ToolSearchResult } from './tool-index.js';
+export type { ChatExecutorOptions, ChatExecutorResult } from './chat-executor.js';
+export type { MetaToolOptions } from './tools/meta-tools.js';

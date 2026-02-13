@@ -144,10 +144,11 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // ── Call the LLM ─────────────────────────────────────────────────
+    // ── Call the LLM via ChatExecutor (agentic loop with tool discovery) ──
     let aiContent: string;
     try {
       const { LLMPool } = await import('@ai-engine/llm');
+      const { ChatExecutor } = await import('@ai-engine/agent-runtime');
 
       const apiKeys = await db.apiKey.findMany({ where: { isActive: true } });
       if (apiKeys.length === 0) {
@@ -168,6 +169,35 @@ export async function POST(request: NextRequest) {
         strategy: 'round-robin',
       });
 
+      // Resolve agent's toolConfig for tool filtering
+      const agentToolConfig = agent?.toolConfig
+        ? (typeof agent.toolConfig === 'object' ? agent.toolConfig as Record<string, boolean> : {})
+        : undefined;
+
+      // Build memory search function for the search_memory meta-tool
+      const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
+        try {
+          const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
+          const embeddings = new EmbeddingService();
+          const memService = new MemoryService(embeddings);
+          const results = await memService.search(query, scope as any, scopeOwnerId, 5);
+          if (results.length === 0) return 'No matching memories found.';
+          return results.map((m: any) => `- [${m.scope}] ${m.content}`).join('\n');
+        } catch {
+          return 'Memory search unavailable.';
+        }
+      };
+
+      // Create the ChatExecutor with meta-tools (discover, execute, memory)
+      const executor = new ChatExecutor({
+        llm: pool,
+        toolConfig: agentToolConfig,
+        tier: 'standard',
+        searchMemory: searchMemoryFn,
+        userId: contextUser?.id,
+        teamId: contextMembership?.teamId,
+      });
+
       // Build conversation history from DB
       const history = await db.chatMessage.findMany({
         where: { sessionId: session.id },
@@ -185,10 +215,8 @@ export async function POST(request: NextRequest) {
         llmMessages.push({ role: 'user' as const, content: message });
       }
 
-      const result = await pool.call(llmMessages, {
-        tier: 'standard',
-        systemPrompt,
-      });
+      // Run the agentic loop — agent discovers & executes tools as needed
+      const result = await executor.execute(llmMessages, systemPrompt);
       aiContent = result.content;
     } catch (llmErr: any) {
       aiContent = `I'm not able to respond yet because no API keys have been configured. Please add API keys in Settings > API Keys.\n\nError: ${llmErr.message}`;
