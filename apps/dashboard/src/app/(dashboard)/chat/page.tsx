@@ -141,12 +141,19 @@ function CodeBlock({ content }: { content: string }) {
 
 function FormattedText({ text }: { text: string }) {
   // Regex for bold, italic, inline code, markdown links, and bare URLs
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s)<>]+)/g);
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s)<>\]]+)/g);
   return (
     <>
       {parts.map((part, i) => {
-        if (part.startsWith('**') && part.endsWith('**'))
-          return <strong key={i}>{part.slice(2, -2)}</strong>;
+        if (part.startsWith('**') && part.endsWith('**')) {
+          const inner = part.slice(2, -2);
+          // If the bold content is a URL, render as a link instead of just bold text
+          if (/^https?:\/\//.test(inner)) {
+            const cleaned = cleanUrl(inner);
+            return <a key={i} href={cleaned} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9', fontWeight: 700, wordBreak: 'break-all' }}>{cleaned}</a>;
+          }
+          return <strong key={i}><FormattedText text={inner} /></strong>;
+        }
         if (part.startsWith('`') && part.endsWith('`'))
           return (
             <Box key={i} component="code" sx={{
@@ -157,39 +164,79 @@ function FormattedText({ text }: { text: string }) {
               {part.slice(1, -1)}
             </Box>
           );
-        if (part.startsWith('*') && part.endsWith('*') && !part.startsWith('**'))
-          return <em key={i}>{part.slice(1, -1)}</em>;
+        if (part.startsWith('*') && part.endsWith('*') && !part.startsWith('**')) {
+          const inner = part.slice(1, -1);
+          // If the italic content is a URL, render as a link
+          if (/^https?:\/\//.test(inner)) {
+            const cleaned = cleanUrl(inner);
+            return <a key={i} href={cleaned} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9', fontStyle: 'italic', wordBreak: 'break-all' }}>{cleaned}</a>;
+          }
+          return <em key={i}><FormattedText text={inner} /></em>;
+        }
         const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
         if (linkMatch)
-          return <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9' }}>{linkMatch[1]}</a>;
+          return <a key={i} href={cleanUrl(linkMatch[2])} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9' }}>{linkMatch[1]}</a>;
         // Bare URLs → clickable link opening in new tab
-        if (/^https?:\/\//.test(part))
-          return <a key={i} href={part} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9', wordBreak: 'break-all' }}>{part}</a>;
+        if (/^https?:\/\//.test(part)) {
+          const cleaned = cleanUrl(part);
+          return <a key={i} href={cleaned} target="_blank" rel="noopener noreferrer" style={{ color: '#90caf9', wordBreak: 'break-all' }}>{cleaned}</a>;
+        }
         return <Fragment key={i}>{part}</Fragment>;
       })}
     </>
   );
 }
 
-/** Detect image URLs in text (common image hosting patterns + xAI image CDN) */
-/** Detect image URLs in text (common extensions + xAI CDN) */
+/** Strip common trailing punctuation that regex might capture at end of URLs */
+function cleanUrl(url: string): string {
+  return url.replace(/[.,;:!?'")\]]+$/, '');
+}
+
+/** Detect image URLs in text (common extensions + known image hosting) */
 function isImageUrl(url: string): boolean {
-  const lower = url.toLowerCase();
-  if (/\.(png|jpg|jpeg|gif|webp|svg)(\?|$)/i.test(lower)) return true;
+  const lower = cleanUrl(url).toLowerCase();
+  // Direct image file extensions
+  if (/\.(png|jpg|jpeg|gif|webp|svg|bmp|tiff|avif)(\?|#|$)/i.test(lower)) return true;
+  // Known image CDNs / hosting services
   if (/images\.x\.ai|imgen\.x\.ai|cdn\.x\.ai/i.test(lower)) return true;
+  if (/images\.unsplash\.com/i.test(lower)) return true;
+  if (/\.pexels\.com\/photo\//i.test(lower)) return true;
+  if (/\.imgur\.com\//i.test(lower)) return true;
+  if (/upload\.wikimedia\.org/i.test(lower)) return true;
+  if (/\.googleusercontent\.com/i.test(lower)) return true;
+  if (/\.pinimg\.com/i.test(lower)) return true;
+  if (/\.freepik\.com.*\.(jpg|png|jpeg)/i.test(lower)) return true;
+  if (/\.vecteezy\.com.*\.(jpg|png|jpeg)/i.test(lower)) return true;
+  if (/\.hearstapps\.com.*\.(jpg|png|jpeg)/i.test(lower)) return true;
+  if (/\.pethelpful\.com\/.image\//i.test(lower)) return true;
   return false;
 }
 
-/** Detect video URLs in text */
+/** Detect embeddable video file URLs (direct .mp4/.webm, not YouTube page links) */
 function isVideoUrl(url: string): boolean {
-  const lower = url.toLowerCase();
-  if (/\.(mp4|webm|mov|ogg)(\?|$)/i.test(lower)) return true;
+  const lower = cleanUrl(url).toLowerCase();
+  if (/\.(mp4|webm|mov|ogg)(\?|#|$)/i.test(lower)) return true;
   if (/vidgen\.x\.ai/i.test(lower)) return true;
   return false;
 }
 
-/** Match any URL in text */
-const URL_REGEX = /https?:\/\/[^\s)<>]+/g;
+/** Match any URL in text — NOTE: intentionally no `g` flag at module scope; clone with `g` at call site */
+const URL_PATTERN = /https?:\/\/[^\s)<>\]]+/;
+
+/** Find all URLs in a string */
+function findAllUrls(text: string): string[] {
+  const regex = new RegExp(URL_PATTERN.source, 'g');
+  const matches = text.match(regex) ?? [];
+  return matches.map(cleanUrl);
+}
+
+/** Split text around URLs */
+function splitAroundUrls(text: string): { parts: string[]; urls: string[] } {
+  const regex = new RegExp(URL_PATTERN.source, 'g');
+  const parts = text.split(regex);
+  const rawUrls = text.match(regex) ?? [];
+  return { parts, urls: rawUrls.map(cleanUrl) };
+}
 
 /** Trigger a download for a URL */
 function downloadUrl(url: string, filename?: string) {
@@ -569,6 +616,36 @@ function getYouTubeId(url: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Check if a URL is a known video platform page (not a direct .mp4 file) */
+function isVideoPageUrl(url: string): boolean {
+  const lower = cleanUrl(url).toLowerCase();
+  // Known video platforms
+  if (/youtube\.com\/watch|youtu\.be\/|youtube\.com\/shorts\//i.test(lower)) return true;
+  if (/vimeo\.com\/\d+/i.test(lower)) return true;
+  if (/dailymotion\.com\/video\//i.test(lower)) return true;
+  if (/tiktok\.com\/@[^/]+\/video\//i.test(lower)) return true;
+  if (/facebook\.com\/.*\/videos\//i.test(lower)) return true;
+  if (/fb\.watch\//i.test(lower)) return true;
+  if (/twitter\.com\/.*\/status\/|x\.com\/.*\/status\//i.test(lower)) return true;
+  if (/twitch\.tv\//i.test(lower)) return true;
+  if (/rumble\.com\/v/i.test(lower)) return true;
+  if (/bitchute\.com\/video\//i.test(lower)) return true;
+  if (/odysee\.com\/@/i.test(lower)) return true;
+  if (/instagram\.com\/(reel|p)\//i.test(lower)) return true;
+  if (/reddit\.com\/.*\/comments\//i.test(lower)) return true;
+  if (/bilibili\.com\/video\//i.test(lower)) return true;
+  return false;
+}
+
+/** Get a thumbnail URL for a video page URL (best-effort) */
+function getVideoThumbnail(url: string): string {
+  const ytId = getYouTubeId(url);
+  if (ytId) return `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`;
+  // Vimeo thumbnails require an API call — no easy static URL
+  // Other platforms: no reliable static thumbnail URL
+  return '';
+}
+
 /** Parse <!--VIDEO_RESULTS-->...<!--/VIDEO_RESULTS--> blocks from content */
 function extractVideoCards(text: string): { cards: VideoCard[]; cleaned: string } {
   const regex = /<!--VIDEO_RESULTS-->([\s\S]*?)<!--\/VIDEO_RESULTS-->/g;
@@ -584,13 +661,115 @@ function extractVideoCards(text: string): { cards: VideoCard[]; cleaned: string 
 }
 
 /**
- * Gallery for video SEARCH results — displays thumbnail cards with
- * embedded YouTube players on click, or opens the video in a new tab.
+ * Auto-detect video listings in text and build VideoCards.
+ * Works for ANY video platform — uses context clues (duration patterns,
+ * markdown links in numbered lists, known video domains) rather than
+ * only matching specific platforms.
+ */
+function autoDetectVideoCards(text: string): VideoCard[] {
+  const cards: VideoCard[] = [];
+  const seen = new Set<string>();
+
+  // ── Strategy 1: Markdown links with known video platform URLs ──
+  const mdLinkRegex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+  let match;
+  while ((match = mdLinkRegex.exec(text)) !== null) {
+    const title = match[1];
+    const url = cleanUrl(match[2]);
+    if (isVideoPageUrl(url) && !seen.has(url)) {
+      seen.add(url);
+      cards.push({ title, link: url, imageUrl: getVideoThumbnail(url), duration: '', channel: '' });
+    }
+  }
+
+  // ── Strategy 2: Markdown links that have a duration nearby ──
+  // This catches ANY platform. Pattern: [Title](url) ... (MM:SS)
+  // Re-run the regex (stateful — reset)
+  const mdLinkRegex2 = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+  while ((match = mdLinkRegex2.exec(text)) !== null) {
+    const title = match[1];
+    const url = cleanUrl(match[2]);
+    if (seen.has(url)) continue;
+    // Check if there's a duration within ~60 chars after the link
+    const afterLink = text.slice(match.index + match[0].length, match.index + match[0].length + 60);
+    const durationNearby = afterLink.match(/\(?\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\)?/);
+    if (durationNearby) {
+      seen.add(url);
+      cards.push({ title, link: url, imageUrl: getVideoThumbnail(url), duration: durationNearby[1], channel: '' });
+    }
+  }
+
+  // ── Strategy 3: Numbered list items with URLs and durations ──
+  // Catches patterns like: "1. Title https://example.com/video (10:32)"
+  // or "1. Title (10:32) - Channel\n   https://example.com/video"
+  const numberedLineRegex = /^\s*\d+[.)]\s+(.+)$/gm;
+  while ((match = numberedLineRegex.exec(text)) !== null) {
+    const lineContent = match[1];
+    const lineUrls = findAllUrls(lineContent);
+    const durationMatch = lineContent.match(/\(?\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\)?/);
+    for (const url of lineUrls) {
+      if (seen.has(url) || isImageUrl(url) || isVideoUrl(url)) continue; // skip image/direct-video URLs
+      if (durationMatch || isVideoPageUrl(url)) {
+        seen.add(url);
+        // Extract title: text before the URL
+        const titlePart = lineContent.split(url)[0]
+          .replace(/\[[^\]]*\]\([^)]*\)/g, '')  // remove markdown links
+          .replace(/\(?\d{1,2}:\d{2}(?::\d{2})?\)?/g, '') // remove durations
+          .replace(/[-–—]\s*$/, '')
+          .trim();
+        cards.push({
+          title: titlePart || url,
+          link: url,
+          imageUrl: getVideoThumbnail(url),
+          duration: durationMatch ? durationMatch[1] : '',
+          channel: '',
+        });
+      }
+    }
+  }
+
+  // ── Strategy 4: Bare known video platform URLs not already captured ──
+  const allUrls = findAllUrls(text);
+  for (const url of allUrls) {
+    if (seen.has(url) || isImageUrl(url) || isVideoUrl(url)) continue;
+    if (isVideoPageUrl(url)) {
+      seen.add(url);
+      cards.push({ title: '', link: url, imageUrl: getVideoThumbnail(url), duration: '', channel: '' });
+    }
+  }
+
+  // ── Enrich: try to find channel/source info near each card's URL ──
+  for (const card of cards) {
+    if (!card.duration) {
+      const escaped = card.link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const dm = text.match(new RegExp(escaped + '[^\\n]{0,30}\\(?(\\d{1,2}:\\d{2}(?::\\d{2})?)\\)?'));
+      if (dm) card.duration = dm[1];
+    }
+    if (!card.channel) {
+      // Look for italic text near the card's URL: _Channel Name_ - Description
+      const escaped = card.link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const afterUrl = text.split(card.link)[1]?.slice(0, 200) ?? '';
+      const channelMatch = afterUrl.match(/\n\s*_([^_]+)_/);
+      if (channelMatch) card.channel = channelMatch[1].trim();
+    }
+  }
+
+  return cards;
+}
+
+/**
+ * Gallery for video SEARCH results — displays thumbnail cards for any
+ * video platform. YouTube videos get inline embeds; others open in a new tab.
  */
 function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
   const theme = useTheme();
   const [playingIdx, setPlayingIdx] = useState<number | null>(null);
   const cols = cards.length <= 2 ? 1 : cards.length <= 4 ? 2 : 3;
+
+  /** Extract a short domain label from a URL */
+  const getDomain = (url: string) => {
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+  };
 
   return (
     <Box sx={{ my: 1.5 }}>
@@ -608,6 +787,8 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
         {cards.map((card, i) => {
           const ytId = getYouTubeId(card.link);
           const isPlaying = playingIdx === i && ytId;
+          const hasThumbnail = !!card.imageUrl;
+          const domain = getDomain(card.link);
 
           return (
             <Box
@@ -625,7 +806,7 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
               }}
             >
               {/* Thumbnail / Embed area */}
-              <Box sx={{ position: 'relative', aspectRatio: '16 / 9', bgcolor: 'black' }}>
+              <Box sx={{ position: 'relative', aspectRatio: '16 / 9', bgcolor: '#111' }}>
                 {isPlaying && ytId ? (
                   <Box
                     component="iframe"
@@ -636,7 +817,7 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
                   />
                 ) : (
                   <>
-                    {card.imageUrl && (
+                    {hasThumbnail ? (
                       <Box
                         component="img"
                         src={card.imageUrl}
@@ -644,6 +825,21 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
                         loading="lazy"
                         sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
                       />
+                    ) : (
+                      /* Gradient placeholder for videos without thumbnails */
+                      <Box sx={{
+                        width: '100%', height: '100%',
+                        background: `linear-gradient(135deg, ${alpha(theme.palette.primary.dark, 0.3)} 0%, ${alpha(theme.palette.secondary.dark, 0.2)} 100%)`,
+                        display: 'flex', flexDirection: 'column',
+                        alignItems: 'center', justifyContent: 'center', gap: 0.5,
+                      }}>
+                        <PlayArrowIcon sx={{ color: alpha(theme.palette.common.white, 0.5), fontSize: 40 }} />
+                        {domain && (
+                          <Typography variant="caption" sx={{ color: alpha(theme.palette.common.white, 0.4), fontSize: 10 }}>
+                            {domain}
+                          </Typography>
+                        )}
+                      </Box>
                     )}
                     {/* Play overlay */}
                     <Box
@@ -652,19 +848,21 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
                         position: 'absolute', inset: 0,
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         cursor: 'pointer',
-                        bgcolor: 'rgba(0,0,0,0.15)',
+                        bgcolor: hasThumbnail ? 'rgba(0,0,0,0.15)' : 'transparent',
                         transition: 'background-color 0.2s',
                         '&:hover': { bgcolor: 'rgba(0,0,0,0.35)' },
                       }}
                     >
-                      <Box sx={{
-                        width: 48, height: 48, borderRadius: '50%',
-                        bgcolor: 'rgba(0,0,0,0.7)', display: 'flex',
-                        alignItems: 'center', justifyContent: 'center',
-                        backdropFilter: 'blur(4px)',
-                      }}>
-                        <PlayArrowIcon sx={{ color: 'white', fontSize: 28 }} />
-                      </Box>
+                      {hasThumbnail && (
+                        <Box sx={{
+                          width: 48, height: 48, borderRadius: '50%',
+                          bgcolor: 'rgba(0,0,0,0.7)', display: 'flex',
+                          alignItems: 'center', justifyContent: 'center',
+                          backdropFilter: 'blur(4px)',
+                        }}>
+                          <PlayArrowIcon sx={{ color: 'white', fontSize: 28 }} />
+                        </Box>
+                      )}
                     </Box>
                     {/* Duration badge */}
                     {card.duration && (
@@ -706,11 +904,11 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
                     '&:hover': { color: 'primary.main' },
                   }}
                 >
-                  {card.title}
+                  {card.title || domain || 'Video'}
                 </Typography>
-                {card.channel && (
+                {(card.channel || domain) && (
                   <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11, mt: 0.25, display: 'block' }}>
-                    {card.channel}
+                    {card.channel || domain}
                   </Typography>
                 )}
                 {/* Open in new tab link */}
@@ -740,15 +938,27 @@ function VideoSearchGallery({ cards }: { cards: VideoCard[] }) {
 
 function MessageContent({ content, attachments }: { content: string; attachments?: Attachment[] }) {
   // ── Extract structured video search results ──
-  const { cards: videoSearchCards, cleaned: contentAfterVideoExtract } = extractVideoCards(content);
+  // First try the <!--VIDEO_RESULTS--> marker blocks (if the LLM passed them through)
+  let { cards: videoSearchCards, cleaned: contentAfterVideoExtract } = extractVideoCards(content);
+
+  // Fallback: auto-detect video page URLs (YouTube, Vimeo) from the content
+  if (videoSearchCards.length === 0) {
+    const autoCards = autoDetectVideoCards(contentAfterVideoExtract);
+    if (autoCards.length >= 2) {
+      videoSearchCards = autoCards;
+    }
+  }
 
   // ── Collect all media URLs across the entire content for galleries ──
   // Strip markdown image/link syntax first, then find all media URLs.
+  // Also handle bold/italic wrappers around markdown images: **![alt](url)** → url
   let processedContent = contentAfterVideoExtract
-    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, '$1')
-    .replace(/\[[^\]]*\]\((https?:\/\/[^)]+\.(?:mp4|webm|mov|ogg|png|jpg|jpeg|gif|webp|svg)(?:\?[^)]*)?)\)/gi, '$1');
+    .replace(/\*{1,2}!\[[^\]]*\]\((https?:\/\/[^)]+)\)\*{1,2}/g, '$1')  // **![alt](url)** or *![alt](url)*
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, '$1')                  // ![alt](url)
+    .replace(/\[[^\]]*\]\((https?:\/\/[^)]+\.(?:mp4|webm|mov|ogg|png|jpg|jpeg|gif|webp|svg)(?:\?[^)]*)?)\)/gi, '$1')
+    .replace(/\*{1,2}(https?:\/\/[^\s*]+)\*{1,2}/g, '$1');               // **url** or *url* → url
 
-  const allUrls = processedContent.match(URL_REGEX) ?? [];
+  const allUrls = findAllUrls(processedContent);
   const imageUrls = allUrls.filter((u) => isImageUrl(u));
   const videoUrls = allUrls.filter((u) => isVideoUrl(u));
   const useImageGallery = imageUrls.length >= 2;
@@ -768,12 +978,22 @@ function MessageContent({ content, attachments }: { content: string; attachments
     }
   }
 
-  // If showing a video search gallery, strip the human-readable listing
-  // (numbered lines with YouTube links + titles) since the card gallery replaces it.
+  // If showing a video search gallery, strip the video listing from the text
+  // since the VideoSearchGallery component replaces it visually.
   if (videoSearchCards.length > 0) {
     for (const card of videoSearchCards) {
+      // Strip markdown links: [Title](url)
+      if (card.link && card.title) {
+        const escapedUrl = card.link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedTitle = card.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Remove [Title](url) pattern
+        processedContent = processedContent.replace(
+          new RegExp(`\\[${escapedTitle}\\]\\(${escapedUrl}\\)`, 'g'), ''
+        );
+      }
+      // Strip bare URLs
       if (card.link) processedContent = processedContent.split(card.link).join('');
-      // Also strip lines that are just the card title/metadata from the tool output
+      // Strip lines that are just the card title/metadata
       if (card.title) {
         const escapedTitle = card.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         processedContent = processedContent.replace(
@@ -781,14 +1001,23 @@ function MessageContent({ content, attachments }: { content: string; attachments
         );
       }
     }
+    // Strip any remaining empty markdown link remnants like []() 
+    processedContent = processedContent.replace(/\[\s*\]\(\s*\)/g, '');
   }
 
-  // Clean up straggling list markers left behind (e.g. "1. - " or "- ")
+  // Clean up straggling list markers and near-empty lines left behind
   if (useImageGallery || useVideoGallery || videoSearchCards.length > 0) {
     processedContent = processedContent
-      .replace(/^\s*\d+[.)]\s*[-–—]?\s*$/gm, '')  // empty numbered list items
-      .replace(/^\s*[-*]\s*$/gm, '')                 // empty bullet items
-      .replace(/\n{3,}/g, '\n\n');                   // collapse excess blank lines
+      .replace(/^\s*\d+[.)]\s*[-–—]?\s*$/gm, '')     // empty numbered list items
+      .replace(/^\s*\d+[.)]\s*\([^)]*\)\s*$/gm, '')   // numbered items that are just (duration)
+      .replace(/^\s*[-*]\s*$/gm, '')                    // empty bullet items
+      .replace(/^\s*\(\d{1,2}:\d{2}(?::\d{2})?\)\s*$/gm, '') // standalone duration lines
+      .replace(/^\s*_[^_]+_\s*[-–—].*$/gm, (line) => {
+        // Strip italic channel lines that are remnants of video listings
+        if (videoSearchCards.length > 0) return '';
+        return line;
+      })
+      .replace(/\n{3,}/g, '\n\n');                      // collapse excess blank lines
   }
 
   // Split by code blocks
@@ -894,12 +1123,11 @@ function MessageContent({ content, attachments }: { content: string; attachments
               );
 
               // Check for media URLs (images, videos) in the paragraph
-              const urlMatches = trimmed.match(URL_REGEX);
+              const urlMatches = findAllUrls(trimmed);
               const hasMediaUrls = urlMatches?.some(u => isImageUrl(u) || isVideoUrl(u));
               if (hasMediaUrls) {
                 // Split around URLs and render media inline
-                const parts = trimmed.split(URL_REGEX);
-                const urls = trimmed.match(URL_REGEX) ?? [];
+                const { parts, urls } = splitAroundUrls(trimmed);
                 const elements: React.ReactNode[] = [];
                 for (let pi = 0; pi < parts.length; pi++) {
                   if (parts[pi].trim()) {
@@ -1070,6 +1298,8 @@ export default function ChatPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const acknowledgedTasksRef = useRef<Set<string>>(new Set());
+  const abortRef = useRef<AbortController | null>(null);
+  const recoverySessionRef = useRef<string | null>(null);
 
   // ── File attachment handlers ──
   const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
@@ -1203,6 +1433,8 @@ export default function ChatPage() {
   useEffect(() => { loadSessions(); loadAgents(); }, [loadSessions, loadAgents]);
 
   // ── Load messages for a session ──
+  // Also starts recovery polling if the last message is a user message
+  // with no AI response yet (the response might still be generating).
   const loadMessages = useCallback(async (sid: string) => {
     try {
       const res = await fetch(`/api/chat/messages?sessionId=${sid}`);
@@ -1223,22 +1455,111 @@ export default function ChatPage() {
       }));
       setMessages(loaded);
       setContextTokens(estimateTokensFromMessages(loaded));
+
+      // Check if the last message is from the user (AI response might be in-flight)
+      if (loaded.length > 0 && loaded[loaded.length - 1].role === 'user') {
+        const lastUserMsgTime = loaded[loaded.length - 1].timestamp.getTime();
+        const ageMs = Date.now() - lastUserMsgTime;
+        // Only poll if the user message is recent (within 10 minutes)
+        if (ageMs < 10 * 60 * 1000) {
+          recoverySessionRef.current = sid;
+          setSending(true);
+          // Poll in the background for the AI response
+          (async () => {
+            for (let attempt = 0; attempt < 10; attempt++) {
+              await new Promise((r) => setTimeout(r, 3000));
+              // Stop if the user navigated away from this session
+              if (recoverySessionRef.current !== sid) return;
+              try {
+                const pollRes = await fetch(`/api/chat/messages?sessionId=${sid}`);
+                const pollData = await pollRes.json();
+                const pollMsgs = pollData.messages ?? [];
+                const hasNewAi = pollMsgs.some(
+                  (m: any) => m.role === 'ai' && new Date(m.timestamp).getTime() > lastUserMsgTime
+                );
+                if (hasNewAi) {
+                  if (recoverySessionRef.current !== sid) return;
+                  const refreshed = pollMsgs.map((m: any) => ({
+                    id: m.id,
+                    role: m.role as 'user' | 'ai',
+                    content: m.content,
+                    timestamp: new Date(m.timestamp),
+                    agentName: m.agentName,
+                    attachments: m.attachments?.map((a: any) => ({
+                      id: a.id || crypto.randomUUID(),
+                      name: a.name,
+                      type: a.type,
+                      url: a.url,
+                      size: a.size ?? 0,
+                    })),
+                  }));
+                  setMessages(refreshed);
+                  setContextTokens(estimateTokensFromMessages(refreshed));
+                  setSending(false);
+                  recoverySessionRef.current = null;
+                  return;
+                }
+              } catch { /* polling error — retry */ }
+            }
+            // Timed out after ~30s — stop gracefully
+            if (recoverySessionRef.current === sid) {
+              setSending(false);
+              recoverySessionRef.current = null;
+            }
+          })();
+        }
+      }
     } catch {
       setMessages([]);
       setContextTokens(0);
     }
   }, []);
 
+  // ── Load background tasks for a session ──
+  const loadBackgroundTasks = useCallback(async (sid: string) => {
+    try {
+      const res = await fetch(`/api/chat/tasks?sessionId=${sid}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const tasks: BackgroundTaskInfo[] = data.tasks ?? [];
+      if (tasks.length > 0) {
+        setBackgroundTasks(tasks);
+        // Pre-acknowledge tasks that are already completed so we don't
+        // re-inject their messages (they're already in the DB)
+        for (const task of tasks) {
+          if (task.status === 'completed' || task.status === 'failed') {
+            acknowledgedTasksRef.current.add(task.id);
+          }
+        }
+      } else {
+        setBackgroundTasks([]);
+      }
+    } catch {
+      setBackgroundTasks([]);
+    }
+  }, []);
+
   // ── Switch session ──
   const switchSession = useCallback((sid: string) => {
+    // Abort any in-flight stream or recovery polling
+    abortRef.current?.abort();
+    abortRef.current = null;
+    recoverySessionRef.current = null;
+    setSending(false);
+
     setSessionId(sid);
-    setBackgroundTasks([]);
     acknowledgedTasksRef.current.clear();
     loadMessages(sid);
-  }, [loadMessages]);
+    loadBackgroundTasks(sid);
+  }, [loadMessages, loadBackgroundTasks]);
 
   // ── New conversation ──
   const startNewConversation = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    recoverySessionRef.current = null;
+    setSending(false);
+
     setSessionId(null);
     setMessages([]);
     setInput('');
@@ -1330,9 +1651,6 @@ export default function ChatPage() {
   const filteredAgents = agents.filter((a) =>
     !mentionQuery || a.name.toLowerCase().includes(mentionQuery)
   );
-
-  // ── Active SSE abort controller (to cancel streaming on unmount or new send) ──
-  const abortRef = useRef<AbortController | null>(null);
 
   // ── Send message (streaming via SSE — multi-agent) ──
   const handleSend = async () => {
@@ -2243,6 +2561,38 @@ export default function ChatPage() {
               );
             })()}
 
+            <Box
+              className={sending ? 'siri-glow-active' : undefined}
+              sx={{
+                position: 'relative',
+                borderRadius: 3,
+                '&.siri-glow-active::before': {
+                  content: '""',
+                  position: 'absolute',
+                  inset: -1,
+                  borderRadius: 'inherit',
+                  padding: '2px',
+                  background: 'conic-gradient(from var(--glow-angle, 0deg), #6366f1, #06b6d4, #a855f7, #ec4899, #6366f1)',
+                  WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+                  WebkitMaskComposite: 'xor',
+                  maskComposite: 'exclude',
+                  animation: 'siriRotate 3s linear infinite',
+                  opacity: 0.9,
+                  zIndex: 1,
+                },
+                '&.siri-glow-active::after': {
+                  content: '""',
+                  position: 'absolute',
+                  inset: -8,
+                  borderRadius: 'inherit',
+                  background: 'conic-gradient(from var(--glow-angle, 0deg), rgba(99,102,241,0.25), rgba(6,182,212,0.25), rgba(168,85,247,0.25), rgba(236,72,153,0.25), rgba(99,102,241,0.25))',
+                  filter: 'blur(16px)',
+                  animation: 'siriRotate 3s linear infinite, siriPulse 2s ease-in-out infinite',
+                  opacity: 0.5,
+                  zIndex: 0,
+                },
+              }}
+            >
             <Paper
               elevation={0}
               onPaste={handlePaste}
@@ -2254,18 +2604,24 @@ export default function ChatPage() {
                 p: 0.75,
                 borderRadius: 3,
                 border: '2px solid',
-                borderColor: isDragOver
-                  ? alpha(theme.palette.primary.main, 0.6)
-                  : alpha(theme.palette.divider, 1),
+                borderColor: sending
+                  ? 'transparent'
+                  : isDragOver
+                    ? alpha(theme.palette.primary.main, 0.6)
+                    : alpha(theme.palette.divider, 1),
                 borderStyle: isDragOver ? 'dashed' : 'solid',
                 bgcolor: isDragOver
                   ? alpha(theme.palette.primary.main, 0.04)
                   : alpha(theme.palette.background.paper, 0.6),
                 transition: 'border-color 0.2s, background-color 0.2s',
+                position: 'relative',
+                zIndex: 2,
                 '&:focus-within': {
-                  borderColor: isDragOver
-                    ? alpha(theme.palette.primary.main, 0.6)
-                    : alpha(theme.palette.primary.main, 0.4),
+                  borderColor: sending
+                    ? 'transparent'
+                    : isDragOver
+                      ? alpha(theme.palette.primary.main, 0.6)
+                      : alpha(theme.palette.primary.main, 0.4),
                 },
               }}
             >
@@ -2423,6 +2779,7 @@ export default function ChatPage() {
                 </IconButton>
               </Box>
             </Paper>
+            </Box>
 
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mt: 1, position: 'relative' }}>
               <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: 11 }}>
