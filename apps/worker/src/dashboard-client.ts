@@ -15,6 +15,7 @@ export interface DashboardClientOptions {
   token: string;
   capabilities: NodeCapabilities;
   onTaskAssigned: (msg: Extract<DashboardWsMessage, { type: 'task:assign' }>) => void;
+  onToolExecute: (msg: Extract<DashboardWsMessage, { type: 'tool:execute' }>) => void;
   onAgentCall: (msg: Extract<DashboardWsMessage, { type: 'agent:call' }>) => void;
   onAgentResponse: (msg: Extract<DashboardWsMessage, { type: 'agent:response' }>) => void;
   onConfigUpdate: (msg: Extract<DashboardWsMessage, { type: 'config:update' }>) => void;
@@ -119,6 +120,10 @@ export class DashboardClient {
     this.sendRaw({ type: 'task:failed', taskId, error });
   }
 
+  sendToolResult(callId: string, success: boolean, output: string): void {
+    this.sendRaw({ type: 'tool:result', callId, success, output });
+  }
+
   sendAgentCall(callId: string, fromAgentId: string, targetAgentId: string, input: string): void {
     this.sendRaw({ type: 'agent:call', callId, fromAgentId, targetAgentId, input });
   }
@@ -164,6 +169,10 @@ export class DashboardClient {
 
       case 'task:cancel':
         // TODO: implement task cancellation
+        break;
+
+      case 'tool:execute':
+        this.opts.onToolExecute(msg);
         break;
 
       case 'agent:call':

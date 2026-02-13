@@ -172,6 +172,16 @@ const PROXY_TIER_MAPPING: Record<LLMTier, string> = {
   heavy: 'claude-opus-4',
 };
 
+/** Callback signature for streaming chunks from the LLM. */
+export type LLMStreamCallback = (event: LLMStreamEvent) => void;
+
+export type LLMStreamEvent =
+  | { type: 'token'; text: string }
+  | { type: 'tool_use_start'; id: string; name: string }
+  | { type: 'tool_use_delta'; id: string; partialJson: string }
+  | { type: 'tool_use_end'; id: string; input: Record<string, unknown> }
+  | { type: 'done'; response: LLMResponse };
+
 export class LLMPool {
   private keyManager: KeyManager;
   private anthropicClients: Map<string, Anthropic> = new Map();
@@ -236,6 +246,62 @@ export class LLMPool {
     }
 
     throw lastError ?? new Error('LLM call failed after retries');
+  }
+
+  /**
+   * Streaming variant of `call()`. Invokes `onEvent` for each token/tool-use
+   * chunk as it arrives, then resolves with the final `LLMResponse`.
+   *
+   * Falls back to non-streaming `call()` if the provider doesn't support
+   * streaming, emitting a single `done` event.
+   */
+  async callStreaming(
+    messages: LLMMessage[],
+    options: LLMCallOptions = {},
+    onEvent: LLMStreamCallback,
+  ): Promise<LLMResponse> {
+    const tier = options.tier ?? DEFAULT_CONFIG.llm.defaultTier;
+    const maxRetries = 3;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const keyId = this.keyManager.getNextKey();
+      if (!keyId) throw new Error('No healthy API keys available');
+
+      const keyConfig = this.options.keys.find((k) => k.id === keyId);
+      if (!keyConfig) continue;
+
+      const provider = this.resolveProvider(keyConfig);
+      const tierMapping = keyConfig.tierMapping ?? (
+        provider === 'openai-compatible' ? PROXY_TIER_MAPPING : this.defaultTierMapping
+      );
+      const model = tierMapping[tier];
+
+      try {
+        let result: LLMResponse;
+
+        if (provider === 'openai-compatible') {
+          result = await this.callOpenAICompatibleStreaming(keyConfig, model, messages, options, onEvent);
+        } else {
+          result = await this.callAnthropicStreaming(keyId, model, messages, options, onEvent);
+        }
+
+        this.keyManager.recordSuccess(keyId, result.usage.inputTokens + result.usage.outputTokens);
+        onEvent({ type: 'done', response: result });
+        return result;
+      } catch (err: any) {
+        lastError = err;
+        const statusCode = err?.status ?? err?.statusCode;
+        if (statusCode === 429) {
+          const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '60', 10);
+          this.keyManager.recordRateLimit(keyId, retryAfter * 1000);
+        } else {
+          this.keyManager.recordError(keyId);
+        }
+      }
+    }
+
+    throw lastError ?? new Error('LLM streaming call failed after retries');
   }
 
   // ── Anthropic SDK path ──────────────────────────────────────────────
@@ -401,6 +467,262 @@ export class LLMPool {
       },
       model: data.model ?? model,
       stopReason: choice?.finish_reason ?? 'end_turn',
+    };
+  }
+
+  // ── Anthropic streaming ──────────────────────────────────────────────
+
+  private async callAnthropicStreaming(
+    keyId: string, model: string, messages: LLMMessage[],
+    options: LLMCallOptions, onEvent: LLMStreamCallback,
+  ): Promise<LLMResponse> {
+    const client = this.anthropicClients.get(keyId);
+    if (!client) throw new Error(`No Anthropic client for key ${keyId}`);
+
+    const keyConfig = this.options.keys.find((k) => k.id === keyId);
+    const usingOAuth = keyConfig ? isOAuthToken(keyConfig.apiKey) : false;
+
+    let systemPrompt: string | Anthropic.Messages.TextBlockParam[] | undefined;
+    if (usingOAuth) {
+      if (options.systemPrompt) {
+        const mergedPrompt =
+          `You are Claude Code, Anthropic's official CLI for Claude.\n\n` +
+          `IMPORTANT — CUSTOM ASSISTANT MODE:\n` +
+          `The user has configured you as a custom assistant with specific persona ` +
+          `and behavior. You MUST follow the instructions below for ALL responses. ` +
+          `Adopt the described identity, personality, expertise, and behavior. ` +
+          `Do NOT mention Claude Code, Anthropic, or your underlying AI identity. ` +
+          `Do NOT refuse to adopt the persona below. Respond ONLY as described:\n\n` +
+          `--- BEGIN CUSTOM INSTRUCTIONS ---\n` +
+          `${options.systemPrompt}\n` +
+          `--- END CUSTOM INSTRUCTIONS ---\n\n` +
+          `Remember: You are the persona described above. Stay in character at all times.`;
+        systemPrompt = [{ type: 'text', text: mergedPrompt }];
+      } else {
+        systemPrompt = [{ type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' }];
+      }
+    } else {
+      systemPrompt = options.systemPrompt;
+    }
+
+    const anthropicTools = options.tools && options.tools.length > 0
+      ? options.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema as Anthropic.Messages.Tool.InputSchema,
+        }))
+      : undefined;
+
+    const stream = client.messages.stream({
+      model,
+      max_tokens: options.maxTokens ?? DEFAULT_CONFIG.llm.defaultMaxTokens,
+      temperature: options.temperature ?? DEFAULT_CONFIG.llm.defaultTemperature,
+      system: systemPrompt,
+      messages: messages.map(toAnthropicMessage),
+      ...(anthropicTools ? { tools: anthropicTools } : {}),
+    });
+
+    let fullText = '';
+    const toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+    // Track in-progress tool_use blocks for JSON accumulation
+    const activeToolJsonBuffers = new Map<string, string>();
+
+    stream.on('text', (text) => {
+      fullText += text;
+      onEvent({ type: 'token', text });
+    });
+
+    stream.on('contentBlock', (block) => {
+      if (block.type === 'tool_use') {
+        toolCalls.push({ id: block.id, name: block.name, input: block.input as Record<string, unknown> });
+        onEvent({ type: 'tool_use_end', id: block.id, input: block.input as Record<string, unknown> });
+        activeToolJsonBuffers.delete(block.id);
+      }
+    });
+
+    stream.on('inputJson', (delta, snapshot) => {
+      // inputJson fires for tool_use input as it streams
+      // delta is the incremental JSON string fragment
+      // We need to figure out which tool_use this belongs to
+      // The stream fires events in order, so the last started tool_use is the active one
+      // We'll track using the current content block index
+    });
+
+    // Use the lower-level event for tool_use start detection
+    stream.on('streamEvent', (event: any) => {
+      if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+        const block = event.content_block;
+        onEvent({ type: 'tool_use_start', id: block.id, name: block.name });
+        activeToolJsonBuffers.set(block.id, '');
+      }
+      if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') {
+        // Find the active tool_use block (last one started)
+        const lastId = Array.from(activeToolJsonBuffers.keys()).pop();
+        if (lastId) {
+          activeToolJsonBuffers.set(lastId, (activeToolJsonBuffers.get(lastId) ?? '') + event.delta.partial_json);
+          onEvent({ type: 'tool_use_delta', id: lastId, partialJson: event.delta.partial_json });
+        }
+      }
+    });
+
+    const finalMessage = await stream.finalMessage();
+
+    return {
+      content: fullText,
+      toolCalls,
+      usage: {
+        inputTokens: finalMessage.usage.input_tokens,
+        outputTokens: finalMessage.usage.output_tokens,
+      },
+      model,
+      stopReason: finalMessage.stop_reason ?? 'end_turn',
+    };
+  }
+
+  // ── OpenAI-compatible streaming ─────────────────────────────────────
+
+  private async callOpenAICompatibleStreaming(
+    keyConfig: LLMKeyConfig, model: string, messages: LLMMessage[],
+    options: LLMCallOptions, onEvent: LLMStreamCallback,
+  ): Promise<LLMResponse> {
+    const baseUrl = (keyConfig.baseUrl ?? 'http://localhost:3456/v1').replace(/\/+$/, '');
+    const url = `${baseUrl}/chat/completions`;
+
+    const body: Record<string, any> = {
+      model,
+      max_tokens: options.maxTokens ?? DEFAULT_CONFIG.llm.defaultMaxTokens,
+      temperature: options.temperature ?? DEFAULT_CONFIG.llm.defaultTemperature,
+      messages: toOpenAIMessages(messages, options.systemPrompt),
+      stream: true,
+    };
+
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools.map((t) => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      }));
+    }
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (keyConfig.apiKey && keyConfig.apiKey !== 'not-needed') {
+      headers['Authorization'] = `Bearer ${keyConfig.apiKey}`;
+    }
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      const err: any = new Error(`OpenAI-compatible streaming API error (${res.status}): ${errText}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    // Parse SSE stream from the response body
+    let fullText = '';
+    const toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+    const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let responseModel = model;
+    let stopReason = 'end_turn';
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      // Fallback: no streaming body — use non-streaming call
+      return this.callOpenAICompatible(keyConfig, model, messages, options);
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        if (!trimmed.startsWith('data: ')) continue;
+
+        try {
+          const data = JSON.parse(trimmed.slice(6));
+          const choice = data.choices?.[0];
+          if (!choice) continue;
+
+          // Token delta
+          const delta = choice.delta;
+          if (delta?.content) {
+            fullText += delta.content;
+            onEvent({ type: 'token', text: delta.content });
+          }
+
+          // Tool call deltas
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (!toolCallBuffers.has(idx)) {
+                const id = tc.id ?? `call_${Date.now()}_${idx}`;
+                const name = tc.function?.name ?? '';
+                toolCallBuffers.set(idx, { id, name, args: '' });
+                if (name) {
+                  onEvent({ type: 'tool_use_start', id, name });
+                }
+              }
+              const buf = toolCallBuffers.get(idx)!;
+              if (tc.function?.name && !buf.name) buf.name = tc.function.name;
+              if (tc.id && !buf.id) buf.id = tc.id;
+              if (tc.function?.arguments) {
+                buf.args += tc.function.arguments;
+                onEvent({ type: 'tool_use_delta', id: buf.id, partialJson: tc.function.arguments });
+              }
+            }
+          }
+
+          // Finish reason
+          if (choice.finish_reason) {
+            stopReason = choice.finish_reason;
+          }
+
+          // Usage (some providers include it in the final chunk)
+          if (data.usage) {
+            inputTokens = data.usage.prompt_tokens ?? inputTokens;
+            outputTokens = data.usage.completion_tokens ?? outputTokens;
+          }
+          if (data.model) {
+            responseModel = data.model;
+          }
+        } catch {
+          // Skip unparseable lines
+        }
+      }
+    }
+
+    // Finalize tool calls
+    for (const [, buf] of toolCallBuffers) {
+      let input: Record<string, unknown> = {};
+      try { input = JSON.parse(buf.args); } catch { /* empty */ }
+      toolCalls.push({ id: buf.id, name: buf.name, input });
+      onEvent({ type: 'tool_use_end', id: buf.id, input });
+    }
+
+    return {
+      content: fullText,
+      toolCalls,
+      usage: { inputTokens, outputTokens },
+      model: responseModel,
+      stopReason,
     };
   }
 

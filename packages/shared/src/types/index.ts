@@ -123,6 +123,7 @@ export type WorkerWsMessage =
   | { type: 'heartbeat'; load: number; activeTasks: number; capabilities: NodeCapabilities }
   | { type: 'task:complete'; taskId: string; output: string; tokensUsed: number; durationMs: number }
   | { type: 'task:failed'; taskId: string; error: string }
+  | { type: 'tool:result'; callId: string; success: boolean; output: string }
   | { type: 'agent:call'; callId: string; fromAgentId: string; targetAgentId: string; input: string }
   | { type: 'agent:response'; callId: string; output: string; error?: string }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; taskId?: string };
@@ -131,8 +132,9 @@ export type WorkerWsMessage =
 export type DashboardWsMessage =
   | { type: 'auth:ok'; workerId: string; config: Record<string, unknown> }
   | { type: 'auth:error'; message: string }
-  | { type: 'task:assign'; taskId: string; agentId: string; input: string; agentConfig: Record<string, unknown> }
+  | { type: 'task:assign'; taskId: string; agentId: string; input: string; agentConfig: Record<string, unknown>; userId?: string; teamId?: string }
   | { type: 'task:cancel'; taskId: string }
+  | { type: 'tool:execute'; callId: string; toolName: string; input: Record<string, unknown> }
   | { type: 'agent:call'; callId: string; fromAgentId: string; input: string; agentConfig: Record<string, unknown> }
   | { type: 'agent:response'; callId: string; output: string; error?: string }
   | { type: 'config:update'; config: Record<string, unknown> }
@@ -331,6 +333,7 @@ export interface SkillSearchResult {
 // ============================================================
 export type MemoryScope = 'global' | 'team' | 'personal';
 export type MemoryEntryType = 'conversation' | 'knowledge' | 'reflection' | 'observation';
+export type MemorySource = 'explicit' | 'conversation' | 'consolidation' | 'inference';
 
 export interface MemoryEntry {
   id: string;
@@ -339,7 +342,27 @@ export interface MemoryEntry {
   type: MemoryEntryType;
   content: string;
   importance: number; // 0-1
+  strength: number; // 0-1, decays over time (Ebbinghaus curve)
+  decayRate: number; // individual decay rate; lower = slower forgetting
+  lastAccessedAt: Date;
+  accessCount: number;
+  source: MemorySource;
   createdAt: Date;
+}
+
+/** Result returned by hybrid memory search, includes computed scores */
+export interface ScoredMemoryEntry extends MemoryEntry {
+  similarity: number;
+  effectiveStrength: number;
+  recencyScore: number;
+  finalScore: number;
+}
+
+export interface MemoryAssociation {
+  id: string;
+  sourceEntryId: string;
+  targetEntryId: string;
+  weight: number; // 0-1
 }
 
 export interface MemoryEmbedding {

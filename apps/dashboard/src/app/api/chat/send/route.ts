@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@ai-engine/db';
+import { withMemoryPrompt } from '@ai-engine/shared';
 
 export const dynamic = 'force-dynamic';
 
@@ -94,27 +95,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Append cognitive capabilities (memory, tool discovery) to ALL prompts.
+    // This ensures every agent — default or custom — knows about its memory
+    // system and how to use store_memory, search_memory, discover_tools, etc.
+    systemPrompt = withMemoryPrompt(systemPrompt);
+
     // ── Enrich system prompt with memory & goals ─────────────────────
     try {
       // Load active goals
       const goals = await db.userGoal.findMany({
         where: { status: 'active' },
         orderBy: { priority: 'asc' },
-        take: 10,
-      });
-
-      // Load recent important memories (personal + team + global)
-      const memoryFilters: any[] = [{ scope: 'global' }];
-      if (contextUser) {
-        memoryFilters.push({ scope: 'personal', scopeOwnerId: contextUser.id });
-      }
-      if (contextMembership) {
-        memoryFilters.push({ scope: 'team', scopeOwnerId: contextMembership.teamId });
-      }
-
-      const memories = await db.memoryEntry.findMany({
-        where: { OR: memoryFilters },
-        orderBy: { importance: 'desc' },
         take: 10,
       });
 
@@ -125,8 +116,25 @@ export async function POST(request: NextRequest) {
         systemPrompt += `\n\n## Active Goals\n${goalsText}`;
       }
 
+      // Hybrid memory retrieval: semantic search + decay + importance + recency
+      // Uses the user's message as the query for relevance-based retrieval
+      const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
+      const embeddingSvc = new EmbeddingService();
+      const memService = new MemoryService(embeddingSvc);
+
+      const memories = await memService.searchAllScopes(
+        message,
+        contextUser?.id ?? null,
+        contextMembership?.teamId ?? null,
+        10,
+        { strengthenOnRecall: true },
+      );
+
       if (memories.length > 0) {
-        const memText = memories.map((m: any) => `- ${m.content}`).join('\n');
+        const memText = memories.map((m: any) => {
+          const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
+          return `- [${confidence} relevance] ${m.content}`;
+        }).join('\n');
         systemPrompt += `\n\n## Relevant Context from Memory\n${memText}`;
       }
     } catch {
@@ -169,10 +177,88 @@ export async function POST(request: NextRequest) {
         strategy: 'round-robin',
       });
 
-      // Resolve agent's toolConfig for tool filtering
-      const agentToolConfig = agent?.toolConfig
-        ? (typeof agent.toolConfig === 'object' ? agent.toolConfig as Record<string, boolean> : {})
-        : undefined;
+      // ── Prompt-time skill detection ─────────────────────────────────
+      // Search the skill library for skills relevant to this prompt.
+      // Detected skills are injected into the system prompt so the agent
+      // knows about them upfront and can use them without discovery overhead.
+      let detectedSkillsText = '';
+      let browserSkillDetected = false;
+
+      try {
+        const relevantSkills = await db.skill.findMany({
+          where: { isActive: true },
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            category: true,
+            instructions: true,
+            requiredCapabilities: true,
+          },
+        });
+
+        if (relevantSkills.length > 0) {
+          // Score skills by keyword relevance to the user's message
+          const msgLower = message.toLowerCase();
+          const msgWords = msgLower.split(/\s+/).filter((w: string) => w.length > 2);
+
+          const scored = relevantSkills.map((s: any) => {
+            const text = `${s.name} ${s.description} ${s.category}`.toLowerCase();
+            let score = 0;
+            // Exact substring match in name or description
+            if (text.includes(msgLower)) score += 3;
+            // Word-level matches
+            for (const word of msgWords) {
+              if (text.includes(word)) score += 1;
+            }
+            return { ...s, score };
+          }).filter((s: { score: number }) => s.score > 0)
+            .sort((a: { score: number }, b: { score: number }) => b.score - a.score)
+            .slice(0, 5);
+
+          if (scored.length > 0) {
+            const lines = scored.map((s: any) =>
+              `- **skill:${s.name}** (${s.category}): ${s.description}`
+            );
+            detectedSkillsText = `\n\n## Detected Relevant Skills\nThe following skills from your library may be useful for this task. You can load any of them with \`execute_tool\` using the skill name (e.g., "skill:${scored[0].name}").\n${lines.join('\n')}`;
+
+            // Check if any detected skill involves browser capabilities
+            const BROWSER_KEYWORDS = ['browser', 'navigate', 'click', 'screenshot', 'web automation', 'scrape', 'scraping', 'puppeteer', 'playwright'];
+            for (const s of scored) {
+              const skillText = `${s.name} ${s.description} ${s.category} ${s.instructions}`.toLowerCase();
+              const caps = (s.requiredCapabilities as string[]) ?? [];
+              const hasBrowserCap = caps.some((c: string) => c.toLowerCase().includes('browser'));
+              const hasBrowserKeyword = BROWSER_KEYWORDS.some(kw => skillText.includes(kw));
+              if (hasBrowserCap || hasBrowserKeyword) {
+                browserSkillDetected = true;
+                break;
+              }
+            }
+          }
+        }
+      } catch {
+        // Skill detection failed — continue without skill hints
+      }
+
+      // Also detect browser intent directly from the user's message
+      if (!browserSkillDetected) {
+        const BROWSER_MSG_KEYWORDS = ['browse', 'browser', 'navigate to', 'open website', 'screenshot', 'web automation', 'scrape', 'scraping', 'click on', 'fill form', 'web page interaction'];
+        const msgLower2 = message.toLowerCase();
+        browserSkillDetected = BROWSER_MSG_KEYWORDS.some(kw => msgLower2.includes(kw));
+      }
+
+      // Append skill detection context to system prompt
+      if (detectedSkillsText) {
+        systemPrompt += detectedSkillsText;
+      }
+
+      // If browser skills/intent detected, add Mac routing directive
+      if (browserSkillDetected) {
+        systemPrompt += `\n\n## Browser Automation Routing\nThis task involves browser automation. All browser-related tool calls (browser_navigate, browser_click, browser_screenshot, etc.) MUST be directed to a Mac worker node. When using browser tools, specify that the execution target should be a macOS worker to ensure compatibility with the display server and rendering environment.`;
+      }
+
+      // Agents have access to all tools — no toolConfig filtering
+      // (empty config = all tools available per ToolIndex logic)
 
       // Build memory search function for the search_memory meta-tool
       const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
@@ -180,22 +266,31 @@ export async function POST(request: NextRequest) {
           const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
           const embeddings = new EmbeddingService();
           const memService = new MemoryService(embeddings);
-          const results = await memService.search(query, scope as any, scopeOwnerId, 5);
+          const results = await memService.search(query, scope as any, scopeOwnerId, 5, { strengthenOnRecall: true });
           if (results.length === 0) return 'No matching memories found.';
-          return results.map((m: any) => `- [${m.scope}] ${m.content}`).join('\n');
+          return results.map((m: any) => {
+            const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
+            return `- [${m.scope}/${confidence}] ${m.content}`;
+          }).join('\n');
         } catch {
           return 'Memory search unavailable.';
         }
       };
 
-      // Create the ChatExecutor with meta-tools (discover, execute, memory)
+      // Create the ChatExecutor with meta-tools (discover, execute, memory, skills, goals, profile)
+      // No toolConfig filtering — agents have access to all tools
+      // Worker dispatch: the WorkerHub routes tool:execute → worker → tool:result
+      const { WorkerHub } = await import('@/lib/worker-hub');
+      const workerHub = WorkerHub.getInstance();
+
       const executor = new ChatExecutor({
         llm: pool,
-        toolConfig: agentToolConfig,
         tier: 'standard',
         searchMemory: searchMemoryFn,
         userId: contextUser?.id,
         teamId: contextMembership?.teamId,
+        sessionId: session.id,
+        workerDispatcher: workerHub,
       });
 
       // Build conversation history from DB

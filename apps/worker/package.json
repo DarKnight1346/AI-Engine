@@ -14,8 +14,6 @@
   "dependencies": {
     "@ai-engine/agent-runtime": "workspace:*",
     "@ai-engine/browser": "workspace:*",
-    "@ai-engine/llm": "workspace:*",
-    "@ai-engine/memory": "workspace:*",
     "@ai-engine/shared": "workspace:*",
     "ws": "^8.19.0"
   },

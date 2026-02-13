@@ -10,6 +10,7 @@
  *   - Record heartbeats in the DB
  */
 
+import crypto from 'crypto';
 import type { IncomingMessage } from 'http';
 import type WebSocket from 'ws';
 import type {
@@ -41,6 +42,14 @@ interface PendingAgentCall {
   timestamp: number;
 }
 
+interface PendingToolCall {
+  callId: string;
+  workerId: string;
+  resolve: (result: { success: boolean; output: string }) => void;
+  reject: (err: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 // ---------------------------------------------------------------------------
 // Singleton
 // ---------------------------------------------------------------------------
@@ -49,6 +58,7 @@ export class WorkerHub {
   private static instance: WorkerHub;
   private workers = new Map<string, ConnectedWorker>();
   private pendingAgentCalls = new Map<string, PendingAgentCall>();
+  private pendingToolCalls = new Map<string, PendingToolCall>();
 
   static getInstance(): WorkerHub {
     if (!WorkerHub.instance) {
@@ -139,6 +149,10 @@ export class WorkerHub {
         await this.handleTaskFailed(worker.workerId, msg);
         break;
 
+      case 'tool:result':
+        this.handleToolResult(msg);
+        break;
+
       case 'agent:call':
         await this.routeAgentCall(worker, msg);
         break;
@@ -199,6 +213,9 @@ export class WorkerHub {
     input: string;
     agentConfig: Record<string, unknown>;
     requiredCapabilities?: Partial<NodeCapabilities>;
+    /** User context for memory scoping on the worker */
+    userId?: string;
+    teamId?: string;
   }): Promise<{ dispatched: boolean; workerId?: string; error?: string }> {
     const worker = this.pickWorker(opts.requiredCapabilities);
     if (!worker) {
@@ -211,10 +228,78 @@ export class WorkerHub {
       agentId: opts.agentId,
       input: opts.input,
       agentConfig: opts.agentConfig,
+      userId: opts.userId,
+      teamId: opts.teamId,
     });
 
     worker.activeTasks += 1;
     return { dispatched: true, workerId: worker.workerId };
+  }
+
+  // -----------------------------------------------------------------------
+  // Tool execution dispatch (dashboard → worker → result)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Execute a single tool on a worker and await the result.
+   *
+   * This is the core mechanism for the dashboard's ChatExecutor to
+   * dispatch worker-bound tools (browser, shell, filesystem) to workers.
+   * The LLM agentic loop runs on the dashboard; only tool execution
+   * happens on the worker.
+   */
+  async executeToolOnWorker(
+    toolName: string,
+    input: Record<string, unknown>,
+    requiredCapabilities?: Partial<NodeCapabilities>,
+    timeoutMs = 120_000,
+  ): Promise<{ success: boolean; output: string }> {
+    const worker = this.pickWorker(requiredCapabilities);
+    if (!worker) {
+      return {
+        success: false,
+        output: `No available worker to execute "${toolName}". Connect a worker node with the required capabilities.`,
+      };
+    }
+
+    const callId = crypto.randomUUID();
+
+    return new Promise<{ success: boolean; output: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingToolCalls.delete(callId);
+        resolve({ success: false, output: `Tool "${toolName}" timed out after ${timeoutMs / 1000}s on worker ${worker.workerId}.` });
+      }, timeoutMs);
+
+      this.pendingToolCalls.set(callId, {
+        callId,
+        workerId: worker.workerId,
+        resolve,
+        reject,
+        timeout,
+      });
+
+      this.send(worker.ws, {
+        type: 'tool:execute',
+        callId,
+        toolName,
+        input,
+      });
+    });
+  }
+
+  /**
+   * Handle a tool result from a worker.
+   */
+  private handleToolResult(msg: Extract<WorkerWsMessage, { type: 'tool:result' }>): void {
+    const pending = this.pendingToolCalls.get(msg.callId);
+    if (!pending) {
+      console.warn(`[hub] Tool result for unknown call: ${msg.callId}`);
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingToolCalls.delete(msg.callId);
+    pending.resolve({ success: msg.success, output: msg.output });
   }
 
   private pickWorker(required?: Partial<NodeCapabilities>): ConnectedWorker | null {
@@ -459,6 +544,23 @@ export class WorkerHub {
 
   getWorkerCount(): number {
     return Array.from(this.workers.values()).filter((w) => w.authenticated).length;
+  }
+
+  /**
+   * Disconnect a worker by ID, closing its WebSocket connection.
+   * Returns true if the worker was found and disconnected.
+   */
+  disconnectWorker(workerId: string): boolean {
+    const worker = this.workers.get(workerId);
+    if (!worker) return false;
+
+    try {
+      this.send(worker.ws, { type: 'auth:error', message: 'Removed by administrator' });
+      worker.ws.close(4002, 'removed_by_admin');
+    } catch { /* ignore close errors */ }
+
+    this.workers.delete(workerId);
+    return true;
   }
 
   // -----------------------------------------------------------------------

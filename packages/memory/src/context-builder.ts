@@ -1,12 +1,12 @@
 import type { MemoryService } from './memory-service.js';
 import type { GoalTracker } from './goal-tracker.js';
-import type { UserGoal, MemoryEntry } from '@ai-engine/shared';
-import { DEFAULT_CONFIG } from '@ai-engine/shared';
+import { withMemoryPrompt } from '@ai-engine/shared';
+import type { UserGoal, ScoredMemoryEntry } from '@ai-engine/shared';
 
 export interface AgentContext {
   systemPrompt: string;
   goals: UserGoal[];
-  memories: MemoryEntry[];
+  memories: ScoredMemoryEntry[];
   taskDetails: string | null;
   estimatedTokens: number;
 }
@@ -37,19 +37,16 @@ export class ContextBuilder {
       goals.push(...teamGoals);
     }
 
-    // Retrieve relevant memories
-    const memories: MemoryEntry[] = [];
+    // Retrieve relevant memories using hybrid search across all scopes
+    let memories: ScoredMemoryEntry[] = [];
     if (query) {
-      if (userId) {
-        const personalMem = await this.memoryService.search(query, 'personal', userId, 5);
-        memories.push(...personalMem);
-      }
-      if (teamId) {
-        const teamMem = await this.memoryService.search(query, 'team', teamId, 5);
-        memories.push(...teamMem);
-      }
-      const globalMem = await this.memoryService.search(query, 'global', null, 3);
-      memories.push(...globalMem);
+      memories = await this.memoryService.searchAllScopes(
+        query,
+        userId ?? null,
+        teamId ?? null,
+        10,
+        { strengthenOnRecall: true },
+      );
     }
 
     // Build system prompt
@@ -57,11 +54,15 @@ export class ContextBuilder {
       ? `\n\n## Active Goals\n${goals.map((g) => `- [${g.priority.toUpperCase()}] ${g.description}`).join('\n')}`
       : '';
 
+    // Format memories with strength/relevance indicators for the agent
     const memorySection = memories.length > 0
-      ? `\n\n## Relevant Context\n${memories.map((m) => `- ${m.content}`).join('\n')}`
+      ? `\n\n## Relevant Context from Memory\n${memories.map((m) => {
+          const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
+          return `- [${confidence} relevance] ${m.content}`;
+        }).join('\n')}`
       : '';
 
-    const systemPrompt = `${agentRolePrompt}${goalSection}${memorySection}`;
+    const systemPrompt = withMemoryPrompt(`${agentRolePrompt}${goalSection}${memorySection}`);
 
     // Rough token estimation (1 token ≈ 4 chars)
     const estimatedTokens = Math.ceil(

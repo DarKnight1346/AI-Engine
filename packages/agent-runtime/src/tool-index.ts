@@ -1,4 +1,3 @@
-import { getDb } from '@ai-engine/db';
 import type { SkillSearchResult } from '@ai-engine/shared';
 
 // ---------------------------------------------------------------------------
@@ -123,7 +122,11 @@ export class ToolIndex {
     }
 
     // ── 2. Search skills from DB (keyword search — pgvector is optional) ──
+    // Dynamic import: @ai-engine/db is NOT available on workers (they don't
+    // ship the db package). Using import() lets us gracefully skip skill
+    // search when the package is missing, instead of crashing at module load.
     try {
+      const { getDb } = await import('@ai-engine/db');
       const db = getDb();
       const skillResults = await db.skill.findMany({
         where: {

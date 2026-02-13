@@ -30,7 +30,7 @@ export const DEFAULT_CONFIG = {
     contextBudgetThreshold: 0.8,
     summarizationTriggerRatio: 0.75,
     maxRetrievedMemories: 10,
-    embeddingDimension: 1536,
+    embeddingDimension: 768,
   },
   browser: {
     poolSize: 3,

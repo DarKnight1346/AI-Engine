@@ -17,28 +17,36 @@ export interface MetaToolOptions {
   /** User/team context for memory scope */
   userId?: string;
   teamId?: string;
+  /** Chat session ID (used for goal source tracking) */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Create the 3 core meta-tools
+// Create the 7 core meta-tools
 // ---------------------------------------------------------------------------
 
 /**
  * Build the set of meta-tools that every agent gets.
  * These are the ONLY tools in the initial LLM context — everything
  * else is discovered and executed through them.
+ *
+ * Includes: discover_tools, execute_tool, search_memory, create_skill,
+ *           store_memory, manage_goal, update_profile
  */
 export function createMetaTools(opts: MetaToolOptions): Tool[] {
   return [
     createDiscoverTool(opts),
     createExecuteTool(opts),
     createMemoryTool(opts),
+    createCreateSkillTool(opts),
+    createStoreMemoryTool(opts),
+    createManageGoalTool(opts),
+    createUpdateProfileTool(opts),
   ];
 }
 
 /**
- * Get LLM-compatible tool definitions for the 3 meta-tools.
- * These are compact and total ~240 tokens of context.
+ * Get LLM-compatible tool definitions for all meta-tools.
  */
 export function getMetaToolDefinitions(): LLMToolDefinition[] {
   return [
@@ -99,6 +107,134 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
           },
         },
         required: ['query'],
+      },
+    },
+    {
+      name: 'create_skill',
+      description:
+        'Create a new reusable skill in the skill library. Skills are step-by-step instructions ' +
+        'that you or other agents can discover and follow later. Use this to capture a useful ' +
+        'workflow, technique, or procedure so it can be reused. Good skills have a clear name, ' +
+        'description, category, and detailed instructions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'A short, descriptive name for the skill (e.g., "SEO Audit", "Deploy to Vercel").',
+          },
+          description: {
+            type: 'string',
+            description: 'A one-line summary of what this skill does and when to use it.',
+          },
+          category: {
+            type: 'string',
+            description: 'Category for organization (e.g., "web", "analysis", "development", "automation").',
+          },
+          instructions: {
+            type: 'string',
+            description: 'Detailed step-by-step instructions for performing this skill. Use markdown formatting.',
+          },
+          codeSnippet: {
+            type: 'string',
+            description: 'Optional code example or template associated with the skill.',
+          },
+        },
+        required: ['name', 'description', 'category', 'instructions'],
+      },
+    },
+    {
+      name: 'store_memory',
+      description:
+        'Store information in memory for future reference. Use this proactively to remember ' +
+        'important facts, decisions, user preferences, patterns, or any knowledge gained during ' +
+        'conversation. Stored memories are available to all agents across sessions. ' +
+        'Types: "knowledge" (learned info), "decision" (choices made), "fact" (verified truths), "pattern" (recurring observations).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          content: {
+            type: 'string',
+            description: 'The information to remember. Be concise but specific.',
+          },
+          type: {
+            type: 'string',
+            enum: ['knowledge', 'decision', 'fact', 'pattern'],
+            description: 'Type of memory entry. Defaults to "knowledge".',
+          },
+          scope: {
+            type: 'string',
+            enum: ['personal', 'team', 'global'],
+            description: 'Scope: "personal" (user-specific), "team" (shared with team), "global" (shared across system). Defaults to "global".',
+          },
+          importance: {
+            type: 'number',
+            description: 'Importance from 0.0 to 1.0. Higher = more likely to be surfaced. Defaults to 0.5.',
+          },
+        },
+        required: ['content'],
+      },
+    },
+    {
+      name: 'manage_goal',
+      description:
+        'Create, update, or complete goals. Use this when the user mentions objectives, priorities, ' +
+        'targets, or things they want to achieve. Also use it proactively when you infer goals from ' +
+        'conversation context. Goals are visible across all agents and sessions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['create', 'update', 'complete', 'pause'],
+            description: 'Action to perform on the goal.',
+          },
+          id: {
+            type: 'string',
+            description: 'Goal ID (required for update/complete/pause actions).',
+          },
+          description: {
+            type: 'string',
+            description: 'Goal description (required for create, optional for update).',
+          },
+          priority: {
+            type: 'string',
+            enum: ['high', 'medium', 'low'],
+            description: 'Goal priority. Defaults to "medium".',
+          },
+          scope: {
+            type: 'string',
+            enum: ['personal', 'team'],
+            description: 'Scope: "personal" or "team". Defaults to "personal".',
+          },
+        },
+        required: ['action'],
+      },
+    },
+    {
+      name: 'update_profile',
+      description:
+        'Store or update user profile information. Use this to remember user preferences, traits, ' +
+        'communication style, expertise, roles, or any personal information the user shares. ' +
+        'Profile entries are key-value pairs that persist across sessions. If a key already exists, ' +
+        'it will be updated with the new value.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          key: {
+            type: 'string',
+            description: 'Profile attribute name (e.g., "preferred_language", "expertise", "communication_style", "name", "role").',
+          },
+          value: {
+            type: 'string',
+            description: 'The value for this profile attribute.',
+          },
+          confidence: {
+            type: 'number',
+            description: 'Confidence in this information from 0.0 to 1.0. Use lower values for inferred info, higher for explicitly stated. Defaults to 0.8.',
+          },
+        },
+        required: ['key', 'value'],
       },
     },
   ];
@@ -214,6 +350,396 @@ function createMemoryTool(opts: MetaToolOptions): Tool {
 
       return { success: true, output: 'Memory search is not configured.' };
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// create_skill meta-tool
+// ---------------------------------------------------------------------------
+
+function createCreateSkillTool(opts: MetaToolOptions): Tool {
+  return {
+    name: 'create_skill',
+    description: 'Create a new reusable skill in the skill library.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        description: { type: 'string' },
+        category: { type: 'string' },
+        instructions: { type: 'string' },
+        codeSnippet: { type: 'string' },
+      },
+      required: ['name', 'description', 'category', 'instructions'],
+    },
+    execute: async (input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> => {
+      const name = String(input.name || '').trim();
+      const description = String(input.description || '').trim();
+      const category = String(input.category || '').trim();
+      const instructions = String(input.instructions || '').trim();
+      const codeSnippet = input.codeSnippet ? String(input.codeSnippet).trim() : undefined;
+
+      if (!name || !description || !category || !instructions) {
+        return {
+          success: false,
+          output: 'All of name, description, category, and instructions are required to create a skill.',
+        };
+      }
+
+      try {
+        const { getDb } = await import('@ai-engine/db');
+        const db = getDb();
+
+        // Check for duplicate skill name
+        const existing = await db.skill.findFirst({
+          where: { name: { equals: name, mode: 'insensitive' } },
+        });
+        if (existing) {
+          return {
+            success: false,
+            output: `A skill named "${name}" already exists (id: ${existing.id}). Choose a different name or update the existing skill.`,
+          };
+        }
+
+        // Determine creator identity
+        const createdBy = context.agentId && context.agentId !== 'chat'
+          ? `agent:${context.agentId}`
+          : 'agent';
+
+        const skill = await db.skill.create({
+          data: {
+            name,
+            description,
+            category,
+            instructions,
+            codeSnippet: codeSnippet ?? null,
+            requiredCapabilities: [],
+            createdBy,
+          },
+        });
+
+        // Create version snapshot
+        await db.skillVersion.create({
+          data: {
+            skillId: skill.id,
+            version: 1,
+            contentSnapshot: { name, description, instructions },
+          },
+        });
+
+        // Index for search (best-effort — embedding service may not be available)
+        try {
+          const { EmbeddingService } = await import('@ai-engine/memory');
+          const embeddings = new EmbeddingService();
+          await embeddings.storeEmbedding(skill.id, 'skill', `${name}: ${description}`);
+        } catch {
+          // Embedding indexing failed — skill is still created, just not vector-searchable yet
+        }
+
+        return {
+          success: true,
+          output: `Skill "${name}" created successfully (id: ${skill.id}, category: ${category}). It is now discoverable via discover_tools and can be loaded with execute_tool using "skill:${name}".`,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          output: `Failed to create skill: ${err.message}`,
+        };
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// store_memory meta-tool
+// ---------------------------------------------------------------------------
+
+function createStoreMemoryTool(opts: MetaToolOptions): Tool {
+  return {
+    name: 'store_memory',
+    description: 'Store information in memory for future reference.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string' },
+        type: { type: 'string' },
+        scope: { type: 'string' },
+        importance: { type: 'number' },
+      },
+      required: ['content'],
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      const content = String(input.content || '').trim();
+      if (!content) {
+        return { success: false, output: 'Content is required to store a memory.' };
+      }
+
+      const type = String(input.type || 'knowledge');
+      const scope = String(input.scope || 'global');
+      const importance = typeof input.importance === 'number'
+        ? Math.max(0, Math.min(1, input.importance))
+        : 0.5;
+
+      // Determine scope owner
+      const scopeOwnerId = scope === 'personal'
+        ? opts.userId ?? ''
+        : scope === 'team'
+          ? opts.teamId ?? ''
+          : '';
+
+      try {
+        // Use the full MemoryService which handles embedding + auto-linking
+        const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
+        const embeddings = new EmbeddingService();
+        const memService = new MemoryService(embeddings);
+
+        const entry = await memService.store(
+          scope as any,
+          scopeOwnerId || null,
+          type as any,
+          content,
+          importance,
+          'explicit',
+        );
+
+        return {
+          success: true,
+          output: `Memory stored (id: ${entry.id}, type: ${type}, scope: ${scope}, importance: ${importance}). Semantic embedding generated and associative links created. This information will be available in future conversations.`,
+        };
+      } catch (err: any) {
+        return { success: false, output: `Failed to store memory: ${err.message}` };
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// manage_goal meta-tool
+// ---------------------------------------------------------------------------
+
+function createManageGoalTool(opts: MetaToolOptions): Tool {
+  return {
+    name: 'manage_goal',
+    description: 'Create, update, or complete goals.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string' },
+        id: { type: 'string' },
+        description: { type: 'string' },
+        priority: { type: 'string' },
+        scope: { type: 'string' },
+      },
+      required: ['action'],
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      const action = String(input.action || '');
+      if (!['create', 'update', 'complete', 'pause'].includes(action)) {
+        return { success: false, output: 'Action must be one of: create, update, complete, pause.' };
+      }
+
+      try {
+        const { getDb } = await import('@ai-engine/db');
+        const db = getDb();
+
+        if (action === 'create') {
+          const description = String(input.description || '').trim();
+          if (!description) {
+            return { success: false, output: 'Description is required to create a goal.' };
+          }
+
+          const priority = String(input.priority || 'medium');
+          const scope = String(input.scope || 'personal');
+          const scopeOwnerId = scope === 'team'
+            ? opts.teamId ?? opts.userId ?? ''
+            : opts.userId ?? '';
+
+          const goal = await db.userGoal.create({
+            data: {
+              description,
+              priority,
+              status: 'active',
+              scope,
+              scopeOwnerId,
+              sourceSessionId: opts.sessionId ?? null,
+            },
+          });
+
+          return {
+            success: true,
+            output: `Goal created (id: ${goal.id}, priority: ${priority}, scope: ${scope}): "${description}"`,
+          };
+        }
+
+        // For update/complete/pause, we need a goal ID
+        const goalId = String(input.id || '').trim();
+        if (!goalId) {
+          // If no ID provided, try to find a matching goal by description
+          const searchDesc = String(input.description || '').trim();
+          if (!searchDesc) {
+            return { success: false, output: `Goal ID is required for ${action}. Use search_memory or check the active goals in your context to find the goal ID.` };
+          }
+
+          // Search for a matching active goal
+          const goals = await db.userGoal.findMany({
+            where: { status: 'active' },
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+          });
+
+          const searchLower = searchDesc.toLowerCase();
+          const match = goals.find((g: any) =>
+            g.description.toLowerCase().includes(searchLower) ||
+            searchLower.includes(g.description.toLowerCase())
+          );
+
+          if (!match) {
+            return { success: false, output: `No active goal found matching "${searchDesc}". Available goals:\n${goals.map((g: any) => `- ${g.id}: ${g.description}`).join('\n')}` };
+          }
+
+          // Use the matched goal
+          return await executeGoalAction(db, action, match.id, input, opts);
+        }
+
+        return await executeGoalAction(db, action, goalId, input, opts);
+      } catch (err: any) {
+        return { success: false, output: `Failed to ${action} goal: ${err.message}` };
+      }
+    },
+  };
+}
+
+/** Helper to execute update/complete/pause actions on a goal */
+async function executeGoalAction(
+  db: any,
+  action: string,
+  goalId: string,
+  input: Record<string, unknown>,
+  opts: MetaToolOptions,
+): Promise<ToolResult> {
+  const existing = await db.userGoal.findUnique({ where: { id: goalId } });
+  if (!existing) {
+    return { success: false, output: `Goal with id "${goalId}" not found.` };
+  }
+
+  const updateData: Record<string, unknown> = {};
+
+  if (action === 'complete') {
+    updateData.status = 'completed';
+  } else if (action === 'pause') {
+    updateData.status = 'paused';
+  }
+
+  if (input.description) {
+    updateData.description = String(input.description).trim();
+  }
+  if (input.priority) {
+    updateData.priority = String(input.priority);
+  }
+
+  await db.userGoal.update({ where: { id: goalId }, data: updateData });
+
+  // Track the update in goal_updates if description changed
+  if (updateData.description && updateData.description !== existing.description) {
+    await db.goalUpdate.create({
+      data: {
+        goalId,
+        previousDescription: existing.description,
+        newDescription: String(updateData.description),
+        sourceSessionId: opts.sessionId ?? null,
+      },
+    });
+  }
+
+  const statusText = action === 'complete' ? 'completed' : action === 'pause' ? 'paused' : 'updated';
+  return {
+    success: true,
+    output: `Goal ${statusText} (id: ${goalId}): "${updateData.description || existing.description}"`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// update_profile meta-tool
+// ---------------------------------------------------------------------------
+
+function createUpdateProfileTool(opts: MetaToolOptions): Tool {
+  return {
+    name: 'update_profile',
+    description: 'Store or update user profile information.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string' },
+        value: { type: 'string' },
+        confidence: { type: 'number' },
+      },
+      required: ['key', 'value'],
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      const key = String(input.key || '').trim();
+      const value = String(input.value || '').trim();
+      if (!key || !value) {
+        return { success: false, output: 'Both key and value are required.' };
+      }
+
+      const confidence = typeof input.confidence === 'number'
+        ? Math.max(0, Math.min(1, input.confidence))
+        : 0.8;
+
+      const userId = opts.userId;
+      if (!userId) {
+        // Fall back to first admin user
+        try {
+          const { getDb } = await import('@ai-engine/db');
+          const db = getDb();
+          const user = await db.user.findFirst({ where: { role: 'admin' } });
+          if (!user) {
+            return { success: false, output: 'No user found to associate profile data with.' };
+          }
+          return await upsertProfile(db, user.id, key, value, confidence);
+        } catch (err: any) {
+          return { success: false, output: `Failed to update profile: ${err.message}` };
+        }
+      }
+
+      try {
+        const { getDb } = await import('@ai-engine/db');
+        const db = getDb();
+        return await upsertProfile(db, userId, key, value, confidence);
+      } catch (err: any) {
+        return { success: false, output: `Failed to update profile: ${err.message}` };
+      }
+    },
+  };
+}
+
+/** Helper to upsert a profile entry */
+async function upsertProfile(
+  db: any,
+  userId: string,
+  key: string,
+  value: string,
+  confidence: number,
+): Promise<ToolResult> {
+  const existing = await db.userProfile.findFirst({ where: { userId, key } });
+  let action: string;
+
+  if (existing) {
+    await db.userProfile.update({
+      where: { id: existing.id },
+      data: { value, confidence },
+    });
+    action = 'updated';
+  } else {
+    await db.userProfile.create({
+      data: { userId, key, value, confidence },
+    });
+    action = 'created';
+  }
+
+  return {
+    success: true,
+    output: `Profile ${action}: "${key}" = "${value}" (confidence: ${confidence}). This will be remembered across all conversations.`,
   };
 }
 

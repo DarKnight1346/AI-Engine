@@ -3,6 +3,10 @@ import type { ToolManifestEntry } from './tool-index.js';
 
 // ---------------------------------------------------------------------------
 // Hybrid ToolExecutor — routes execution to dashboard or worker
+//
+// Dashboard-safe tools run inline in the dashboard process.
+// Worker tools are dispatched to a connected worker node via WebSocket
+// using the WorkerHub singleton.
 // ---------------------------------------------------------------------------
 
 /** Tools safe to run inline in the dashboard process */
@@ -11,6 +15,7 @@ const DASHBOARD_SAFE_TOOLS = new Set([
   'discover_tools',
   'execute_tool',
   'search_memory',
+  'create_skill',
   // Environment
   'getDateTime',
   'getSystemInfo',
@@ -58,12 +63,28 @@ export function routeTool(toolName: string): ToolExecutionRoute {
 }
 
 /**
+ * Interface for the WorkerHub's tool dispatch capability.
+ * Defined here to avoid circular dependency on the dashboard package.
+ */
+export interface WorkerToolDispatcher {
+  executeToolOnWorker(
+    toolName: string,
+    input: Record<string, unknown>,
+    requiredCapabilities?: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<{ success: boolean; output: string }>;
+}
+
+/**
  * ToolExecutor manages a set of locally-executable tools and routes
- * worker-bound tools to the task queue.
+ * worker-bound tools to a connected worker node via WebSocket.
  */
 export class ToolExecutor {
   /** Locally registered executable tools (dashboard-safe) */
   private localTools: Map<string, Tool> = new Map();
+
+  /** Worker dispatch function — set by the dashboard at startup */
+  private workerDispatcher: WorkerToolDispatcher | null = null;
 
   /** Register a tool for local (dashboard-side) execution */
   registerLocal(tool: Tool): void {
@@ -83,6 +104,14 @@ export class ToolExecutor {
   /** Get a local tool by name */
   getLocal(name: string): Tool | undefined {
     return this.localTools.get(name);
+  }
+
+  /**
+   * Set the worker dispatcher — called once at startup by the dashboard
+   * to connect the ToolExecutor to the WorkerHub.
+   */
+  setWorkerDispatcher(dispatcher: WorkerToolDispatcher): void {
+    this.workerDispatcher = dispatcher;
   }
 
   /**
@@ -114,12 +143,25 @@ export class ToolExecutor {
     }
 
     if (route === 'worker') {
-      // TODO: Dispatch to worker via Redis task queue and await result.
-      // For now, return a helpful message that the tool requires a worker.
-      return {
-        success: false,
-        output: `Tool "${toolName}" requires a worker node for execution. Worker dispatch is not yet connected in chat mode. This tool works when tasks are assigned via the Boards/Workflows system.`,
-      };
+      // Dispatch to a connected worker via WebSocket
+      if (!this.workerDispatcher) {
+        return {
+          success: false,
+          output: `Tool "${toolName}" requires a worker node, but no worker dispatch is configured. Ensure at least one worker is connected.`,
+        };
+      }
+
+      // Browser tools require macOS workers with display capability
+      const isBrowserTool = toolName.startsWith('browser_');
+      const requiredCaps = isBrowserTool
+        ? { browserCapable: true, os: 'darwin' }
+        : undefined;
+
+      return await this.workerDispatcher.executeToolOnWorker(
+        toolName,
+        input,
+        requiredCaps,
+      );
     }
 
     return {

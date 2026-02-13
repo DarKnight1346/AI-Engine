@@ -193,13 +193,17 @@ async function executeTaskDirectly(
 ) {
   const { getDb } = await import('@ai-engine/db');
   const { LLMPool } = await import('@ai-engine/llm');
+  const { ChatExecutor } = await import('@ai-engine/agent-runtime');
+  const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
+  const { withMemoryPrompt } = await import('@ai-engine/shared');
   const db = getDb();
   const startTime = Date.now();
 
   // Build prompt from task config
   const config = (task.configJson as any) ?? {};
   const taskPrompt = config.prompt ?? config.input ?? `Execute scheduled task: ${task.name}`;
-  const systemPrompt = agent?.rolePrompt ?? 'You are a helpful AI assistant executing a scheduled task.';
+  const basePrompt = agent?.rolePrompt ?? 'You are a helpful AI assistant executing a scheduled task.';
+  const systemPrompt = withMemoryPrompt(basePrompt);
 
   // Load API keys
   const apiKeys = await db.apiKey.findMany({ where: { isActive: true } });
@@ -221,9 +225,39 @@ async function executeTaskDirectly(
     strategy: 'round-robin',
   });
 
-  const result = await pool.call(
+  // Build memory search function so the agent can search during execution
+  const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
+    try {
+      const embeddings = new EmbeddingService();
+      const memService = new MemoryService(embeddings);
+      const results = await memService.search(query, scope as any, scopeOwnerId, 5, { strengthenOnRecall: true });
+      if (results.length === 0) return 'No matching memories found.';
+      return results.map((m: any) => {
+        const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
+        return `- [${m.scope}/${confidence}] ${m.content}`;
+      }).join('\n');
+    } catch {
+      return 'Memory search unavailable.';
+    }
+  };
+
+  // Use ChatExecutor for full tool access (memory, discovery, skills, goals)
+  // Worker dispatch: scheduled tasks can also route tools to workers
+  const { WorkerHub } = await import('./lib/worker-hub');
+  const workerHub = WorkerHub.getInstance();
+
+  const executor = new ChatExecutor({
+    llm: pool,
+    tier: 'standard',
+    searchMemory: searchMemoryFn,
+    nodeId: 'scheduler',
+    agentId: agent?.id ?? 'scheduled-task',
+    workerDispatcher: workerHub,
+  });
+
+  const result = await executor.execute(
     [{ role: 'user' as const, content: taskPrompt }],
-    { tier: 'standard', systemPrompt },
+    systemPrompt,
   );
 
   const durationMs = Date.now() - startTime;

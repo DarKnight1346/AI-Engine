@@ -4,8 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Box, Typography, Card, CardContent, Button, Chip, Avatar, Stack,
   CircularProgress, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Snackbar, Alert, IconButton, FormControl, InputLabel,
-  Select, MenuItem, Paper, Divider, Tooltip,
+  TextField, Snackbar, Alert, IconButton, Paper, Divider, Tooltip,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
@@ -32,15 +31,6 @@ const statusColor: Record<string, 'default' | 'success' | 'error'> = {
   error: 'error',
 };
 
-const AVAILABLE_TOOLS = [
-  'webSearch', 'webSearchNews', 'webGetPage', 'webGetPageStructured',
-  'searchSkills', 'loadSkill', 'searchMemory', 'storeMemory',
-  'getCredential', 'createCredential', 'readFile', 'writeFile',
-  'listFiles', 'execShell', 'navigate', 'click', 'type',
-  'screenshot', 'getAccessibilityTree', 'sendNotification',
-  'getDateTime', 'getSystemInfo', 'getTaskContext', 'wait',
-];
-
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,7 +45,6 @@ export default function AgentsPage() {
   // Form fields
   const [name, setName] = useState('');
   const [rolePrompt, setRolePrompt] = useState('');
-  const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [capabilities, setCapabilities] = useState('');
 
   // Delete confirmation
@@ -75,7 +64,6 @@ export default function AgentsPage() {
     setEditingAgent(null);
     setName('');
     setRolePrompt('');
-    setSelectedTools(['getDateTime', 'getSystemInfo', 'getTaskContext', 'wait', 'searchSkills', 'loadSkill', 'searchMemory', 'storeMemory']);
     setCapabilities('');
     setDialogOpen(true);
   };
@@ -84,7 +72,6 @@ export default function AgentsPage() {
     setEditingAgent(agent);
     setName(agent.name);
     setRolePrompt(agent.rolePrompt);
-    setSelectedTools(Object.keys(agent.toolConfig ?? {}));
     setCapabilities((agent.requiredCapabilities ?? []).join(', '));
     setDialogOpen(true);
   };
@@ -93,13 +80,10 @@ export default function AgentsPage() {
     if (!name.trim()) return;
     setSaving(true);
     try {
-      const toolConfig: Record<string, boolean> = {};
-      selectedTools.forEach((t) => { toolConfig[t] = true; });
-
       const payload = {
         name: name.trim(),
         rolePrompt: rolePrompt.trim(),
-        toolConfig,
+        toolConfig: {}, // All tools available — skill detection happens at prompt time
         requiredCapabilities: capabilities.split(',').map((c) => c.trim()).filter(Boolean),
       };
 
@@ -123,7 +107,7 @@ export default function AgentsPage() {
     } finally {
       setSaving(false);
     }
-  }, [name, rolePrompt, selectedTools, capabilities, editingAgent, reload]);
+  }, [name, rolePrompt, capabilities, editingAgent, reload]);
 
   const handleDelete = useCallback(async (id: string) => {
     try {
@@ -212,12 +196,7 @@ export default function AgentsPage() {
                 <Divider />
                 <Box>
                   <Typography variant="subtitle2" color="text.secondary" gutterBottom>Tools</Typography>
-                  <Stack direction="row" flexWrap="wrap" gap={0.5}>
-                    {Object.keys(detailAgent.toolConfig ?? {}).map((tool) => (
-                      <Chip key={tool} label={tool} size="small" variant="outlined" />
-                    ))}
-                    {Object.keys(detailAgent.toolConfig ?? {}).length === 0 && <Typography variant="caption" color="text.secondary">No tools configured</Typography>}
-                  </Stack>
+                  <Typography variant="caption" color="text.secondary">All tools available — relevant skills are detected automatically at prompt time.</Typography>
                 </Box>
                 {detailAgent.requiredCapabilities && detailAgent.requiredCapabilities.length > 0 && (
                   <>
@@ -260,26 +239,6 @@ export default function AgentsPage() {
               placeholder="Describe what this agent does, its expertise, and how it should behave..."
               helperText="This is the system prompt that defines the agent's personality and capabilities."
             />
-            <Box>
-              <Typography variant="subtitle2" gutterBottom>Tools</Typography>
-              <Stack direction="row" flexWrap="wrap" gap={0.5}>
-                {AVAILABLE_TOOLS.map((tool) => (
-                  <Chip
-                    key={tool}
-                    label={tool}
-                    size="small"
-                    color={selectedTools.includes(tool) ? 'primary' : 'default'}
-                    variant={selectedTools.includes(tool) ? 'filled' : 'outlined'}
-                    onClick={() => {
-                      setSelectedTools((prev) =>
-                        prev.includes(tool) ? prev.filter((t) => t !== tool) : [...prev, tool]
-                      );
-                    }}
-                    sx={{ cursor: 'pointer' }}
-                  />
-                ))}
-              </Stack>
-            </Box>
             <TextField
               label="Required Capabilities (optional)"
               fullWidth

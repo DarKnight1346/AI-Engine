@@ -288,29 +288,51 @@ model AgentPinnedSkill {
 // Memory
 // ============================================================
 model MemoryEntry {
-  id           String   @id @default(uuid())
-  scope        String   // global | team | personal
-  scopeOwnerId String?  @map("scope_owner_id")
-  type         String   // conversation | knowledge | reflection | observation
-  content      String
-  importance   Float    @default(0.5)
-  createdAt    DateTime @default(now()) @map("created_at")
+  id             String   @id @default(uuid())
+  scope          String   // global | team | personal
+  scopeOwnerId   String?  @map("scope_owner_id")
+  type           String   // conversation | knowledge | reflection | observation
+  content        String
+  importance     Float    @default(0.5)
+  strength       Float    @default(1.0)                        // Current memory strength (decays over time)
+  decayRate      Float    @default(0.15) @map("decay_rate")    // Individual decay rate (lower = slower forgetting)
+  lastAccessedAt DateTime @default(now()) @map("last_accessed_at")
+  accessCount    Int      @default(0) @map("access_count")
+  source         String   @default("explicit")                 // explicit | conversation | consolidation | inference
+  createdAt      DateTime @default(now()) @map("created_at")
 
-  embeddings MemoryEmbedding[]
+  embeddings        MemoryEmbedding[]
+  associationsFrom  MemoryAssociation[] @relation("AssocSource")
+  associationsTo    MemoryAssociation[] @relation("AssocTarget")
 
   @@index([scope, scopeOwnerId])
+  @@index([importance])
+  @@index([strength])
   @@map("memory_entries")
 }
 
 model MemoryEmbedding {
-  id        String                     @id @default(uuid())
-  entryId   String                     @map("entry_id")
-  entryType String                     @map("entry_type") // memory | skill
-  embedding Unsupported("vector(1536)")
+  id        String                    @id @default(uuid())
+  entryId   String                    @map("entry_id")
+  entryType String                    @map("entry_type") // memory | skill
+  embedding Unsupported("vector(768)")
 
   memoryEntry MemoryEntry? @relation(fields: [entryId], references: [id], onDelete: Cascade)
 
   @@map("memory_embeddings")
+}
+
+model MemoryAssociation {
+  id            String @id @default(uuid())
+  sourceEntryId String @map("source_entry_id")
+  targetEntryId String @map("target_entry_id")
+  weight        Float  @default(0.5) // 0-1 association strength
+
+  sourceEntry MemoryEntry @relation("AssocSource", fields: [sourceEntryId], references: [id], onDelete: Cascade)
+  targetEntry MemoryEntry @relation("AssocTarget", fields: [targetEntryId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceEntryId, targetEntryId])
+  @@map("memory_associations")
 }
 
 model UserProfile {

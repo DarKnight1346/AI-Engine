@@ -393,7 +393,10 @@ export default function ChatPage() {
     !mentionQuery || a.name.toLowerCase().includes(mentionQuery)
   );
 
-  // ── Send message ──
+  // ── Active SSE abort controller (to cancel streaming on unmount or new send) ──
+  const abortRef = useRef<AbortController | null>(null);
+
+  // ── Send message (streaming via SSE) ──
   const handleSend = async () => {
     if (!input.trim() || sending) return;
 
@@ -409,8 +412,24 @@ export default function ChatPage() {
     setInput('');
     setSending(true);
 
+    // Create a placeholder AI message that we'll stream into
+    const aiMsgId = crypto.randomUUID();
+    const aiMsg: Message = {
+      id: aiMsgId,
+      role: 'ai',
+      content: '',
+      timestamp: new Date(),
+      agentName: currentAgent?.name,
+    };
+    setMessages((prev) => [...prev, aiMsg]);
+
+    // Abort any previous stream
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const res = await fetch('/api/chat/send', {
+      const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -418,41 +437,123 @@ export default function ChatPage() {
           sessionId,
           agentId: currentAgent?.id ?? null,
         }),
+        signal: controller.signal,
       });
-      const data = await res.json();
 
-      if (data.sessionId) {
-        setSessionId(data.sessionId);
-        loadSessions();
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
+        setMessages((prev) => prev.map((m) =>
+          m.id === aiMsgId ? { ...m, content: `Error: ${errData.error}` } : m
+        ));
+        setSending(false);
+        return;
       }
 
-      if (data.aiMessage) {
-        setMessages((prev) => [...prev, {
-          id: data.aiMessage.id,
-          role: 'ai',
-          content: data.aiMessage.content,
-          timestamp: new Date(data.aiMessage.createdAt),
-          agentName: data.aiMessage.agentName,
-        }]);
-      } else if (data.error) {
-        setMessages((prev) => [...prev, {
-          id: crypto.randomUUID(),
-          role: 'ai',
-          content: `Error: ${data.error}`,
-          timestamp: new Date(),
-        }]);
+      // Read the SSE stream with proper event: / data: correlation
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let streamedContent = '';
+      let currentEventType = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+
+          // Skip comments (keep-alive pings)
+          if (trimmed.startsWith(':')) continue;
+
+          // Track event type
+          if (trimmed.startsWith('event: ')) {
+            currentEventType = trimmed.slice(7).trim();
+            continue;
+          }
+
+          // Empty line = end of event block, reset
+          if (!trimmed) {
+            currentEventType = '';
+            continue;
+          }
+
+          if (!trimmed.startsWith('data: ')) continue;
+
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+
+            switch (currentEventType) {
+              case 'session':
+                if (data.sessionId) {
+                  setSessionId(data.sessionId);
+                  loadSessions();
+                }
+                break;
+
+              case 'token':
+                streamedContent += data.text;
+                setMessages((prev) => prev.map((m) =>
+                  m.id === aiMsgId ? { ...m, content: streamedContent } : m
+                ));
+                break;
+
+              case 'tool':
+                // Tool lifecycle events — could show in UI later
+                break;
+
+              case 'status':
+                // Status updates (e.g., "Using tool X...")
+                break;
+
+              case 'done':
+                // Finalize with the full content from the server
+                setMessages((prev) => prev.map((m) =>
+                  m.id === aiMsgId
+                    ? { ...m, content: data.content, agentName: data.agentName || m.agentName }
+                    : m
+                ));
+                break;
+
+              case 'error':
+                setMessages((prev) => prev.map((m) =>
+                  m.id === aiMsgId ? { ...m, content: `Error: ${data.message}` } : m
+                ));
+                break;
+            }
+          } catch {
+            // Skip unparseable lines
+          }
+        }
       }
     } catch (err: any) {
-      setMessages((prev) => [...prev, {
-        id: crypto.randomUUID(),
-        role: 'ai',
-        content: `Failed to connect: ${err.message}`,
-        timestamp: new Date(),
-      }]);
+      if (err.name !== 'AbortError') {
+        setMessages((prev) => {
+          const existing = prev.find((m) => m.id === aiMsgId);
+          if (existing && !existing.content) {
+            return prev.map((m) =>
+              m.id === aiMsgId ? { ...m, content: `Failed to connect: ${err.message}` } : m
+            );
+          }
+          return prev;
+        });
+      }
     } finally {
       setSending(false);
+      abortRef.current = null;
     }
   };
+
+  // Clean up streaming on unmount
+  useEffect(() => {
+    return () => { abortRef.current?.abort(); };
+  }, []);
 
   // ── Keyboard shortcut ──
   useEffect(() => {
@@ -717,8 +818,8 @@ export default function ChatPage() {
                 );
               })}
 
-              {/* Typing indicator */}
-              {sending && (
+              {/* Typing indicator — only show when AI message is still empty (queued/processing) */}
+              {sending && messages.length > 0 && messages[messages.length - 1].role === 'ai' && !messages[messages.length - 1].content && (
                 <Box sx={{ display: 'flex', gap: 1.5, mt: 2, alignItems: 'flex-start' }}>
                   <Avatar sx={{
                     width: 30, height: 30,

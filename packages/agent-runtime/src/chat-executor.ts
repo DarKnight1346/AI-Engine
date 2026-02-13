@@ -1,7 +1,7 @@
-import type { LLMPool } from '@ai-engine/llm';
+import type { LLMPool, LLMStreamCallback } from '@ai-engine/llm';
 import type { LLMMessage, LLMToolDefinition, LLMToolCall, LLMCallOptions } from '@ai-engine/shared';
 import { ToolIndex, type ToolManifestEntry } from './tool-index.js';
-import { ToolExecutor } from './tool-executor.js';
+import { ToolExecutor, type WorkerToolDispatcher } from './tool-executor.js';
 import { EnvironmentTools } from './tools/environment.js';
 import { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
 import type { Tool, ToolContext, ToolResult } from './types.js';
@@ -24,6 +24,28 @@ export interface ChatExecutorOptions {
   /** User context */
   userId?: string;
   teamId?: string;
+  /** Chat session ID (for goal source tracking) */
+  sessionId?: string;
+
+  // ── Worker-compatible context ──────────────────────────────────────
+  /** Node identifier (defaults to 'dashboard') */
+  nodeId?: string;
+  /** Agent identifier for tool context (defaults to 'chat') */
+  agentId?: string;
+  /** Work item ID for execution logging */
+  workItemId?: string;
+  /**
+   * Per-execution tools (e.g. browser tools scoped to a task).
+   * These are registered for both discovery and execution alongside
+   * the built-in tools, ensuring workers have the same capabilities.
+   */
+  additionalTools?: Tool[];
+  /**
+   * Worker dispatcher for routing tool calls to connected worker nodes.
+   * When set, worker-bound tools (browser, shell, filesystem) are sent
+   * to a worker via WebSocket instead of failing with "no worker".
+   */
+  workerDispatcher?: WorkerToolDispatcher;
 }
 
 export interface ChatExecutorResult {
@@ -37,16 +59,30 @@ export interface ChatExecutorResult {
   iterations: number;
 }
 
+/** Events emitted during streaming execution of the chat agent. */
+export type ChatStreamEvent =
+  | { type: 'token'; text: string }
+  | { type: 'status'; message: string }
+  | { type: 'tool_call_start'; name: string; id: string }
+  | { type: 'tool_call_end'; name: string; id: string; success: boolean; output: string }
+  | { type: 'iteration'; iteration: number; maxIterations: number }
+  | { type: 'done'; result: ChatExecutorResult }
+  | { type: 'error'; message: string };
+
+/** Callback for receiving streaming events during chat execution. */
+export type ChatStreamCallback = (event: ChatStreamEvent) => void;
+
 // ---------------------------------------------------------------------------
 // ChatExecutor — agentic loop with meta-tool discovery
 // ---------------------------------------------------------------------------
 
 /**
- * Wraps an LLMPool with a tool execution loop powered by 3 meta-tools.
+ * Wraps an LLMPool with a tool execution loop powered by 7 meta-tools.
  *
- * The agent starts with only `discover_tools`, `execute_tool`, and
- * `search_memory` in context. It discovers and executes additional
- * tools on demand, keeping context usage minimal.
+ * The agent starts with `discover_tools`, `execute_tool`, `search_memory`,
+ * `create_skill`, `store_memory`, `manage_goal`, and `update_profile`
+ * in context. It discovers and executes additional tools on demand,
+ * keeping context usage minimal.
  *
  * Flow:
  *   1. Call LLM with messages + meta-tool definitions
@@ -71,7 +107,12 @@ export class ChatExecutor {
     // Initialize hybrid executor with meta-tools
     this.toolExecutor = new ToolExecutor();
 
-    // Create the 3 meta-tools (with references to index + executor)
+    // Connect worker dispatcher if provided (routes tool calls to workers via WebSocket)
+    if (options.workerDispatcher) {
+      this.toolExecutor.setWorkerDispatcher(options.workerDispatcher);
+    }
+
+    // Create the meta-tools (with references to index + executor)
     this.metaTools = createMetaTools({
       toolIndex: this.toolIndex,
       toolExecutor: this.toolExecutor,
@@ -79,6 +120,7 @@ export class ChatExecutor {
       searchMemory: options.searchMemory,
       userId: options.userId,
       teamId: options.teamId,
+      sessionId: options.sessionId,
     });
 
     // Register meta-tools in the executor so they can be dispatched
@@ -86,6 +128,20 @@ export class ChatExecutor {
 
     // Register dashboard-safe built-in tools in the executor
     this.registerBuiltInExecutables();
+
+    // Register per-execution additional tools (e.g. browser tools on workers)
+    if (options.additionalTools && options.additionalTools.length > 0) {
+      const additionalManifest: ToolManifestEntry[] = options.additionalTools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        category: t.name.startsWith('browser_') ? 'browser' : 'system',
+        inputSchema: t.inputSchema,
+        executionTarget: 'dashboard' as const, // execute locally on this node
+        source: 'tool' as const,
+      }));
+      this.toolIndex.registerAll(additionalManifest);
+      this.toolExecutor.registerAllLocal(options.additionalTools);
+    }
 
     // LLM-compatible definitions (compact, ~240 tokens total)
     this.metaToolDefs = getMetaToolDefinitions();
@@ -157,8 +213,9 @@ export class ChatExecutor {
         if (metaTool) {
           // Meta-tool — execute directly
           const dummyContext: ToolContext = {
-            nodeId: 'dashboard',
-            agentId: 'chat',
+            nodeId: this.options.nodeId ?? 'dashboard',
+            agentId: this.options.agentId ?? 'chat',
+            workItemId: this.options.workItemId,
             capabilities: {
               os: process.platform as any,
               hasDisplay: false,
@@ -201,6 +258,145 @@ export class ChatExecutor {
       usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
       iterations: this.maxIterations,
     };
+  }
+
+  /**
+   * Streaming variant of `execute()`. Emits `ChatStreamEvent`s via the
+   * callback as tokens arrive and tools are called, enabling real-time UI
+   * updates while the agentic loop runs.
+   *
+   * The final `done` event carries the same `ChatExecutorResult` as `execute()`.
+   */
+  async executeStreaming(
+    messages: LLMMessage[],
+    systemPrompt: string | undefined,
+    onEvent: ChatStreamCallback,
+  ): Promise<ChatExecutorResult> {
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let toolCallsCount = 0;
+
+    const workingMessages = [...messages];
+
+    for (let iteration = 0; iteration < this.maxIterations; iteration++) {
+      onEvent({ type: 'iteration', iteration, maxIterations: this.maxIterations });
+
+      const callOpts: LLMCallOptions = {
+        tier: this.options.tier ?? 'standard',
+        systemPrompt,
+        tools: this.metaToolDefs,
+      };
+
+      // Use streaming LLM call — emit tokens as they arrive
+      const response = await this.options.llm.callStreaming(
+        workingMessages,
+        callOpts,
+        (llmEvent) => {
+          if (llmEvent.type === 'token') {
+            onEvent({ type: 'token', text: llmEvent.text });
+          }
+          // tool_use_start is informational during streaming
+          if (llmEvent.type === 'tool_use_start') {
+            onEvent({ type: 'status', message: `Calling ${llmEvent.name}...` });
+          }
+        },
+      );
+
+      totalInputTokens += response.usage.inputTokens;
+      totalOutputTokens += response.usage.outputTokens;
+
+      // If no tool calls, we have the final response
+      if (response.toolCalls.length === 0) {
+        const result: ChatExecutorResult = {
+          content: response.content,
+          toolCallsCount,
+          usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+          iterations: iteration + 1,
+        };
+        onEvent({ type: 'done', result });
+        return result;
+      }
+
+      // The LLM wants to use tools — stop streaming text, start tool execution
+      onEvent({ type: 'status', message: `Using ${response.toolCalls.length} tool(s)...` });
+
+      // Append assistant message with tool calls
+      workingMessages.push({
+        role: 'assistant',
+        content: [
+          ...(response.content ? [{ type: 'text' as const, text: response.content }] : []),
+          ...response.toolCalls.map((tc: LLMToolCall) => ({
+            type: 'tool_use' as const,
+            id: tc.id,
+            name: tc.name,
+            input: tc.input,
+          })),
+        ],
+      });
+
+      // Execute each tool call
+      const toolResults: Array<{ type: 'tool_result'; toolUseId: string; content: string }> = [];
+
+      for (const toolCall of response.toolCalls) {
+        toolCallsCount++;
+        onEvent({ type: 'tool_call_start', name: toolCall.name, id: toolCall.id });
+
+        const metaTool = this.metaTools.find((t) => t.name === toolCall.name);
+        let result: ToolResult;
+
+        if (metaTool) {
+          const dummyContext: ToolContext = {
+            nodeId: this.options.nodeId ?? 'dashboard',
+            agentId: this.options.agentId ?? 'chat',
+            workItemId: this.options.workItemId,
+            capabilities: {
+              os: process.platform as any,
+              hasDisplay: false,
+              browserCapable: false,
+              environment: 'cloud' as any,
+              customTags: [],
+            },
+          };
+          try {
+            result = await metaTool.execute(toolCall.input, dummyContext);
+          } catch (err: any) {
+            result = { success: false, output: `Error: ${err.message}` };
+          }
+        } else {
+          result = {
+            success: false,
+            output: `Unknown tool "${toolCall.name}". Use discover_tools to find available tools, then execute_tool to run them.`,
+          };
+        }
+
+        onEvent({ type: 'tool_call_end', name: toolCall.name, id: toolCall.id, success: result.success, output: result.output });
+
+        toolResults.push({
+          type: 'tool_result',
+          toolUseId: toolCall.id,
+          content: result.output,
+        });
+      }
+
+      // Append tool results as a user message
+      workingMessages.push({
+        role: 'user',
+        content: toolResults,
+      });
+
+      // Emit status for next iteration
+      onEvent({ type: 'status', message: 'Processing results...' });
+    }
+
+    // Max iterations reached
+    const maxResult: ChatExecutorResult = {
+      content: 'I reached the maximum number of tool-use iterations. Here is what I found so far — please try again with a more specific request.',
+      toolCallsCount,
+      usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+      iterations: this.maxIterations,
+    };
+    onEvent({ type: 'done', result: maxResult });
+    return maxResult;
   }
 
   // ── Built-in tool registration ─────────────────────────────────────
@@ -256,6 +452,24 @@ export class ChatExecutor {
         description: 'Fetch and read the content of a web page by URL.',
         category: 'web',
         inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'createSkill',
+        description: 'Create a new reusable skill — capture a workflow, technique, or procedure for future reuse by any agent.',
+        category: 'skills',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            category: { type: 'string' },
+            instructions: { type: 'string' },
+            codeSnippet: { type: 'string' },
+          },
+          required: ['name', 'description', 'category', 'instructions'],
+        },
         executionTarget: 'dashboard',
         source: 'tool',
       },

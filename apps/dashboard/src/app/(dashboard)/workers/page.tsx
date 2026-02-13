@@ -12,6 +12,7 @@ import TerminalIcon from '@mui/icons-material/Terminal';
 import ComputerIcon from '@mui/icons-material/Computer';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import DeleteIcon from '@mui/icons-material/Delete';
 
 interface Worker {
   id: string;
@@ -39,6 +40,10 @@ export default function WorkersPage() {
   const [commandLoading, setCommandLoading] = useState(false);
   const [tunnelUrl, setTunnelUrl] = useState('');
   const [copied, setCopied] = useState(false);
+
+  // Delete worker dialog
+  const [deleteTarget, setDeleteTarget] = useState<Worker | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -87,6 +92,25 @@ export default function WorkersPage() {
       setLoading(false);
     }
   }, []);
+
+  const handleDelete = useCallback(async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/workers/${deleteTarget.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to delete worker');
+      }
+      setSnack({ open: true, message: `Worker "${deleteTarget.hostname}" removed`, severity: 'success' });
+      setDeleteTarget(null);
+      load();
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteTarget, load]);
 
   useEffect(() => {
     load();
@@ -163,13 +187,22 @@ export default function WorkersPage() {
 
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', md: '1fr 1fr 1fr' }, gap: 2 }}>
         {workers.map((worker) => (
-          <Card key={worker.id} sx={{ opacity: worker.online ? 1 : 0.5, '&:hover': { boxShadow: 4 } }}>
+          <Card key={worker.id} sx={{ opacity: worker.online ? 1 : 0.5, '&:hover': { boxShadow: 4 }, position: 'relative' }}>
             <CardContent>
+              <Tooltip title="Remove worker">
+                <IconButton
+                  size="small"
+                  sx={{ position: 'absolute', top: 8, right: 8, opacity: 0.5, '&:hover': { opacity: 1, color: 'error.main' } }}
+                  onClick={() => setDeleteTarget(worker)}
+                >
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
               <Stack direction="row" spacing={1.5} alignItems="center" mb={1.5}>
                 <Avatar sx={{ bgcolor: worker.os === 'darwin' ? 'grey.800' : 'primary.dark', width: 36, height: 36 }}>
                   <OsIcon os={worker.os} />
                 </Avatar>
-                <Box sx={{ flex: 1 }}>
+                <Box sx={{ flex: 1, pr: 3 }}>
                   <Typography fontWeight={600}>{worker.hostname}</Typography>
                   <Stack direction="row" spacing={0.5} alignItems="center">
                     <Chip label={worker.environment} size="small" color={worker.environment === 'cloud' ? 'info' : 'success'} sx={{ height: 20, fontSize: 11 }} />
@@ -252,6 +285,23 @@ export default function WorkersPage() {
           <Button onClick={() => setAddOpen(false)}>Close</Button>
           <Button variant="outlined" startIcon={<RefreshIcon />} onClick={generateCommand} disabled={commandLoading}>
             Regenerate
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Delete Worker Confirmation ── */}
+      <Dialog open={!!deleteTarget} onClose={() => !deleting && setDeleteTarget(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Remove Worker</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Are you sure you want to remove <strong>{deleteTarget?.hostname}</strong>?
+            {deleteTarget?.online && ' This worker is currently online and will be disconnected.'}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteTarget(null)} disabled={deleting}>Cancel</Button>
+          <Button onClick={handleDelete} color="error" variant="contained" disabled={deleting}>
+            {deleting ? 'Removing...' : 'Remove'}
           </Button>
         </DialogActions>
       </Dialog>
