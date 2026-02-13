@@ -96,6 +96,7 @@ export default function SettingsPage() {
   const [addKeyOpen, setAddKeyOpen] = useState(false);
   const [newKeyLabel, setNewKeyLabel] = useState('');
   const [newKeyValue, setNewKeyValue] = useState('');
+  const [newKeyProvider, setNewKeyProvider] = useState<'anthropic-api' | 'setup-token'>('setup-token');
   const [addingKey, setAddingKey] = useState(false);
   const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null);
 
@@ -238,16 +239,21 @@ export default function SettingsPage() {
       const res = await fetch('/api/settings/api-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: newKeyLabel.trim(), key: newKeyValue.trim() }),
+        body: JSON.stringify({
+          label: newKeyLabel.trim(),
+          key: newKeyValue.trim(),
+          provider: 'anthropic', // Both API keys and setup-tokens use the Anthropic provider
+        }),
       });
       const result = await res.json();
       if (result.error) {
         setSnack({ open: true, message: result.error, severity: 'error' });
       } else {
-        setSnack({ open: true, message: 'API key added successfully', severity: 'success' });
+        setSnack({ open: true, message: newKeyProvider === 'setup-token' ? 'Setup token added' : 'API key added', severity: 'success' });
         setAddKeyOpen(false);
         setNewKeyLabel('');
         setNewKeyValue('');
+        setNewKeyProvider('setup-token');
         reload();
       }
     } catch (err: any) {
@@ -255,7 +261,7 @@ export default function SettingsPage() {
     } finally {
       setAddingKey(false);
     }
-  }, [newKeyLabel, newKeyValue, reload]);
+  }, [newKeyLabel, newKeyValue, newKeyProvider, reload]);
 
   // ── Delete API Key ──
   const handleDeleteKey = useCallback(async (keyId: string) => {
@@ -501,12 +507,12 @@ export default function SettingsPage() {
       {tab === 0 && (
         <Stack spacing={2}>
           <Paper sx={{ p: 3 }}>
-            <Typography variant="h3" sx={{ mb: 2 }}>Claude API Keys</Typography>
+            <Typography variant="h3" sx={{ mb: 2 }}>Claude Authentication</Typography>
             {loading ? (
               <Stack spacing={2}><Skeleton height={80} /><Skeleton height={80} /></Stack>
             ) : (data?.apiKeys?.length ?? 0) === 0 ? (
               <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                No API keys configured. Add a Claude API key to enable AI features.
+                No API keys or tokens configured. Add a setup-token or API key to enable AI features.
               </Typography>
             ) : (
               data!.apiKeys.map((key) => (
@@ -541,7 +547,7 @@ export default function SettingsPage() {
                 </Box>
               ))
             )}
-            <Button variant="outlined" onClick={() => setAddKeyOpen(true)}>Add API Key</Button>
+            <Button variant="outlined" onClick={() => setAddKeyOpen(true)}>Add API Key / Token</Button>
           </Paper>
 
           <Paper sx={{ p: 3 }}>
@@ -864,29 +870,56 @@ export default function SettingsPage() {
         </Paper>
       )}
 
-      {/* ── Add API Key Dialog ── */}
+      {/* ── Add API Key / Token Dialog ── */}
       <Dialog open={addKeyOpen} onClose={() => setAddKeyOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Add Claude API Key</DialogTitle>
+        <DialogTitle>Add Claude Authentication</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              select
+              label="Authentication Type"
+              fullWidth
+              value={newKeyProvider}
+              onChange={(e) => setNewKeyProvider(e.target.value as any)}
+              SelectProps={{ native: true }}
+            >
+              <option value="setup-token">Claude Max Setup Token (recommended)</option>
+              <option value="anthropic-api">Anthropic API Key (pay-per-token)</option>
+            </TextField>
+
             <TextField
               label="Label"
               fullWidth
               value={newKeyLabel}
               onChange={(e) => setNewKeyLabel(e.target.value)}
-              placeholder="e.g., Primary Key, Backup Key"
+              placeholder={newKeyProvider === 'setup-token' ? 'e.g., Max Account 1, Gary' : 'e.g., Primary Key'}
               autoFocus
             />
+
             <TextField
-              label="API Key"
+              label={newKeyProvider === 'setup-token' ? 'Setup Token' : 'API Key'}
               fullWidth
               value={newKeyValue}
               onChange={(e) => setNewKeyValue(e.target.value)}
-              placeholder="sk-ant-api03-..."
+              placeholder={newKeyProvider === 'setup-token' ? 'Paste token from claude setup-token...' : 'sk-ant-api03-...'}
               type="password"
               inputProps={{ spellCheck: false }}
-              helperText="Your key is encrypted at rest and never displayed after saving."
+              helperText={newKeyProvider === 'setup-token'
+                ? 'Run "claude setup-token" on any machine, then paste the token here. Calls the Anthropic API directly.'
+                : 'Get an API key from console.anthropic.com. Encrypted at rest.'
+              }
             />
+
+            {newKeyProvider === 'setup-token' && (
+              <Alert severity="info" variant="outlined" sx={{ fontSize: 12 }}>
+                <strong>How to get a setup-token:</strong><br />
+                1. Install Claude Code: <code>npm i -g @anthropic-ai/claude-code</code><br />
+                2. Log in: <code>claude auth login</code><br />
+                3. Generate: <code>claude setup-token</code><br />
+                4. Copy the token and paste above<br /><br />
+                Add multiple tokens for load balancing across Claude Max accounts.
+              </Alert>
+            )}
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -897,7 +930,7 @@ export default function SettingsPage() {
             disabled={!newKeyLabel.trim() || !newKeyValue.trim() || addingKey}
             startIcon={addingKey ? <CircularProgress size={16} /> : undefined}
           >
-            {addingKey ? 'Adding...' : 'Add Key'}
+            {addingKey ? 'Validating...' : newKeyProvider === 'setup-token' ? 'Add Token' : 'Add Key'}
           </Button>
         </DialogActions>
       </Dialog>

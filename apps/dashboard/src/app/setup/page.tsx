@@ -48,7 +48,7 @@ interface FormData {
   displayName: string;
   teamName: string;
   apiKey: string;
-  apiProvider: 'anthropic' | 'claude-max';
+  apiProvider: 'anthropic' | 'claude-max-token' | 'claude-max-proxy';
   apiBaseUrl: string;
   passphrase: string;
 }
@@ -75,7 +75,7 @@ export default function SetupPage() {
       databaseUrl: 'postgresql://ai_engine:ai_engine_password@localhost:5432/ai_engine',
       redisUrl: 'redis://localhost:6379',
       email: '', password: '', displayName: '',
-      teamName: '', apiKey: '', apiProvider: 'anthropic' as const,
+      teamName: '', apiKey: '', apiProvider: 'claude-max-token' as const,
       apiBaseUrl: 'http://localhost:3456/v1', passphrase: '',
     };
   });
@@ -534,11 +534,10 @@ export default function SetupPage() {
     return true;
   };
 
-  /** Step 6 → Save API Key / Configure Claude Max Proxy */
+  /** Step 6 → Save API Key / Configure Claude Max */
   const saveApiKey = async (): Promise<boolean> => {
-    if (formData.apiProvider === 'claude-max') {
-      // Claude Max accounts are managed by the ClaudeMaxSetup component.
-      // Just verify at least one account exists.
+    if (formData.apiProvider === 'claude-max-proxy') {
+      // Proxy-based accounts are managed by the ClaudeMaxSetup component.
       const res = await fetch('/api/settings/claude-max', {
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
       });
@@ -547,6 +546,29 @@ export default function SetupPage() {
       if (!data.accounts || data.accounts.length === 0) {
         throw new Error('Add at least one Claude Max account before continuing');
       }
+      return true;
+    }
+
+    if (formData.apiProvider === 'claude-max-token') {
+      // Setup-token: calls Anthropic API directly as a Bearer token.
+      // This is the recommended path — no proxy needed, system prompts work.
+      if (!formData.apiKey.trim()) {
+        throw new Error('Paste your setup-token to continue');
+      }
+      const res = await fetch('/api/settings/api-keys', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          label: 'Claude Max (setup-token)',
+          key: formData.apiKey.trim(),
+          provider: 'anthropic',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to validate setup-token');
       return true;
     }
 
@@ -625,7 +647,8 @@ export default function SetupPage() {
     if (activeStep === 0) return cfPermanentUrl ? 'Next' : 'Skip (use temporary URL)';
     if (activeStep === 5) return formData.teamName.trim() ? 'Create Team & Continue' : 'Skip';
     if (activeStep === 6) {
-      if (formData.apiProvider === 'claude-max') return 'Connect to Proxy';
+      if (formData.apiProvider === 'claude-max-proxy') return 'Connect to Proxy';
+      if (formData.apiProvider === 'claude-max-token') return formData.apiKey.trim() ? 'Validate & Save Token' : 'Paste a token to continue';
       return formData.apiKey.trim() ? 'Validate & Save Key' : 'Skip';
     }
     if (activeStep === 4) return 'Create Account';
@@ -1133,9 +1156,43 @@ export default function SetupPage() {
                 onChange={(e) => updateField('apiProvider', e.target.value)}
                 SelectProps={{ native: true }}
               >
+                <option value="claude-max-token">Claude Max Subscription (setup-token) — Recommended</option>
                 <option value="anthropic">Anthropic API Key (pay-per-token)</option>
-                <option value="claude-max">Claude Max Subscription (via proxy)</option>
+                <option value="claude-max-proxy">Claude Max via CLI Proxy (advanced)</option>
               </TextField>
+
+              {formData.apiProvider === 'claude-max-token' && (
+                <>
+                  <Alert severity="info" variant="outlined">
+                    Use your Claude Max/Pro subscription ($100-200/month flat rate) directly.
+                    Each subscription needs a setup-token. You can add multiple accounts for load balancing.
+                  </Alert>
+
+                  <Paper variant="outlined" sx={{ p: 2, bgcolor: 'action.hover' }}>
+                    <Typography variant="body2" fontWeight={600} gutterBottom>How to get a setup-token:</Typography>
+                    <Typography variant="body2" component="div" sx={{ fontFamily: 'monospace', fontSize: 12, mb: 1 }}>
+                      1. Install Claude Code: npm i -g @anthropic-ai/claude-code<br />
+                      2. Log in: claude auth login<br />
+                      3. Generate token: claude setup-token<br />
+                      4. Copy the token and paste it below
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Repeat for each Claude Max account. The token calls the Anthropic API directly — no proxy needed, system prompts work perfectly.
+                    </Typography>
+                  </Paper>
+
+                  <TextField
+                    label="Setup Token"
+                    fullWidth
+                    value={formData.apiKey}
+                    onChange={(e) => updateField('apiKey', e.target.value)}
+                    placeholder="Paste your setup-token here..."
+                    type="password"
+                    inputProps={{ spellCheck: false }}
+                    helperText="Run 'claude setup-token' on any machine with Claude Code installed"
+                  />
+                </>
+              )}
 
               {formData.apiProvider === 'anthropic' && (
                 <>
@@ -1156,7 +1213,7 @@ export default function SetupPage() {
                 </>
               )}
 
-              {formData.apiProvider === 'claude-max' && (
+              {formData.apiProvider === 'claude-max-proxy' && (
                 <ClaudeMaxSetup authToken={authToken} onError={(msg) => setStepError(msg)} />
               )}
 
