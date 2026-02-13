@@ -28,15 +28,18 @@ export interface HybridWeights {
 const DEFAULT_WEIGHTS: HybridWeights = {
   similarity: 0.40,
   strength: 0.25,
-  recency: 0.15,
-  importance: 0.15,
-  frequency: 0.05,
+  recency: 0.05,     // lowered from 0.15 — long-term recall matters more than newness
+  importance: 0.10,   // slightly lowered to make room for frequency
+  frequency: 0.20,    // boosted from 0.05 — frequently accessed = "muscle memory"
 };
 
 // Similarity threshold for auto-linking new memories to existing ones
 const ASSOCIATION_THRESHOLD = 0.70;
 // Number of recent memories to check for auto-linking
 const ASSOCIATION_CANDIDATES = 50;
+// Similarity threshold above which a new memory reconsolidates an existing one
+// (merges instead of creating a duplicate)
+const RECONSOLIDATION_THRESHOLD = 0.85;
 
 // ---------------------------------------------------------------------------
 // Memory Service
@@ -53,7 +56,15 @@ export class MemoryService {
   // -----------------------------------------------------------------------
 
   /**
-   * Store a new memory entry with embedding and automatic association linking.
+   * Store a new memory entry with embedding, automatic association linking,
+   * and reconsolidation (merging with highly similar existing memories).
+   *
+   * If an existing memory in the same scope has similarity > 0.85, the existing
+   * memory is updated (reconsolidated) instead of creating a duplicate:
+   * - Content is replaced with the new content (updated information wins)
+   * - Importance takes the maximum of old and new
+   * - Strength is reset to 1.0 (re-encoding effect)
+   * - Access count and associations are preserved
    */
   async store(
     scope: MemoryScope,
@@ -65,6 +76,45 @@ export class MemoryService {
   ): Promise<MemoryEntry> {
     const db = getDb();
 
+    // --- Reconsolidation check ---
+    // Before creating a new entry, check if a very similar memory already exists
+    try {
+      const existing = await this.findSimilarExisting(content, scope, scopeOwnerId);
+      if (existing) {
+        // Reconsolidate: update the existing memory with new content
+        const updatedImportance = Math.max(existing.importance, importance);
+        const updated = await db.memoryEntry.update({
+          where: { id: existing.id },
+          data: {
+            content, // new content overwrites old (handles contradictions)
+            importance: updatedImportance,
+            strength: 1.0, // re-encoding: full strength reset
+            decayRate: Math.min(existing.decayRate, 0.15), // keep lower decay if earned
+            lastAccessedAt: new Date(),
+            accessCount: { increment: 1 },
+          },
+        });
+
+        // Re-embed with updated content
+        try {
+          // Delete old embeddings for this entry
+          await db.$executeRawUnsafe(
+            `DELETE FROM memory_embeddings WHERE entry_id = $1 AND entry_type = 'memory'`,
+            existing.id,
+          );
+          await this.embeddings.storeEmbedding(existing.id, 'memory', content);
+        } catch {
+          // Re-embedding is best-effort; old embedding still works
+        }
+
+        console.log(`[memory] Reconsolidated memory ${existing.id} (similarity: ${existing.similarity.toFixed(3)})`);
+        return this.mapEntry(updated);
+      }
+    } catch {
+      // Reconsolidation check failed — fall through to normal store
+    }
+
+    // --- Normal store ---
     const entry = await db.memoryEntry.create({
       data: {
         scope,
@@ -90,6 +140,49 @@ export class MemoryService {
     }
 
     return this.mapEntry(entry);
+  }
+
+  /**
+   * Find an existing memory in the same scope with very high similarity.
+   * Used by reconsolidation to detect near-duplicates before storing.
+   */
+  private async findSimilarExisting(
+    content: string,
+    scope: MemoryScope,
+    scopeOwnerId: string | null,
+  ): Promise<(MemoryEntry & { similarity: number }) | null> {
+    await this.embeddings.ensureCorrectDimension();
+    const embedding = await this.embeddings.generateEmbedding(content);
+    const db = getDb();
+
+    const results = await db.$queryRawUnsafe<any[]>(
+      `
+      SELECT
+        me.*,
+        1 - (emb.embedding <=> $1::vector) as similarity
+      FROM memory_entries me
+      JOIN memory_embeddings emb ON emb.entry_id = me.id AND emb.entry_type = 'memory'
+      WHERE me.scope = $2
+      ${scopeOwnerId ? `AND me.scope_owner_id = $3` : ''}
+      ORDER BY emb.embedding <=> $1::vector
+      LIMIT 1
+      `,
+      `[${embedding.join(',')}]`,
+      scope,
+      ...(scopeOwnerId ? [scopeOwnerId] : []),
+    );
+
+    if (results.length === 0) return null;
+
+    const top = results[0];
+    const similarity = Number(top.similarity) || 0;
+
+    if (similarity < RECONSOLIDATION_THRESHOLD) return null;
+
+    return {
+      ...this.mapEntry(top),
+      similarity,
+    };
   }
 
   // -----------------------------------------------------------------------
@@ -228,6 +321,193 @@ export class MemoryService {
 
     deduped.sort((a, b) => b.finalScore - a.finalScore);
     return deduped.slice(0, limit);
+  }
+
+  // -----------------------------------------------------------------------
+  // Deep Recall — multi-hop associative search ("let me think about it")
+  //
+  // When initial results are weak, iteratively follows association chains
+  // up to maxHops deep. Each hop uses the discovered memories as new
+  // starting points for spreading activation, simulating the human
+  // experience of "it reminds me of... which reminds me of..."
+  // -----------------------------------------------------------------------
+
+  async deepSearch(
+    query: string,
+    scope: MemoryScope,
+    scopeOwnerId: string | null,
+    limit = 10,
+    maxHops = 3,
+  ): Promise<ScoredMemoryEntry[]> {
+    // Start with a normal search
+    const initialResults = await this.search(query, scope, scopeOwnerId, limit, {
+      strengthenOnRecall: true,
+    });
+
+    if (initialResults.length === 0) return [];
+
+    // If top result scores well, no need to dig deeper
+    const topScore = initialResults[0]?.finalScore ?? 0;
+    if (topScore > 0.7) return initialResults;
+
+    const db = getDb();
+
+    // Collect all discovered memories across hops
+    const allDiscovered = new Map<string, ScoredMemoryEntry>();
+    for (const r of initialResults) {
+      allDiscovered.set(r.id, r);
+    }
+
+    // Track the "frontier" — IDs to expand from at each hop
+    let frontierIds = initialResults.map((r) => r.id);
+
+    for (let hop = 1; hop <= maxHops; hop++) {
+      if (frontierIds.length === 0) break;
+
+      // Damping factor decreases with each hop (farther = weaker signal)
+      const hopDamping = Math.pow(0.5, hop);
+
+      // Load associations from the frontier
+      const placeholders = frontierIds.map((_, i) => `$${i + 1}`).join(', ');
+      const associations = await db.$queryRawUnsafe<any[]>(
+        `SELECT ma.source_entry_id, ma.target_entry_id, ma.weight
+         FROM memory_associations ma
+         WHERE ma.source_entry_id IN (${placeholders})
+            OR ma.target_entry_id IN (${placeholders})`,
+        ...frontierIds,
+      );
+
+      if (associations.length === 0) break;
+
+      // Collect new neighbor IDs
+      const newNeighborIds = new Set<string>();
+      for (const assoc of associations) {
+        for (const nid of [assoc.source_entry_id, assoc.target_entry_id]) {
+          if (!allDiscovered.has(nid)) {
+            newNeighborIds.add(nid);
+          }
+        }
+      }
+
+      if (newNeighborIds.size === 0) break;
+
+      // Fetch neighbor entries
+      const neighborEntries = await db.memoryEntry.findMany({
+        where: { id: { in: [...newNeighborIds] } },
+      });
+
+      // Score each neighbor: damped from the frontier entry that linked to it
+      const nextFrontier: string[] = [];
+      for (const ne of neighborEntries) {
+        const mapped = this.mapEntry(ne);
+        const effectiveStr = computeEffectiveStrength(mapped);
+        const freq = computeFrequencyScore(mapped);
+
+        // Find the best score flowing into this neighbor
+        let bestInflow = 0;
+        for (const assoc of associations) {
+          const fromId = assoc.source_entry_id === ne.id ? assoc.target_entry_id : assoc.source_entry_id;
+          if (assoc.source_entry_id !== ne.id && assoc.target_entry_id !== ne.id) continue;
+          const fromEntry = allDiscovered.get(fromId);
+          if (!fromEntry) continue;
+          const inflow = fromEntry.finalScore * (Number(assoc.weight) || 0.5) * hopDamping;
+          bestInflow = Math.max(bestInflow, inflow);
+        }
+
+        // Combine inflow with the entry's own quality
+        const ownQuality = effectiveStr * 0.3 + mapped.importance * 0.3 + freq * 0.4;
+        const finalScore = bestInflow * 0.6 + ownQuality * 0.4;
+
+        const scored: ScoredMemoryEntry = {
+          ...mapped,
+          similarity: 0,
+          effectiveStrength: effectiveStr,
+          recencyScore: computeRecencyScore(mapped),
+          finalScore,
+        };
+
+        allDiscovered.set(ne.id, scored);
+        nextFrontier.push(ne.id);
+      }
+
+      frontierIds = nextFrontier;
+    }
+
+    // Sort all discovered memories by final score and return top N
+    const allResults = [...allDiscovered.values()];
+    allResults.sort((a, b) => b.finalScore - a.finalScore);
+
+    // Strengthen recalled memories
+    const topIds = allResults.slice(0, limit).map((m) => m.id);
+    try {
+      await onBatchRecall(topIds);
+    } catch {
+      // Best-effort
+    }
+
+    return allResults.slice(0, limit);
+  }
+
+  // -----------------------------------------------------------------------
+  // Episodic Search — search conversation summaries by meaning
+  // -----------------------------------------------------------------------
+
+  /**
+   * Search episodic memories (conversation summaries) by semantic similarity.
+   * Returns formatted narrative results with temporal context.
+   */
+  async searchEpisodic(
+    query: string,
+    userId: string | null,
+    teamId: string | null,
+    limit = 5,
+  ): Promise<{ summary: string; topics: string[]; decisions: string[]; periodStart: Date; periodEnd: Date; similarity: number }[]> {
+    await this.embeddings.ensureCorrectDimension();
+
+    const embedding = await this.embeddings.generateEmbedding(query);
+    const db = getDb();
+
+    // Build scope filter: user's personal sessions + team sessions + sessions with no user
+    const conditions: string[] = [];
+    const params: any[] = [`[${embedding.join(',')}]`];
+    let paramIdx = 2;
+
+    if (userId) {
+      conditions.push(`cs.user_id = $${paramIdx}`);
+      params.push(userId);
+      paramIdx++;
+    }
+    if (teamId) {
+      conditions.push(`cs.team_id = $${paramIdx}`);
+      params.push(teamId);
+      paramIdx++;
+    }
+
+    const whereClause = conditions.length > 0
+      ? `WHERE (${conditions.join(' OR ')})`
+      : '';
+
+    params.push(limit);
+
+    const results = await db.$queryRawUnsafe<any[]>(`
+      SELECT
+        cs.*,
+        1 - (emb.embedding <=> $1::vector) as similarity
+      FROM conversation_summaries cs
+      JOIN memory_embeddings emb ON emb.entry_id = cs.id AND emb.entry_type = 'episode'
+      ${whereClause}
+      ORDER BY emb.embedding <=> $1::vector
+      LIMIT $${paramIdx}
+    `, ...params);
+
+    return results.map((r) => ({
+      summary: r.summary,
+      topics: typeof r.topics === 'string' ? JSON.parse(r.topics) : (r.topics ?? []),
+      decisions: typeof r.decisions === 'string' ? JSON.parse(r.decisions) : (r.decisions ?? []),
+      periodStart: r.period_start ?? r.periodStart,
+      periodEnd: r.period_end ?? r.periodEnd,
+      similarity: Number(r.similarity) || 0,
+    }));
   }
 
   // -----------------------------------------------------------------------

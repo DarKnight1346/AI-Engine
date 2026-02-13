@@ -308,8 +308,8 @@ export async function POST(request: NextRequest) {
         contextUser?.id ?? null,
         contextMembership?.teamId ?? null,
       ).then((r) => {
-        if (r.profileUpdates > 0 || r.memoriesStored > 0) {
-          console.log(`[memory-extract] Auto-extracted: ${r.profileUpdates} profile update(s), ${r.memoriesStored} memory(ies)`);
+        if (r.memoriesStored > 0) {
+          console.log(`[memory-extract] Auto-extracted: ${r.memoriesStored} memory(ies)`);
         }
       }).catch((err) => {
         console.error(`[memory-extract] Error:`, err.message);

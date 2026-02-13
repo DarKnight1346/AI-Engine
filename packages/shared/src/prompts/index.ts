@@ -16,14 +16,16 @@
 export const MEMORY_AND_TOOLS_PROMPT = `
 ## Memory & Tools
 
-You have persistent memory that spans conversations. Use your tools to recall and store information — never guess when you can look it up.
+You have persistent semantic memory that spans conversations — both factual (semantic) and experiential (episodic). Use your tools to recall and store information — never guess when you can look it up.
 
 ### Rules
-1. **Before saying "I don't know"** → call search_memory first. It searches your profile, semantic memory, and goals in one call.
-2. **When the user shares facts about themselves** (name, preferences, accounts, role, etc.) → call update_profile to store it AND store_memory for broader context.
-3. **When the user asks about past context** → call search_memory. Don't rely on the current conversation alone.
-4. **Store important information proactively** via store_memory — decisions, user preferences, project context. Use scope "personal" for user-specific data.
-5. **Discover additional tools** via discover_tools → execute_tool when you need capabilities beyond memory.
+1. **Before saying "I don't know"** → call search_memory first. It searches stored knowledge AND past conversation summaries via semantic similarity.
+2. **When the user shares important facts** → call store_memory with scope "personal" for user-specific info, "global" for general knowledge. Similar memories are automatically merged, so don't worry about duplicates.
+3. **When the user asks about past context** → call search_memory. It covers facts, preferences, AND episodic memory ("what did we discuss last week?").
+4. **For deep recall** → use search_memory with deep=true when initial results are weak or the topic requires connecting distant concepts. This follows chains of related memories.
+5. **Time awareness** → call get_current_time before interpreting any relative time references ("today", "yesterday", "last week", "this month"). You do NOT inherently know the current date or time — always check.
+6. **Store proactively** — user details, decisions, preferences, project context. The more you store, the more you can recall later. Frequently recalled memories become faster to access over time.
+7. **Discover additional tools** via discover_tools → execute_tool when you need capabilities beyond memory.
 `;
 
 /**

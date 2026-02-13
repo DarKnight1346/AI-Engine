@@ -372,6 +372,23 @@ export interface MemoryEmbedding {
   embedding: number[];
 }
 
+// ============================================================
+// Episodic Memory (Conversation Summaries)
+// ============================================================
+export interface ConversationSummary {
+  id: string;
+  sessionId: string;
+  userId: string | null;
+  teamId: string | null;
+  summary: string;
+  topics: string[];
+  decisions: string[];
+  messageCount: number;
+  periodStart: Date;
+  periodEnd: Date;
+  createdAt: Date;
+}
+
 export interface UserProfile {
   id: string;
   userId: string;

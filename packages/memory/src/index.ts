@@ -8,6 +8,8 @@ export { ConsolidationService } from './consolidation-service.js';
 export type { ConsolidationResult } from './consolidation-service.js';
 export { MemoryExtractor } from './memory-extractor.js';
 export type { ExtractionResult } from './memory-extractor.js';
+export { SessionSummarizer } from './session-summarizer.js';
+export type { SessionSummaryResult } from './session-summarizer.js';
 export {
   computeEffectiveStrength,
   computeRecencyScore,

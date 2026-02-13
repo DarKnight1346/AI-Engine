@@ -79,10 +79,13 @@ export async function onRecall(entryId: string): Promise<void> {
   const db = getDb();
 
   // Use a single raw update for atomicity and performance
+  // Retroactive importance boost: each recall nudges importance up slightly
+  // (capped at 1.0). Memories that keep being useful become permanently important.
   await db.$executeRawUnsafe(
     `UPDATE memory_entries SET
        strength = LEAST(1.0, strength + 0.1 * (1.0 - strength)),
        decay_rate = GREATEST(0.01, decay_rate * 0.85),
+       importance = LEAST(1.0, importance + 0.02 * (1.0 - importance)),
        access_count = access_count + 1,
        last_accessed_at = NOW()
      WHERE id = $1`,
@@ -100,11 +103,13 @@ export async function onBatchRecall(entryIds: string[]): Promise<void> {
   const db = getDb();
 
   // Build a parameterized IN clause
+  // Retroactive importance boost: each recall nudges importance up slightly
   const placeholders = entryIds.map((_, i) => `$${i + 1}`).join(', ');
   await db.$executeRawUnsafe(
     `UPDATE memory_entries SET
        strength = LEAST(1.0, strength + 0.1 * (1.0 - strength)),
        decay_rate = GREATEST(0.01, decay_rate * 0.85),
+       importance = LEAST(1.0, importance + 0.02 * (1.0 - importance)),
        access_count = access_count + 1,
        last_accessed_at = NOW()
      WHERE id IN (${placeholders})`,

@@ -30,18 +30,16 @@ export interface MetaToolOptions {
  * These are the ONLY tools in the initial LLM context — everything
  * else is discovered and executed through them.
  *
- * Includes: discover_tools, execute_tool, search_memory, create_skill,
- *           store_memory, manage_goal, update_profile
+ * Includes: discover_tools, execute_tool, search_memory, store_memory, create_skill, get_current_time
  */
 export function createMetaTools(opts: MetaToolOptions): Tool[] {
   return [
     createDiscoverTool(opts),
     createExecuteTool(opts),
     createMemoryTool(opts),
-    createCreateSkillTool(opts),
     createStoreMemoryTool(opts),
-    createManageGoalTool(opts),
-    createUpdateProfileTool(opts),
+    createCreateSkillTool(opts),
+    createCurrentTimeTool(),
   ];
 }
 
@@ -92,20 +90,25 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
     {
       name: 'search_memory',
       description:
-        'Search your persistent memory, user profile, and goals. Searches ALL scopes by default ' +
-        '(personal + team + global). Returns profile data, semantic memory matches, and relevant goals. ' +
+        'Semantic search across all persistent memory — facts, knowledge, AND past conversations. ' +
+        'Searches personal, team, and global scopes plus episodic memory (conversation summaries). ' +
         'ALWAYS call this before saying "I don\'t know" or "I don\'t remember". ' +
-        'Use for: recalling user info, past conversations, stored facts, preferences, goals.',
+        'Use for questions like "what did we discuss last week?" as well as factual recall. ' +
+        'Set deep=true for thorough multi-hop recall when simple search returns weak results.',
       inputSchema: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: 'Natural-language search query (e.g., "user name", "what brokerage", "project goals").',
+            description: 'Natural-language search query (e.g., "user name", "what brokerage", "investment strategy").',
           },
           scope: {
             type: 'string',
             description: 'Optional. "personal", "team", "global", or omit to search all scopes.',
+          },
+          deep: {
+            type: 'boolean',
+            description: 'Optional. If true, performs multi-hop associative recall (follows chains of related memories 2-3 hops deep). Use when initial recall is insufficient or for "let me think about it" style deep retrieval.',
           },
         },
         required: ['query'],
@@ -177,64 +180,20 @@ export function getMetaToolDefinitions(): LLMToolDefinition[] {
       },
     },
     {
-      name: 'manage_goal',
+      name: 'get_current_time',
       description:
-        'Create, update, or complete goals. Use this when the user mentions objectives, priorities, ' +
-        'targets, or things they want to achieve. Also use it proactively when you infer goals from ' +
-        'conversation context. Goals are visible across all agents and sessions.',
+        'Get the current date, time, day of week, and timezone. Call this whenever you need temporal ' +
+        'context — before interpreting relative time references like "today", "yesterday", "last week", ' +
+        '"this month", or "this year". Essential for time-aware memory searches and scheduling.',
       inputSchema: {
         type: 'object',
         properties: {
-          action: {
+          timezone: {
             type: 'string',
-            enum: ['create', 'update', 'complete', 'pause'],
-            description: 'Action to perform on the goal.',
-          },
-          id: {
-            type: 'string',
-            description: 'Goal ID (required for update/complete/pause actions).',
-          },
-          description: {
-            type: 'string',
-            description: 'Goal description (required for create, optional for update).',
-          },
-          priority: {
-            type: 'string',
-            enum: ['high', 'medium', 'low'],
-            description: 'Goal priority. Defaults to "medium".',
-          },
-          scope: {
-            type: 'string',
-            enum: ['personal', 'team'],
-            description: 'Scope: "personal" or "team". Defaults to "personal".',
+            description: 'Optional IANA timezone (e.g., "America/New_York", "Europe/London"). Defaults to server timezone.',
           },
         },
-        required: ['action'],
-      },
-    },
-    {
-      name: 'update_profile',
-      description:
-        'Store or update a user profile attribute (key-value pair). Use when the user shares personal ' +
-        'details: name, role, location, tools/services, accounts, preferences, expertise. ' +
-        'Profile data is searchable via search_memory. Persists across all sessions.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          key: {
-            type: 'string',
-            description: 'Profile attribute name (e.g., "preferred_language", "expertise", "communication_style", "name", "role").',
-          },
-          value: {
-            type: 'string',
-            description: 'The value for this profile attribute.',
-          },
-          confidence: {
-            type: 'number',
-            description: 'Confidence in this information from 0.0 to 1.0. Use lower values for inferred info, higher for explicitly stated. Defaults to 0.8.',
-          },
-        },
-        required: ['key', 'value'],
+        required: [],
       },
     },
   ];
@@ -323,115 +282,199 @@ function createMemoryTool(opts: MetaToolOptions): Tool {
       properties: {
         query: { type: 'string' },
         scope: { type: 'string' },
+        deep: { type: 'boolean' },
       },
       required: ['query'],
     },
     execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
       const query = String(input.query || '');
       const scope = String(input.scope || '').toLowerCase();
+      const deep = input.deep === true || input.deep === 'true';
 
       if (!query) {
         return { success: false, output: 'Please provide a search query.' };
       }
 
-      const sections: string[] = [];
-
-      // ── 1. Search user profile (always include for personal context) ──
-      if (opts.userId) {
-        try {
-          const { getDb } = await import('@ai-engine/db');
-          const db = getDb();
-          const profileEntries = await db.userProfile.findMany({
-            where: { userId: opts.userId },
-          });
-
-          if (profileEntries.length > 0) {
-            // Filter profile entries by keyword relevance to the query
-            const queryLower = query.toLowerCase();
-            const queryWords = queryLower.split(/\s+/).filter((w: string) => w.length > 2);
-            const relevant = profileEntries.filter((p: any) => {
-              const entryText = `${p.key} ${p.value}`.toLowerCase();
-              // Include if query words match, or if it's a broad recall query
-              return queryWords.some((w: string) => entryText.includes(w))
-                || queryLower.includes(p.key.toLowerCase())
-                || /\b(who am i|my name|about me|my profile|what do you know|remember)\b/i.test(query);
-            });
-
-            if (relevant.length > 0) {
-              const lines = relevant.map((p: any) => `- ${p.key}: ${p.value}`);
-              sections.push(`**User Profile:**\n${lines.join('\n')}`);
-            }
-          }
-        } catch {
-          // Profile lookup failed — continue with memory search
-        }
+      if (!opts.searchMemory) {
+        return { success: true, output: 'Memory search is not configured.' };
       }
 
-      // ── 2. Search semantic memory across scopes ───────────────────
-      if (opts.searchMemory) {
-        try {
+      const results: string[] = [];
+
+      try {
+        // Deep recall: multi-hop associative search
+        if (deep) {
+          console.log(`[search_memory] Deep recall: query="${query.slice(0, 80)}" scope="${scope || 'all'}"`);
+          const { MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
+          const embSvc = new EmbSvc();
+          const memSvc = new MemSvc(embSvc);
+
+          const scopes: Array<{ name: string; id: string | null }> = [];
           if (scope && scope !== 'all') {
-            // Specific scope requested
             const scopeOwnerId = scope === 'personal'
               ? opts.userId ?? null
               : scope === 'team'
                 ? opts.teamId ?? null
                 : null;
-            const result = await opts.searchMemory(query, scope, scopeOwnerId);
-            if (result && result !== 'No matching memories found.') {
-              sections.push(`**Memory (${scope}):**\n${result}`);
-            }
+            scopes.push({ name: scope, id: scopeOwnerId });
           } else {
-            // Search ALL scopes — personal, team, and global
-            const scopes: Array<{ name: string; id: string | null }> = [];
             if (opts.userId) scopes.push({ name: 'personal', id: opts.userId });
             if (opts.teamId) scopes.push({ name: 'team', id: opts.teamId });
             scopes.push({ name: 'global', id: null });
+          }
 
-            for (const s of scopes) {
-              try {
-                const result = await opts.searchMemory(query, s.name, s.id);
-                if (result && result !== 'No matching memories found.') {
-                  sections.push(`**Memory (${s.name}):**\n${result}`);
-                }
-              } catch {
-                // Individual scope search failed — continue
+          for (const s of scopes) {
+            try {
+              const deepResults = await memSvc.deepSearch(query, s.name as any, s.id, 8, 3);
+              for (const m of deepResults) {
+                const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
+                results.push(`- [${m.scope}/${confidence}] ${m.content}`);
               }
+            } catch {
+              // Individual scope deep search failed
             }
           }
-        } catch (err: any) {
-          sections.push(`Memory search error: ${err.message}`);
+        } else if (scope && scope !== 'all') {
+          // Specific scope requested
+          const scopeOwnerId = scope === 'personal'
+            ? opts.userId ?? null
+            : scope === 'team'
+              ? opts.teamId ?? null
+              : null;
+          const result = await opts.searchMemory(query, scope, scopeOwnerId);
+          if (result && result !== 'No matching memories found.') {
+            results.push(result);
+          }
+        } else {
+          // Search ALL scopes — personal, team, and global
+          const scopes: Array<{ name: string; id: string | null }> = [];
+          if (opts.userId) scopes.push({ name: 'personal', id: opts.userId });
+          if (opts.teamId) scopes.push({ name: 'team', id: opts.teamId });
+          scopes.push({ name: 'global', id: null });
+
+          for (const s of scopes) {
+            try {
+              const result = await opts.searchMemory(query, s.name, s.id);
+              if (result && result !== 'No matching memories found.') {
+                results.push(result);
+              }
+            } catch {
+              // Individual scope search failed — continue
+            }
+          }
         }
+      } catch (err: any) {
+        console.error(`[search_memory] Error:`, err.message);
+        return { success: false, output: `Memory search failed: ${err.message}` };
       }
 
-      // ── 3. Search active goals ────────────────────────────────────
+      // Also search episodic memory (conversation summaries) for temporal context
       try {
-        const { getDb } = await import('@ai-engine/db');
-        const db = getDb();
-        const queryLower = query.toLowerCase();
-        if (/\b(goal|objective|target|aim|plan|working on|priority)\b/i.test(query)) {
-          const goals = await db.userGoal.findMany({
-            where: { status: 'active' },
-            orderBy: { priority: 'asc' },
-            take: 10,
-          });
-          if (goals.length > 0) {
-            const lines = goals.map((g: any) => `- [${g.priority}] ${g.description}`);
-            sections.push(`**Active Goals:**\n${lines.join('\n')}`);
+        const { MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
+        const embSvc = new EmbSvc();
+        const memSvc = new MemSvc(embSvc);
+        const episodes = await memSvc.searchEpisodic(query, opts.userId ?? null, opts.teamId ?? null, 3);
+        for (const ep of episodes) {
+          if (ep.similarity > 0.3) {
+            const start = ep.periodStart instanceof Date
+              ? ep.periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+              : new Date(ep.periodStart).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const topicStr = ep.topics.length > 0 ? ` Topics: ${ep.topics.join(', ')}.` : '';
+            const decisionStr = ep.decisions.length > 0 ? ` Decisions: ${ep.decisions.join('; ')}.` : '';
+            results.push(`- [episode/${start}] ${ep.summary}${topicStr}${decisionStr}`);
           }
         }
       } catch {
-        // Goal search failed — continue
+        // Episodic search is best-effort
       }
 
-      if (sections.length === 0) {
+      if (results.length === 0) {
         console.log(`[search_memory] No results for query="${query}" scope="${scope || 'all'}"`);
-        return { success: true, output: 'No matching memories, profile data, or goals found for this query.' };
+        return { success: true, output: 'No matching memories found.' };
       }
 
-      const output = sections.join('\n\n');
-      console.log(`[search_memory] Found ${sections.length} section(s) for query="${query}" scope="${scope || 'all'}"`);
+      const output = results.join('\n');
+      console.log(`[search_memory] Found results for query="${query}" scope="${scope || 'all'}"`);
       return { success: true, output };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// get_current_time meta-tool
+// ---------------------------------------------------------------------------
+
+function createCurrentTimeTool(): Tool {
+  return {
+    name: 'get_current_time',
+    description: 'Get the current date, time, day of week, and timezone.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timezone: { type: 'string' },
+      },
+      required: [],
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      const tz = typeof input.timezone === 'string' && input.timezone.length > 0
+        ? input.timezone
+        : Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+      try {
+        const now = new Date();
+
+        // Full locale-formatted parts using the requested timezone
+        const formatter = new Intl.DateTimeFormat('en-US', {
+          timeZone: tz,
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+          timeZoneName: 'short',
+        });
+
+        const parts = formatter.formatToParts(now);
+        const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+
+        const dayOfWeek = get('weekday');
+        const month = get('month');
+        const day = get('day');
+        const year = get('year');
+        const hour = get('hour');
+        const minute = get('minute');
+        const second = get('second');
+        const dayPeriod = get('dayPeriod');
+        const timeZoneName = get('timeZoneName');
+
+        // ISO 8601 for precision
+        const iso = now.toISOString();
+
+        // Unix timestamp
+        const unixMs = now.getTime();
+
+        const output = [
+          `Current time: ${dayOfWeek}, ${month} ${day}, ${year} at ${hour}:${minute}:${second} ${dayPeriod} ${timeZoneName}`,
+          `Day of week: ${dayOfWeek}`,
+          `Month: ${month}`,
+          `Year: ${year}`,
+          `Timezone: ${tz} (${timeZoneName})`,
+          `ISO 8601: ${iso}`,
+          `Unix timestamp: ${unixMs}`,
+        ].join('\n');
+
+        return { success: true, output };
+      } catch (err: any) {
+        // Invalid timezone — fall back to UTC
+        const now = new Date();
+        return {
+          success: true,
+          output: `Current time (UTC): ${now.toUTCString()}\nNote: timezone "${tz}" was not recognized, showing UTC.`,
+        };
+      }
     },
   };
 }

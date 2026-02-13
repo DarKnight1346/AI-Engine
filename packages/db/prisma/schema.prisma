@@ -93,6 +93,7 @@ model ChatSession {
   team       Team?         @relation(fields: [ownerId], references: [id], map: "chat_sessions_team_fk")
   messages   ChatMessage[]
   planning   PlanningSession[]
+  summaries  ConversationSummary[]
 
   @@map("chat_sessions")
 }
@@ -314,10 +315,11 @@ model MemoryEntry {
 model MemoryEmbedding {
   id        String                    @id @default(uuid())
   entryId   String                    @map("entry_id")
-  entryType String                    @map("entry_type") // memory | skill
+  entryType String                    @map("entry_type") // memory | skill | episode
   embedding Unsupported("vector(768)")
 
-  memoryEntry MemoryEntry? @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  memoryEntry          MemoryEntry?          @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  conversationSummary  ConversationSummary?  @relation(fields: [entryId], references: [id], onDelete: Cascade)
 
   @@map("memory_embeddings")
 }
@@ -333,6 +335,28 @@ model MemoryAssociation {
 
   @@unique([sourceEntryId, targetEntryId])
   @@map("memory_associations")
+}
+
+model ConversationSummary {
+  id            String   @id @default(uuid())
+  sessionId     String   @map("session_id")
+  userId        String?  @map("user_id")
+  teamId        String?  @map("team_id")
+  summary       String                             // Concise narrative of the conversation
+  topics        Json     @default("[]")             // string[] — key topics discussed
+  decisions     Json     @default("[]")             // string[] — decisions made
+  messageCount  Int      @default(0) @map("message_count")
+  periodStart   DateTime @map("period_start")       // first message timestamp in window
+  periodEnd     DateTime @map("period_end")         // last message timestamp in window
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  session  ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  embeddings MemoryEmbedding[]
+
+  @@index([userId, periodEnd])
+  @@index([teamId, periodEnd])
+  @@index([sessionId])
+  @@map("conversation_summaries")
 }
 
 model UserProfile {

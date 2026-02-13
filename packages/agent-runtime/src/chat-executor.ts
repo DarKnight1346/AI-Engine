@@ -77,12 +77,11 @@ export type ChatStreamCallback = (event: ChatStreamEvent) => void;
 // ---------------------------------------------------------------------------
 
 /**
- * Wraps an LLMPool with a tool execution loop powered by 7 meta-tools.
+ * Wraps an LLMPool with a tool execution loop powered by 6 meta-tools.
  *
  * The agent starts with `discover_tools`, `execute_tool`, `search_memory`,
- * `create_skill`, `store_memory`, `manage_goal`, and `update_profile`
- * in context. It discovers and executes additional tools on demand,
- * keeping context usage minimal.
+ * `store_memory`, `create_skill`, and `get_current_time` in context. It
+ * discovers and executes additional tools on demand, keeping context minimal.
  *
  * Flow:
  *   1. Call LLM with messages + meta-tool definitions

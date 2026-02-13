@@ -47,6 +47,16 @@ export async function register() {
         await startScheduler();
       }, 8000);
     }
+
+    // ── Memory Consolidation (periodic "sleep" cycle) ────────────
+    if (!(globalThis as any).__consolidationStarted) {
+      (globalThis as any).__consolidationStarted = true;
+
+      // Run first consolidation after 60s, then every 6 hours
+      setTimeout(() => {
+        startConsolidationLoop();
+      }, 60000);
+    }
   }
 }
 
@@ -289,4 +299,44 @@ async function executeTaskDirectly(
   }
 
   console.log(`[scheduler] Task ${task.name} executed directly (${durationMs}ms, ${result.usage.inputTokens + result.usage.outputTokens} tokens)`);
+}
+
+// ---------------------------------------------------------------------------
+// Memory Consolidation Loop
+//
+// Runs every 6 hours (like human sleep) to:
+//   1. Persist decay — write current effective strength to DB
+//   2. Prune forgotten memories (strength < 0.05)
+//   3. Deduplicate near-identical memories
+//   4. Clean stale associations
+// ---------------------------------------------------------------------------
+
+const CONSOLIDATION_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+function startConsolidationLoop() {
+  // Run immediately on first call, then repeat every 6 hours
+  runConsolidation();
+  setInterval(() => runConsolidation(), CONSOLIDATION_INTERVAL_MS);
+  console.log('[consolidation] Memory consolidation loop started (every 6h)');
+}
+
+async function runConsolidation() {
+  try {
+    const { ConsolidationService, EmbeddingService, SessionSummarizer } = await import('@ai-engine/memory');
+    const embeddings = new EmbeddingService();
+
+    // 1. Memory consolidation (decay, prune, dedup, clean associations)
+    const consolidation = new ConsolidationService(embeddings);
+    const result = await consolidation.consolidate();
+    console.log(`[consolidation] Cycle complete: decayed=${result.memoriesDecayed}, pruned=${result.memoriesPruned}, merged=${result.memoriesMerged}, assocs=${result.associationsCleaned}`);
+
+    // 2. Episodic memory — summarize idle conversation sessions
+    const summarizer = new SessionSummarizer(embeddings);
+    const summaryResult = await summarizer.summarizeIdleSessions();
+    if (summaryResult.summariesCreated > 0) {
+      console.log(`[consolidation] Episodic summaries: created=${summaryResult.summariesCreated}, sessions=${summaryResult.sessionsProcessed}`);
+    }
+  } catch (err: any) {
+    console.error('[consolidation] Failed:', err.message);
+  }
 }

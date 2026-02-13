@@ -256,6 +256,79 @@ function formatTime(date: Date) {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+/* ─── Context indicator ────────────────────────────────────────────── */
+
+const CONTEXT_WINDOW_LIMIT = 180_000; // tokens – matches DEFAULT_CONFIG.memory.contextWindowTokenLimit
+
+function estimateTokensFromMessages(msgs: { content: string }[]) {
+  // Rough estimate: 1 token ≈ 4 characters (same heuristic used in context-builder)
+  return msgs.reduce((sum, m) => sum + Math.ceil(m.content.length / 4), 0);
+}
+
+function ContextIndicator({ tokens, maxTokens }: { tokens: number; maxTokens: number }) {
+  const theme = useTheme();
+  const percentage = Math.min((tokens / maxTokens) * 100, 100);
+  const tokensK = tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}K` : `${tokens}`;
+  const maxK = `${(maxTokens / 1000).toFixed(0)}K`;
+
+  // Color shifts as context fills up
+  let ringColor = theme.palette.primary.main;
+  if (percentage > 75) ringColor = theme.palette.warning.main;
+  if (percentage > 90) ringColor = theme.palette.error.main;
+
+  return (
+    <Tooltip
+      title={`Context: ~${tokensK} / ${maxK} tokens (${percentage.toFixed(0)}%)`}
+      arrow
+      placement="top"
+    >
+      <Box sx={{ position: 'relative', display: 'inline-flex', width: 28, height: 28, cursor: 'default' }}>
+        {/* Background track */}
+        <CircularProgress
+          variant="determinate"
+          value={100}
+          size={28}
+          thickness={3}
+          sx={{ color: alpha(theme.palette.text.disabled, 0.12), position: 'absolute' }}
+        />
+        {/* Filled arc */}
+        <CircularProgress
+          variant="determinate"
+          value={percentage}
+          size={28}
+          thickness={3}
+          sx={{
+            color: ringColor,
+            transition: 'color 0.4s ease',
+            '& .MuiCircularProgress-circle': {
+              transition: 'stroke-dashoffset 0.6s ease-in-out',
+            },
+          }}
+        />
+        {/* Center label */}
+        <Box
+          sx={{
+            position: 'absolute', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <Typography
+            sx={{
+              fontSize: 7.5,
+              fontWeight: 700,
+              color: 'text.secondary',
+              lineHeight: 1,
+              letterSpacing: '-0.02em',
+            }}
+          >
+            {tokensK}
+          </Typography>
+        </Box>
+      </Box>
+    </Tooltip>
+  );
+}
+
 /* ─── Main Component ────────────────────────────────────────────────── */
 
 export default function ChatPage() {
@@ -263,6 +336,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [contextTokens, setContextTokens] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
@@ -305,15 +379,18 @@ export default function ChatPage() {
     try {
       const res = await fetch(`/api/chat/messages?sessionId=${sid}`);
       const data = await res.json();
-      setMessages((data.messages ?? []).map((m: any) => ({
+      const loaded = (data.messages ?? []).map((m: any) => ({
         id: m.id,
         role: m.role as 'user' | 'ai',
         content: m.content,
         timestamp: new Date(m.timestamp),
         agentName: m.agentName,
-      })));
+      }));
+      setMessages(loaded);
+      setContextTokens(estimateTokensFromMessages(loaded));
     } catch {
       setMessages([]);
+      setContextTokens(0);
     }
   }, []);
 
@@ -330,6 +407,7 @@ export default function ChatPage() {
     setMessages([]);
     setSelectedAgent(null);
     setInput('');
+    setContextTokens(0);
     inputRef.current?.focus();
   }, []);
 
@@ -340,6 +418,7 @@ export default function ChatPage() {
       if (sessionId === sid) {
         setSessionId(null);
         setMessages([]);
+        setContextTokens(0);
       }
       loadSessions();
       setSnack({ open: true, message: 'Conversation deleted', severity: 'success' });
@@ -407,6 +486,8 @@ export default function ChatPage() {
       timestamp: new Date(),
     };
     setMessages((prev) => [...prev, userMsg]);
+    // Update estimated context with the new user message
+    setContextTokens((prev) => prev + Math.ceil(input.length / 4));
     const currentInput = input;
     const currentAgent = selectedAgent;
     setInput('');
@@ -519,6 +600,11 @@ export default function ChatPage() {
                     ? { ...m, content: data.content, agentName: data.agentName || m.agentName }
                     : m
                 ));
+                // Update context tokens with actual usage from the LLM
+                if (data.usage) {
+                  const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
+                  if (totalUsed > 0) setContextTokens(totalUsed);
+                }
                 break;
 
               case 'error':
@@ -941,9 +1027,15 @@ export default function ChatPage() {
               </IconButton>
             </Paper>
 
-            <Typography variant="caption" sx={{ display: 'block', textAlign: 'center', mt: 1, color: 'text.disabled', fontSize: 11 }}>
-              AI Engine may make mistakes. Verify important information.
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mt: 1, position: 'relative' }}>
+              <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: 11 }}>
+                AI Engine may make mistakes. Verify important information.
+              </Typography>
+              {/* Context usage ring — bottom right */}
+              <Box sx={{ position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)' }}>
+                <ContextIndicator tokens={contextTokens} maxTokens={CONTEXT_WINDOW_LIMIT} />
+              </Box>
+            </Box>
           </Box>
         </Box>
       </Box>
