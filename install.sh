@@ -271,6 +271,27 @@ info "Generating Prisma client..."
 pnpm --filter @ai-engine/db exec prisma generate 2>&1 | tail -1
 ok "Prisma client generated"
 
+# ── 7b. Apply database schema changes (if DB is already configured) ─────────
+
+# On updates, the Prisma schema may have new tables/columns.  If the
+# database is already configured (.env has DATABASE_URL), apply changes
+# automatically with `prisma db push`.  This is safe for additive changes
+# (new columns, new tables) and uses --accept-data-loss for destructive ones.
+# On fresh installs the setup wizard handles this in /api/setup/initialize.
+
+ENV_FILE="$INSTALL_DIR/.env"
+if [[ -f "$ENV_FILE" ]] && grep -q "DATABASE_URL" "$ENV_FILE" 2>/dev/null; then
+  info "Applying database schema changes..."
+  set -a; source "$ENV_FILE"; set +a
+  if pnpm --filter @ai-engine/db exec prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3; then
+    ok "Database schema up to date"
+  else
+    warn "prisma db push failed — the setup wizard will handle this on next visit"
+  fi
+else
+  info "No .env found — skipping database migration (setup wizard will handle it)"
+fi
+
 # ── 8. Build all packages ───────────────────────────────────────────────────
 
 info "Building all packages (this may take a minute)..."
