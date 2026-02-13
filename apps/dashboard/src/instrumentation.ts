@@ -66,9 +66,7 @@ async function startScheduler() {
     const { Scheduler } = await import('@ai-engine/scheduler');
     const { getDb } = await import('@ai-engine/db');
 
-    // Use require for Node built-in to avoid webpack bundling issues
-    const hostname: string = require('os').hostname();
-    const nodeId = `dashboard-${hostname}`;
+    const nodeId = `dashboard-${process.env.HOSTNAME || 'main'}`;
 
     // Create Redis instances — one for the scheduler, one for subscribing
     const schedulerRedis = new Redis(redisUrl, {

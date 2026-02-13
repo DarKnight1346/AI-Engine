@@ -45,13 +45,31 @@ const nextConfig = {
   // serverComponentsExternalPackages above handles it correctly.
   webpack: (config, { isServer }) => {
     if (isServer) {
-      // ioredis (and its Node built-in deps: stream, crypto, dns, net, tls)
-      // is only imported from instrumentation.ts at runtime.
-      // Keep it external so webpack doesn't try to bundle Node built-ins.
+      // The instrumentation hook dynamically imports ioredis,
+      // @ai-engine/scheduler, @ai-engine/llm, etc. which pull in Node
+      // built-ins (stream, crypto, dns, net, path, os).  Mark these as
+      // externals so webpack emits proper require() calls instead of
+      // trying to resolve/bundle Node built-ins.
+      //
+      // We use a function-based external so scoped package names (with @)
+      // are emitted as `require("@ai-engine/scheduler")` rather than the
+      // broken `module.exports = @ai-engine/scheduler`.
+      //
+      // NOTE: @prisma/client is handled via serverComponentsExternalPackages.
+      const serverOnlyPackages = new Set([
+        'ioredis',
+        '@ai-engine/scheduler',
+        '@ai-engine/cluster',
+        '@ai-engine/llm',
+        '@ai-engine/shared',
+      ]);
       config.externals = config.externals || [];
-      if (Array.isArray(config.externals)) {
-        config.externals.push('ioredis');
-      }
+      config.externals.push(({ request }, callback) => {
+        if (serverOnlyPackages.has(request)) {
+          return callback(null, `commonjs ${request}`);
+        }
+        callback();
+      });
     }
     return config;
   },
