@@ -145,7 +145,7 @@ export default function SkillsPage() {
   }, [detailSkill, reload]);
 
   return (
-    <Box>
+    <Box sx={{ px: { xs: 2, sm: 3 }, py: { xs: 2, sm: 3 } }}>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
         <Typography variant="h2">Skills</Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate}>New Skill</Button>

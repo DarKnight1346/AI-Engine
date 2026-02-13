@@ -472,7 +472,7 @@ export default function ChatPage() {
   const chatBg = theme.palette.background.default;
 
   return (
-    <Box sx={{ display: 'flex', height: 'calc(100vh - 64px)', overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', height: { xs: 'calc(100vh - 56px)', sm: 'calc(100vh - 64px)' }, overflow: 'hidden' }}>
       {/* ── Sidebar ────────────────────────────────────────────────── */}
       <Box
         sx={{

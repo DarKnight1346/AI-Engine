@@ -164,12 +164,12 @@ export default function TeamPage() {
   }, [team, sensitivity, keywords, quietStart, quietEnd]);
 
   if (loading) {
-    return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>;
+    return <Box sx={{ display: 'flex', justifyContent: 'center', px: { xs: 2, sm: 3 }, py: { xs: 2, sm: 3 } }}><CircularProgress /></Box>;
   }
 
   if (!team) {
     return (
-      <Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: { xs: 2, sm: 3 } }}>
         <Typography variant="h2" sx={{ mb: 3 }}>Team</Typography>
         <Box sx={{ textAlign: 'center', py: 8, color: 'text.secondary' }}>
           <GroupIcon sx={{ fontSize: 64, mb: 2, opacity: 0.3 }} />
@@ -203,7 +203,7 @@ export default function TeamPage() {
   }
 
   return (
-    <Box>
+    <Box sx={{ px: { xs: 2, sm: 3 }, py: { xs: 2, sm: 3 } }}>
       <Typography variant="h2" sx={{ mb: 3 }}>Team: {team.name}</Typography>
 
       <Stack spacing={3}>

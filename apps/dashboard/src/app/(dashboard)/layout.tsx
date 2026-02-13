@@ -11,10 +11,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         component="main"
         sx={{
           flexGrow: 1,
+          // Top padding accounts for the fixed AppBar height
           pt: { xs: '56px', sm: '64px' },
+          // Bottom padding for the mobile bottom nav
           pb: { xs: '80px', md: 0 },
-          px: { xs: 2, sm: 3 },
-          py: { xs: 2, sm: 3 },
           maxWidth: '100%',
           overflow: 'auto',
         }}

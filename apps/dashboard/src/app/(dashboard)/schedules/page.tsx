@@ -139,7 +139,7 @@ export default function SchedulesPage() {
   };
 
   return (
-    <Box>
+    <Box sx={{ px: { xs: 2, sm: 3 }, py: { xs: 2, sm: 3 } }}>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
         <Typography variant="h2">Scheduled Tasks</Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>New Schedule</Button>

@@ -485,7 +485,7 @@ export default function SettingsPage() {
   const hasConfigChanges = Object.keys(configEdits).length > 0;
 
   return (
-    <Box>
+    <Box sx={{ px: { xs: 2, sm: 3 }, py: { xs: 2, sm: 3 } }}>
       <Typography variant="h2" sx={{ mb: 3 }}>Settings</Typography>
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 3 }} variant="scrollable" scrollButtons="auto">
         <Tab label="API Keys" />
