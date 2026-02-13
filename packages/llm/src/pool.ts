@@ -191,11 +191,16 @@ const PROXY_TIER_MAPPING: Record<LLMTier, string> = {
   heavy: 'claude-opus-4',
 };
 
-/** Tier mapping for NVIDIA NIM — Kimi K2.5 handles all tiers */
+/**
+ * Tier mapping for NVIDIA NIM — matched to Claude equivalents:
+ *   fast     → Nemotron Nano 8B   (≈ Haiku — blazing fast, good for tool routing & simple tasks)
+ *   standard → Llama 3.3 70B      (≈ Sonnet — strong all-rounder with native tool calling)
+ *   heavy    → Nemotron Ultra 253B (≈ Opus — top-tier reasoning, coding, deep analysis)
+ */
 const NVIDIA_TIER_MAPPING: Record<LLMTier, string> = {
-  fast: 'moonshotai/kimi-k2.5',
-  standard: 'moonshotai/kimi-k2.5',
-  heavy: 'moonshotai/kimi-k2.5',
+  fast: 'nvidia/llama-3.1-nemotron-nano-8b-v1',
+  standard: 'meta/llama-3.3-70b-instruct',
+  heavy: 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
 };
 
 /** Callback signature for streaming chunks from the LLM. */
@@ -266,14 +271,14 @@ export class LLMPool {
     if (this.options.fallback?.provider === 'nvidia') {
       const keyStates = this.keyManager.getStates();
       const statesSummary = keyStates.map((k) => `${k.id.slice(0, 8)}…=${k.status}`).join(', ');
+      const fb = this.options.fallback;
+      const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
+      const fbModel = fbTierMapping[tier];
       console.log(
         `[LLMPool] All primary keys unavailable [${statesSummary}], ` +
-        `falling back to NVIDIA NIM (Kimi K2.5). Last error: ${lastError?.message ?? 'none'}`
+        `falling back to NVIDIA NIM ${fbModel} (tier=${tier}). Last error: ${lastError?.message ?? 'none'}`
       );
       try {
-        const fb = this.options.fallback;
-        const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
-        const fbModel = fbTierMapping[tier];
         const fbKeyConfig: LLMKeyConfig = {
           id: 'nvidia-fallback',
           apiKey: fb.apiKey,
@@ -282,7 +287,7 @@ export class LLMPool {
         };
         return await this.callNvidia(fbKeyConfig, fbModel, messages, options);
       } catch (fbErr: any) {
-        console.error(`[LLMPool] NVIDIA fallback also failed:`, fbErr.message);
+        console.error(`[LLMPool] NVIDIA fallback (${fbModel}) also failed:`, fbErr.message);
         // If fallback also failed, throw the original error (more informative)
         throw lastError ?? fbErr;
       }
@@ -342,14 +347,14 @@ export class LLMPool {
     if (this.options.fallback?.provider === 'nvidia') {
       const keyStates = this.keyManager.getStates();
       const statesSummary = keyStates.map((k) => `${k.id.slice(0, 8)}…=${k.status}`).join(', ');
+      const fb = this.options.fallback;
+      const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
+      const fbModel = fbTierMapping[tier];
       console.log(
         `[LLMPool] All primary keys unavailable [${statesSummary}], ` +
-        `falling back to NVIDIA NIM streaming (Kimi K2.5). Last error: ${lastError?.message ?? 'none'}`
+        `falling back to NVIDIA NIM streaming ${fbModel} (tier=${tier}). Last error: ${lastError?.message ?? 'none'}`
       );
       try {
-        const fb = this.options.fallback;
-        const fbTierMapping = fb.tierMapping ?? NVIDIA_TIER_MAPPING;
-        const fbModel = fbTierMapping[tier];
         const fbKeyConfig: LLMKeyConfig = {
           id: 'nvidia-fallback',
           apiKey: fb.apiKey,
@@ -360,7 +365,7 @@ export class LLMPool {
         onEvent({ type: 'done', response: result });
         return result;
       } catch (fbErr: any) {
-        console.error(`[LLMPool] NVIDIA fallback streaming also failed:`, fbErr.message);
+        console.error(`[LLMPool] NVIDIA fallback streaming (${fbModel}) also failed:`, fbErr.message);
         throw lastError ?? fbErr;
       }
     }
@@ -822,15 +827,19 @@ export class LLMPool {
 
   /**
    * Build the request body for NVIDIA NIM API calls.
-   * Kimi K2.5 supports OpenAI-compatible chat completions.
-   * Thinking mode is disabled for faster, more predictable responses.
+   * Supports tiered models: Nano 8B, Llama 3.3 70B, Nemotron Ultra 253B.
    */
   private buildNvidiaBody(
     model: string, messages: LLMMessage[], options: LLMCallOptions, stream: boolean,
   ): Record<string, any> {
+    // Scale max_tokens to model capability — smaller models generate shorter outputs
+    const isNano = model.includes('nano');
+    const isUltra = model.includes('ultra');
+    const defaultMaxTokens = isNano ? 4096 : isUltra ? 16384 : 8192;
+
     const body: Record<string, any> = {
       model,
-      max_tokens: options.maxTokens ?? 16384,
+      max_tokens: options.maxTokens ?? defaultMaxTokens,
       temperature: options.temperature ?? 0.7,
       top_p: 0.95,
       messages: this.buildNvidiaMessages(messages, options.systemPrompt),
@@ -851,6 +860,7 @@ export class LLMPool {
           parameters: t.inputSchema,
         },
       }));
+      body.tool_choice = 'auto';
     }
 
     return body;

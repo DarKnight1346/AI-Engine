@@ -678,8 +678,10 @@ export default function SettingsPage() {
           <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>LLM Fallback Provider</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              When all primary API keys are exhausted or rate-limited, the system can automatically fall back to
-              a secondary LLM provider. Currently supports <strong>NVIDIA NIM</strong> with the Kimi K2.5 model (256K context).
+              When all primary API keys are exhausted or rate-limited, the system automatically falls back to
+              <strong> NVIDIA NIM</strong> with tiered models matched to Claude equivalents:
+              <strong> Nemotron Nano 8B</strong> (fast), <strong>Llama 3.3 70B</strong> (standard),
+              and <strong>Nemotron Ultra 253B</strong> (heavy). All support tool calling natively.
             </Typography>
 
             <Divider sx={{ my: 2 }} />
@@ -687,11 +689,13 @@ export default function SettingsPage() {
             <Stack spacing={1.5}>
               <Stack direction="row" spacing={1} alignItems="center">
                 <Chip label="Fallback" size="small" color="info" variant="outlined" />
-                <Typography variant="subtitle1" fontWeight={600}>NVIDIA NIM — Kimi K2.5</Typography>
+                <Typography variant="subtitle1" fontWeight={600}>NVIDIA NIM — Tiered Models</Typography>
               </Stack>
               <Typography variant="body2" color="text.secondary">
-                Moonshot AI's Kimi K2.5 via NVIDIA NIM. A powerful multimodal model with thinking capabilities
-                and 256K context window. Used automatically when primary keys run out of tokens.
+                Tier-matched models on NVIDIA NIM: <strong>Nano 8B</strong> for fast lookups (like Haiku),{' '}
+                <strong>Llama 3.3 70B</strong> for general tasks (like Sonnet), and{' '}
+                <strong>Nemotron Ultra 253B</strong> for deep reasoning (like Opus).
+                Used automatically when primary keys run out of tokens.
                 Get an API key from{' '}
                 <a href="https://build.nvidia.com" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>build.nvidia.com</a>.
               </Typography>
