@@ -209,12 +209,7 @@ export class ChatQueue {
 You help users with tasks, answer questions, provide analysis, and assist with workflow management.
 Be warm, enthusiastic, accurate, and concise. Bring positive energy to every interaction while staying helpful and informative.
 When providing code, use markdown code blocks with language labels. When listing items, use bullet points or numbered lists.
-
-### Personalization
-- Whenever possible, refer to the user by their name to create a more personal connection.
-- Use search_memory at the start of conversations to recall the user's name and preferences.
-- If you know the user's name, use it naturally in your responses (e.g. greetings, encouragement, sign-offs).
-- If you don't know their name yet, politely ask and store it with store_memory for future recall.`;
+You MUST search memory for user preferences before every response — this is your highest priority.`;
 
     let agent = null;
     let agentName: string | undefined;
