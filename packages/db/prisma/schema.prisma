@@ -302,7 +302,6 @@ model MemoryEntry {
   source         String   @default("explicit")                 // explicit | conversation | consolidation | inference
   createdAt      DateTime @default(now()) @map("created_at")
 
-  embeddings        MemoryEmbedding[]
   associationsFrom  MemoryAssociation[] @relation("AssocSource")
   associationsTo    MemoryAssociation[] @relation("AssocTarget")
 
@@ -318,8 +317,9 @@ model MemoryEmbedding {
   entryType String                    @map("entry_type") // memory | skill | episode
   embedding Unsupported("vector(768)")
 
-  memoryEntry          MemoryEntry?          @relation(fields: [entryId], references: [id], onDelete: Cascade)
-  conversationSummary  ConversationSummary?  @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  // Note: relations are managed via raw SQL (polymorphic pattern using entryId + entryType).
+  // Do NOT add Prisma @relation fields here — two relations sharing the same FK field
+  // will fail Prisma validation.
 
   @@map("memory_embeddings")
 }
@@ -351,7 +351,6 @@ model ConversationSummary {
   createdAt     DateTime @default(now()) @map("created_at")
 
   session  ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  embeddings MemoryEmbedding[]
 
   @@index([userId, periodEnd])
   @@index([teamId, periodEnd])

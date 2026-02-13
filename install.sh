@@ -262,7 +262,7 @@ fi
 # ── 6. Install dependencies ─────────────────────────────────────────────────
 
 info "Installing Node.js dependencies..."
-pnpm install 2>&1 | tail -1
+pnpm install
 ok "Dependencies installed"
 
 # ── 7. Generate Prisma client ────────────────────────────────────────────────
