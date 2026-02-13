@@ -24,7 +24,7 @@ const DASHBOARD_SAFE_TOOLS = new Set([
   // Skills
   'searchSkills',
   'loadSkill',
-  // Web — Serper.dev powered (HTTP-based, no persistent state)
+  // Web — Tier 1: Serper.dev (fast/cheap, HTTP-based)
   'webSearch',
   'webSearchImages',
   'webSearchVideos',
@@ -38,6 +38,9 @@ const DASHBOARD_SAFE_TOOLS = new Set([
   'webSearchPatents',
   'webAutocomplete',
   'webGetPage',
+  // Web — Tier 2: xAI / Grok (comprehensive, AI-powered)
+  'webDeepSearch',
+  'webDeepSearchWithContext',
   // Notifications
   'sendNotification',
 ]);
@@ -68,6 +71,8 @@ export function routeTool(toolName: string): ToolExecutionRoute {
   if (WORKER_TOOLS.has(toolName)) return 'worker';
   // Wildcard pattern: anything starting with browser_ goes to worker
   if (toolName.startsWith('browser_')) return 'worker';
+  // Tier 3: DataForSEO tools (prefix convention avoids listing ~125 tools individually)
+  if (toolName.startsWith('seo')) return 'dashboard';
   return 'unknown';
 }
 

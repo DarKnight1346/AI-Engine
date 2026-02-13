@@ -316,12 +316,29 @@ You MUST search memory for user preferences before every response — this is yo
       }
     };
 
-    // ── Load Serper API key from config ─────────────────────────────
+    // ── Load search API keys from config ────────────────────────────
     let serperApiKey: string | undefined;
+    let xaiApiKey: string | undefined;
+    let dataForSeoLogin: string | undefined;
+    let dataForSeoPassword: string | undefined;
     try {
-      const serperConfig = await db.config.findUnique({ where: { key: 'serperApiKey' } });
+      const [serperConfig, xaiConfig, dfsLoginConfig, dfsPasswordConfig] = await Promise.all([
+        db.config.findUnique({ where: { key: 'serperApiKey' } }),
+        db.config.findUnique({ where: { key: 'xaiApiKey' } }),
+        db.config.findUnique({ where: { key: 'dataForSeoLogin' } }),
+        db.config.findUnique({ where: { key: 'dataForSeoPassword' } }),
+      ]);
       if (serperConfig?.valueJson && typeof serperConfig.valueJson === 'string' && serperConfig.valueJson.trim()) {
         serperApiKey = serperConfig.valueJson.trim();
+      }
+      if (xaiConfig?.valueJson && typeof xaiConfig.valueJson === 'string' && xaiConfig.valueJson.trim()) {
+        xaiApiKey = xaiConfig.valueJson.trim();
+      }
+      if (dfsLoginConfig?.valueJson && typeof dfsLoginConfig.valueJson === 'string' && dfsLoginConfig.valueJson.trim()) {
+        dataForSeoLogin = dfsLoginConfig.valueJson.trim();
+      }
+      if (dfsPasswordConfig?.valueJson && typeof dfsPasswordConfig.valueJson === 'string' && dfsPasswordConfig.valueJson.trim()) {
+        dataForSeoPassword = dfsPasswordConfig.valueJson.trim();
       }
     } catch {
       // Config not found — web search tools will be unavailable
@@ -341,6 +358,9 @@ You MUST search memory for user preferences before every response — this is yo
       sessionId: job.sessionId,
       workerDispatcher: workerHub,
       serperApiKey,
+      xaiApiKey,
+      dataForSeoLogin,
+      dataForSeoPassword,
     });
 
     // ── Load conversation history ──────────────────────────────────

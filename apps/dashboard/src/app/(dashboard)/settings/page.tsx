@@ -555,36 +555,123 @@ export default function SettingsPage() {
           </Paper>
 
           <Paper sx={{ p: 3 }}>
-            <Typography variant="h3" sx={{ mb: 2 }}>Web Search (Serper.dev)</Typography>
+            <Typography variant="h3" sx={{ mb: 2 }}>Web Search</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Power your agents with Google search capabilities. Get an API key from{' '}
-              <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>serper.dev</a>.
-              Enables web search, images, videos, news, maps, shopping, scholar, patents, and more.
+              Agents use a tiered search system: <strong>Tier 1</strong> (Serper — fast, cheap) for quick lookups,
+              and <strong>Tier 2</strong> (xAI — comprehensive, AI-powered) for deep research. The agent automatically
+              chooses the right tier based on query complexity.
             </Typography>
-            <TextField
-              label="Serper API Key"
-              fullWidth
-              type="password"
-              value={getConfig('serperApiKey', '')}
-              onChange={(e) => setConfig('serperApiKey', e.target.value)}
-              placeholder="Enter your Serper.dev API key..."
-              inputProps={{ spellCheck: false }}
-              helperText="Used for all web search tools. Stored securely in the database."
-              sx={{ mb: 2 }}
-            />
-            {(getConfig('serperApiKey', '') !== '' && configEdits.serperApiKey !== undefined) && (
+
+            <Divider sx={{ my: 2 }} />
+
+            {/* Tier 1: Serper */}
+            <Stack spacing={1.5} sx={{ mb: 3 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip label="Tier 1" size="small" color="success" variant="outlined" />
+                <Typography variant="subtitle1" fontWeight={600}>Serper.dev — Lightweight Search</Typography>
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                Fast, cheap Google search API. Powers web search, images, videos, news, maps, shopping, scholar, patents, and more.
+                Get an API key from{' '}
+                <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>serper.dev</a>.
+              </Typography>
+              <TextField
+                label="Serper API Key"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('serperApiKey', '')}
+                onChange={(e) => setConfig('serperApiKey', e.target.value)}
+                placeholder="Enter your Serper.dev API key..."
+                inputProps={{ spellCheck: false }}
+              />
+              {getConfig('serperApiKey', '') !== '' && configEdits.serperApiKey === undefined && (
+                <Chip label="Configured" size="small" color="success" variant="outlined" sx={{ alignSelf: 'flex-start' }} />
+              )}
+            </Stack>
+
+            <Divider sx={{ my: 2 }} />
+
+            {/* Tier 2: xAI */}
+            <Stack spacing={1.5} sx={{ mb: 2 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip label="Tier 2" size="small" color="warning" variant="outlined" />
+                <Typography variant="subtitle1" fontWeight={600}>xAI (Grok) — Deep Search</Typography>
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                AI-powered comprehensive search using Grok. Searches the web, reads pages, and synthesizes
+                detailed answers with citations. Used when Tier 1 results are insufficient.
+                Get an API key from{' '}
+                <a href="https://console.x.ai" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>console.x.ai</a>.
+              </Typography>
+              <TextField
+                label="xAI API Key"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('xaiApiKey', '')}
+                onChange={(e) => setConfig('xaiApiKey', e.target.value)}
+                placeholder="Enter your xAI API key..."
+                inputProps={{ spellCheck: false }}
+              />
+              {getConfig('xaiApiKey', '') !== '' && configEdits.xaiApiKey === undefined && (
+                <Chip label="Configured" size="small" color="success" variant="outlined" sx={{ alignSelf: 'flex-start' }} />
+              )}
+            </Stack>
+
+            {/* Tier 3: DataForSEO */}
+            <Divider sx={{ my: 2 }} />
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Chip label="Tier 3" size="small" color="error" variant="outlined" />
+              <Typography variant="subtitle1" fontWeight={600}>Deep Research — DataForSEO</Typography>
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              Heavy-duty SEO research with 120+ tools: SERP analysis, keyword research, backlink analysis,
+              competitor research, content analysis, app data, business data, and more.
+              Get credentials at{' '}
+              <a href="https://app.dataforseo.com/api-access" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>
+                app.dataforseo.com/api-access
+              </a>.
+            </Typography>
+            <Stack spacing={1.5} sx={{ mt: 1.5 }}>
+              <TextField
+                label="DataForSEO Login (email)"
+                fullWidth
+                size="small"
+                value={getConfig('dataForSeoLogin', '')}
+                onChange={(e) => setConfig('dataForSeoLogin', e.target.value)}
+                placeholder="your@email.com"
+                inputProps={{ spellCheck: false }}
+              />
+              <TextField
+                label="DataForSEO Password"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('dataForSeoPassword', '')}
+                onChange={(e) => setConfig('dataForSeoPassword', e.target.value)}
+                placeholder="Enter your DataForSEO API password..."
+                inputProps={{ spellCheck: false }}
+              />
+              {getConfig('dataForSeoLogin', '') !== '' && getConfig('dataForSeoPassword', '') !== '' &&
+               configEdits.dataForSeoLogin === undefined && configEdits.dataForSeoPassword === undefined && (
+                <Chip label="Configured" size="small" color="success" variant="outlined" sx={{ alignSelf: 'flex-start' }} />
+              )}
+            </Stack>
+
+            {/* Save button for any search key changes */}
+            {(configEdits.serperApiKey !== undefined || configEdits.xaiApiKey !== undefined ||
+              configEdits.dataForSeoLogin !== undefined || configEdits.dataForSeoPassword !== undefined) && (
               <Button
                 variant="contained"
                 size="small"
                 startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
                 onClick={() => saveConfig()}
                 disabled={savingConfig}
+                sx={{ mt: 2 }}
               >
-                Save API Key
+                Save Search Keys
               </Button>
-            )}
-            {getConfig('serperApiKey', '') !== '' && configEdits.serperApiKey === undefined && (
-              <Chip label="Configured" size="small" color="success" variant="outlined" />
             )}
           </Paper>
 

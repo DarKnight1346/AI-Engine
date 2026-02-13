@@ -4,8 +4,9 @@ import { ToolIndex, type ToolManifestEntry } from './tool-index.js';
 import { ToolExecutor, type WorkerToolDispatcher } from './tool-executor.js';
 import { EnvironmentTools } from './tools/environment.js';
 import { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
-import { createWebSearchTools } from './tools/web-search-tools.js';
-import { WebSearchService } from '@ai-engine/web-search';
+import { createWebSearchTools, createXaiSearchTools } from './tools/web-search-tools.js';
+import { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
+import { WebSearchService, XaiSearchService, DataForSeoService } from '@ai-engine/web-search';
 import type { Tool, ToolContext, ToolResult } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -37,10 +38,25 @@ export interface ChatExecutorOptions {
   /** Work item ID for execution logging */
   workItemId?: string;
   /**
-   * Serper.dev API key for web search tools.
+   * Serper.dev API key for Tier 1 (lightweight) web search tools.
    * When provided, all Serper-powered search tools are registered.
    */
   serperApiKey?: string;
+  /**
+   * xAI API key for Tier 2 (comprehensive) web search tools.
+   * When provided, AI-powered deep search tools via Grok are registered.
+   */
+  xaiApiKey?: string;
+  /**
+   * DataForSEO login for Tier 3 (heavy/expensive) deep research tools.
+   * Requires both login and password. When provided, ~122 SEO research
+   * tools are registered (SERP, keywords, backlinks, content, etc.).
+   */
+  dataForSeoLogin?: string;
+  /**
+   * DataForSEO password (paired with dataForSeoLogin).
+   */
+  dataForSeoPassword?: string;
   /**
    * Per-execution tools (e.g. browser tools scoped to a task).
    * These are registered for both discovery and execution alongside
@@ -445,10 +461,10 @@ export class ChatExecutor {
         executionTarget: 'dashboard',
         source: 'tool',
       },
-      // ── Serper.dev Web Search Tools ──
+      // ── Tier 1: Serper.dev Web Search Tools (fast/cheap) ──
       {
         name: 'webSearch',
-        description: 'Search the web using Google via Serper. Returns organic results with titles, links, and snippets.',
+        description: '[Tier 1] Quick Google web search. Returns raw results with titles, links, and snippets. Use FIRST for any search.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -456,7 +472,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchImages',
-        description: 'Search for images on Google. Returns image URLs, dimensions, and sources.',
+        description: '[Tier 1] Quick Google image search. Returns image URLs, dimensions, and sources.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -464,7 +480,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchVideos',
-        description: 'Search for videos on Google. Returns video links, titles, durations, and channels.',
+        description: '[Tier 1] Quick Google video search. Returns video links, titles, durations, and channels.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -472,7 +488,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchPlaces',
-        description: 'Search for local businesses and places. Returns names, addresses, ratings, and contact info.',
+        description: '[Tier 1] Quick Google Places search. Returns names, addresses, ratings, and contact info.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -480,7 +496,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchMaps',
-        description: 'Search Google Maps for locations and points of interest with coordinates and details.',
+        description: '[Tier 1] Quick Google Maps search. Returns locations with coordinates and details.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -488,7 +504,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchReviews',
-        description: 'Search for reviews on Google. Returns review ratings, sources, and snippets.',
+        description: '[Tier 1] Quick Google Reviews search. Returns review ratings, sources, and snippets.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -496,7 +512,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchNews',
-        description: 'Search Google News for current events and recent articles with dates and sources.',
+        description: '[Tier 1] Quick Google News search. Returns news titles, dates, and sources.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -504,7 +520,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchShopping',
-        description: 'Search Google Shopping for products and prices with ratings and delivery info.',
+        description: '[Tier 1] Quick Google Shopping search. Returns products, prices, and ratings.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -512,7 +528,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchLens',
-        description: 'Reverse image search using Google Lens. Find visually similar images by URL.',
+        description: '[Tier 1] Google Lens reverse image search. Find similar images by URL.',
         category: 'web',
         inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
         executionTarget: 'dashboard',
@@ -520,7 +536,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchScholar',
-        description: 'Search Google Scholar for academic papers, citations, and research publications.',
+        description: '[Tier 1] Quick Google Scholar search. Returns academic papers and citations.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -528,7 +544,7 @@ export class ChatExecutor {
       },
       {
         name: 'webSearchPatents',
-        description: 'Search Google Patents for patents and patent applications with inventor and filing info.',
+        description: '[Tier 1] Quick Google Patents search. Returns patents with inventors and dates.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -536,7 +552,7 @@ export class ChatExecutor {
       },
       {
         name: 'webAutocomplete',
-        description: 'Get Google autocomplete suggestions for a query to discover related searches.',
+        description: '[Tier 1] Google autocomplete suggestions for discovering related searches.',
         category: 'web',
         inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         executionTarget: 'dashboard',
@@ -544,9 +560,26 @@ export class ChatExecutor {
       },
       {
         name: 'webGetPage',
-        description: 'Fetch and extract the content of a web page by URL. Returns title and text/markdown.',
+        description: '[Tier 1] Fetch and extract the content of a web page by URL. Returns title and text/markdown.',
         category: 'web',
         inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      // ── Tier 2: xAI / Grok Deep Search ──
+      {
+        name: 'webDeepSearch',
+        description: '[Tier 2] AI-powered deep web search via xAI Grok. Searches the web and synthesizes a comprehensive answer with citations. Use when Tier 1 results are insufficient.',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' }, allowedDomains: { type: 'array' }, excludedDomains: { type: 'array' } }, required: ['query'] },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'webDeepSearchWithContext',
+        description: '[Tier 2] AI-powered contextual deep search. Same as webDeepSearch but with a research context (technical, academic, business, medical, legal, news, comparison, tutorial).',
+        category: 'web',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' }, context: { type: 'string' } }, required: ['query', 'context'] },
         executionTarget: 'dashboard',
         source: 'tool',
       },
@@ -629,7 +662,10 @@ export class ChatExecutor {
       },
     ];
 
-    this.toolIndex.registerAll([...dashboardTools, ...workerTools]);
+    // ── Tier 3: DataForSEO deep research tools (~122 endpoints) ──
+    const dataForSeoTools = getDataForSeoManifest();
+
+    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dataForSeoTools]);
   }
 
   /**
@@ -641,7 +677,7 @@ export class ChatExecutor {
     const envTools = EnvironmentTools.getAll();
     this.toolExecutor.registerAllLocal(envTools);
 
-    // Serper.dev web search tools — register when API key is available
+    // Tier 1: Serper.dev web search tools — fast, cheap, structured results
     if (this.options.serperApiKey) {
       try {
         const searchService = new WebSearchService();
@@ -649,7 +685,32 @@ export class ChatExecutor {
         const searchTools = createWebSearchTools(searchService);
         this.toolExecutor.registerAllLocal(searchTools);
       } catch (err: any) {
-        console.warn('[ChatExecutor] Failed to initialize web search tools:', err.message);
+        console.warn('[ChatExecutor] Failed to initialize Serper web search tools:', err.message);
+      }
+    }
+
+    // Tier 2: xAI / Grok web search tools — comprehensive, AI-powered
+    if (this.options.xaiApiKey) {
+      try {
+        const xaiService = new XaiSearchService();
+        xaiService.setApiKey(this.options.xaiApiKey);
+        const xaiTools = createXaiSearchTools(xaiService);
+        this.toolExecutor.registerAllLocal(xaiTools);
+      } catch (err: any) {
+        console.warn('[ChatExecutor] Failed to initialize xAI web search tools:', err.message);
+      }
+    }
+
+    // Tier 3: DataForSEO deep research tools — heavy, expensive, comprehensive
+    if (this.options.dataForSeoLogin && this.options.dataForSeoPassword) {
+      try {
+        const dfsService = new DataForSeoService();
+        dfsService.setCredentials(this.options.dataForSeoLogin, this.options.dataForSeoPassword);
+        const dfsTools = createDataForSeoTools(dfsService);
+        this.toolExecutor.registerAllLocal(dfsTools);
+        console.log(`[ChatExecutor] Registered ${dfsTools.length} DataForSEO Tier 3 tools`);
+      } catch (err: any) {
+        console.warn('[ChatExecutor] Failed to initialize DataForSEO tools:', err.message);
       }
     }
 
