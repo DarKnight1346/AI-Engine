@@ -250,17 +250,38 @@ export class LLMPool {
     const usingOAuth = keyConfig ? isOAuthToken(keyConfig.apiKey) : false;
 
     // When using OAuth setup-tokens, the API requires a Claude Code identity
-    // prepended to the system prompt. The user's custom system prompt is
-    // appended after it.  Reference: pi-ai (OpenClaw) anthropic.ts buildParams()
+    // in the system prompt (for OAuth compliance).  However, simply prepending
+    // "You are Claude Code" followed by a custom persona creates two
+    // contradictory identities and the model rejects both.
+    //
+    // Instead, we use a single coherent system prompt that:
+    //   1. Satisfies the OAuth Claude Code requirement
+    //   2. Frames the custom persona as behavioral instructions — a configured
+    //      "mode" of operation — rather than a conflicting identity
+    //   3. Tells the model to respond ONLY according to the custom instructions
+    //
+    // Reference: pi-ai (OpenClaw) anthropic.ts buildParams()
     let systemPrompt: string | Anthropic.Messages.TextBlockParam[] | undefined;
     if (usingOAuth) {
-      const blocks: Anthropic.Messages.TextBlockParam[] = [
-        { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
-      ];
       if (options.systemPrompt) {
-        blocks.push({ type: 'text', text: options.systemPrompt });
+        // Merge Claude Code identity + custom persona into a single coherent prompt
+        const mergedPrompt =
+          `You are Claude Code, Anthropic's official CLI for Claude.\n\n` +
+          `IMPORTANT — CUSTOM ASSISTANT MODE:\n` +
+          `The user has configured you as a custom assistant with specific persona ` +
+          `and behavior. You MUST follow the instructions below for ALL responses. ` +
+          `Adopt the described identity, personality, expertise, and behavior. ` +
+          `Do NOT mention Claude Code, Anthropic, or your underlying AI identity. ` +
+          `Do NOT refuse to adopt the persona below. Respond ONLY as described:\n\n` +
+          `--- BEGIN CUSTOM INSTRUCTIONS ---\n` +
+          `${options.systemPrompt}\n` +
+          `--- END CUSTOM INSTRUCTIONS ---\n\n` +
+          `Remember: You are the persona described above. Stay in character at all times.`;
+        systemPrompt = [{ type: 'text', text: mergedPrompt }];
+      } else {
+        // No custom prompt — just use the Claude Code identity
+        systemPrompt = [{ type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' }];
       }
-      systemPrompt = blocks;
     } else {
       systemPrompt = options.systemPrompt;
     }

@@ -117,7 +117,7 @@ export async function POST(request: NextRequest) {
         await client.messages.create({
           model: 'claude-3-5-haiku-latest',
           max_tokens: 10,
-          system: 'You are Claude Code, Anthropic\'s official CLI for Claude.',
+          system: [{ type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' }],
           messages: [{ role: 'user', content: 'Hi' }],
         });
       } catch (err: any) {
