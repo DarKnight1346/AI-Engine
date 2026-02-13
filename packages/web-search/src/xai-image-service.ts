@@ -168,7 +168,7 @@ export class XaiImageService {
       for (const br of batchResults) {
         if (br.status === 'fulfilled') {
           allImages.push(...br.value.images);
-          usedModel = br.value.model;
+          usedModel = br.value.model as XaiImageModel;
         } else {
           console.error(`[XaiImageService] Batch failed:`, br.reason?.message ?? br.reason);
         }
