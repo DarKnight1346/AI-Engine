@@ -9,36 +9,47 @@ export const dynamic = 'force-dynamic';
 /**
  * POST /api/chat/stream
  *
- * Streaming chat endpoint. Accepts a message, enqueues it in the ChatQueue
- * for async processing, and returns an SSE stream that emits events as the
- * AI generates its response.
+ * Streaming chat endpoint with multi-agent support.
  *
- * This replaces the synchronous /api/chat/send for the dashboard UI,
- * enabling real-time token streaming and handling thousands of concurrent
- * chats without blocking the server.
+ * Body: {
+ *   message: string;
+ *   sessionId?: string;
+ *   userId?: string;
+ *   agentIds?: string[];          // Multiple agents can be invoked simultaneously
+ *   attachments?: Attachment[];
+ * }
  *
- * SSE Events:
- *   - `session`   — { sessionId, userMessageId } — sent immediately
- *   - `token`     — { text } — streamed tokens from the LLM
- *   - `status`    — { message } — status updates (tool calls, iterations)
- *   - `tool`      — { name, id, phase, ... } — tool call lifecycle
- *   - `done`      — { content, usage, iterations } — final response
- *   - `error`     — { message } — error occurred
- *
- * Body: { message: string; sessionId?: string; userId?: string; agentId?: string }
+ * SSE Events (all carry an optional `slot` field for multi-agent):
+ *   - `session`      — { sessionId, userMessageId }
+ *   - `agent_start`  — { slot, agentName } — a new agent begins responding
+ *   - `token`        — { slot, text }
+ *   - `status`       — { slot, message }
+ *   - `tool`         — { slot, name, id, phase, ... }
+ *   - `done`         — { slot, content, usage, agentName }
+ *   - `error`        — { slot, message }
  */
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
 
   try {
     const body = await request.json();
-    const { message, sessionId: incomingSessionId, userId, agentId, attachments: rawAttachments } = body as {
+    const {
+      message,
+      sessionId: incomingSessionId,
+      userId,
+      agentIds,
+      attachments: rawAttachments,
+    } = body as {
       message: string;
       sessionId?: string;
       userId?: string;
-      agentId?: string;
+      agentIds?: string[];
       attachments?: Array<{ name: string; type: string; url: string; size: number }>;
     };
+
+    // Support legacy single agentId field for backwards compatibility
+    const legacyAgentId = (body as any).agentId as string | undefined;
+    const resolvedAgentIds = agentIds ?? (legacyAgentId ? [legacyAgentId] : undefined);
 
     if (!message && (!rawAttachments || rawAttachments.length === 0)) {
       return new Response(
@@ -83,31 +94,25 @@ export async function POST(request: NextRequest) {
         data: {
           type: 'personal',
           ownerId: membership.teamId,
-          title: message.slice(0, 60) + (message.length > 60 ? '...' : ''),
+          title: (message || 'New chat').slice(0, 60) + ((message || '').length > 60 ? '...' : ''),
           createdByUserId: user.id,
         },
       });
     }
 
     // ── Store user message ─────────────────────────────────────────
-    let agentName: string | undefined;
-    if (agentId) {
-      const agent = await db.agent.findUnique({ where: { id: agentId }, select: { name: true } });
-      if (agent) agentName = agent.name;
-    }
-
-    // Build embedsJson with agent info + attachments
-    const embedsData: Record<string, unknown> = {};
-    if (agentId) { embedsData.agentId = agentId; embedsData.agentName = agentName; }
+    const embedsData: Record<string, any> = {};
+    if (resolvedAgentIds?.length) { embedsData.agentIds = resolvedAgentIds; }
     if (rawAttachments?.length) { embedsData.attachments = rawAttachments; }
 
+    const hasEmbeds = Object.keys(embedsData).length > 0;
     const userMessage = await db.chatMessage.create({
       data: {
         sessionId: session.id,
         senderType: 'user',
         senderUserId: userId ?? session.createdByUserId,
         content: message || '',
-        embedsJson: Object.keys(embedsData).length > 0 ? embedsData : undefined,
+        embedsJson: hasEmbeds ? (embedsData as any) : undefined,
       },
     });
 
@@ -116,7 +121,6 @@ export async function POST(request: NextRequest) {
 
     const stream = new ReadableStream({
       start(controller) {
-        // Helper to send an SSE event
         function send(event: string, data: Record<string, unknown>) {
           try {
             controller.enqueue(
@@ -150,43 +154,52 @@ export async function POST(request: NextRequest) {
           sessionId: session!.id,
           message: message || '',
           userId,
-          agentId: agentId ?? undefined,
+          agentIds: resolvedAgentIds,
           attachments: rawAttachments,
           signal: request.signal,
-          onEvent: (event: ChatStreamEvent) => {
+          onEvent: (event: ChatStreamEvent & { slot?: string }) => {
             try {
+              const slot = (event as any).slot as string | undefined;
               switch (event.type) {
+                case 'agent_start':
+                  send('agent_start', {
+                    slot: slot ?? '__default__',
+                    agentName: (event as any).agentName ?? 'AI Engine',
+                  });
+                  break;
                 case 'token':
-                  send('token', { text: event.text });
+                  send('token', { slot, text: event.text });
                   break;
                 case 'status':
-                  send('status', { message: event.message });
+                  send('status', { slot, message: event.message });
                   break;
                 case 'tool_call_start':
-                  send('tool', { phase: 'start', name: event.name, id: event.id });
+                  send('tool', { slot, phase: 'start', name: event.name, id: event.id });
                   break;
                 case 'tool_call_end':
                   send('tool', {
-                    phase: 'end', name: event.name, id: event.id,
+                    slot, phase: 'end', name: event.name, id: event.id,
                     success: event.success, output: event.output.slice(0, 500),
                   });
                   break;
                 case 'iteration':
                   send('status', {
+                    slot,
                     message: `Iteration ${event.iteration + 1}/${event.maxIterations}`,
                   });
                   break;
                 case 'done':
                   send('done', {
+                    slot,
                     content: event.result.content,
                     toolCallsCount: event.result.toolCallsCount,
                     usage: event.result.usage,
                     iterations: event.result.iterations,
-                    agentName,
+                    agentName: (event as any).agentName,
                   });
                   break;
                 case 'error':
-                  send('error', { message: event.message });
+                  send('error', { slot, message: event.message });
                   break;
               }
             } catch {

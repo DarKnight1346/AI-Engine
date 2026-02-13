@@ -563,9 +563,9 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
-  const [mentionAnchor, setMentionAnchor] = useState<HTMLElement | null>(null);
+  const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionCursorPos, setMentionCursorPos] = useState(0);
   const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -733,7 +733,6 @@ export default function ChatPage() {
   // ── Switch session ──
   const switchSession = useCallback((sid: string) => {
     setSessionId(sid);
-    setSelectedAgent(null);
     loadMessages(sid);
   }, [loadMessages]);
 
@@ -741,7 +740,6 @@ export default function ChatPage() {
   const startNewConversation = useCallback(() => {
     setSessionId(null);
     setMessages([]);
-    setSelectedAgent(null);
     setInput('');
     setContextTokens(0);
     inputRef.current?.focus();
@@ -763,46 +761,69 @@ export default function ChatPage() {
     }
   }, [sessionId, loadSessions]);
 
-  // ── Agent mention ──
-  const handleMentionOpen = (e: React.MouseEvent<HTMLElement>) => {
-    setMentionAnchor(e.currentTarget);
+  // ── Inline @mention system (multi-agent) ──
+
+  /** Extract @mentioned agent names from message text */
+  const parseMentions = useCallback((text: string): string[] => {
+    const mentions: string[] = [];
+    const re = /@(\w[\w\s]*?)(?=\s@|\s[^@]|$)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      mentions.push(m[1].trim().toLowerCase());
+    }
+    return mentions;
+  }, []);
+
+  /** Resolve mention strings to agent objects */
+  const resolveMentionedAgents = useCallback((text: string): Agent[] => {
+    const mentionNames = parseMentions(text);
+    if (mentionNames.length === 0) return [];
+    return agents.filter((a) =>
+      mentionNames.some((mn) => a.name.toLowerCase() === mn || a.name.toLowerCase().startsWith(mn))
+    );
+  }, [agents, parseMentions]);
+
+  const handleMentionClose = useCallback(() => {
+    setMentionOpen(false);
     setMentionQuery('');
-  };
+  }, []);
 
-  const handleMentionClose = () => {
-    setMentionAnchor(null);
-    setMentionQuery('');
-  };
-
-  const handleAgentSelect = (agent: Agent | null) => {
-    setSelectedAgent(agent);
-    handleMentionClose();
-    inputRef.current?.focus();
-  };
-
-  // ── Input handling with @ detection ──
+  // ── Input handling with inline @ detection ──
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setInput(value);
 
-    // Detect @mention at end of input
-    const match = value.match(/@(\w*)$/);
-    if (match && inputRef.current) {
+    // Get cursor position
+    const cursorPos = e.target.selectionStart ?? value.length;
+    setMentionCursorPos(cursorPos);
+
+    // Look for @query at the cursor position (not just end of string)
+    const textBeforeCursor = value.slice(0, cursorPos);
+    const match = textBeforeCursor.match(/@(\w*)$/);
+    if (match) {
       setMentionQuery(match[1].toLowerCase());
-      setMentionAnchor(inputRef.current);
-    } else if (mentionAnchor && !value.includes('@')) {
+      setMentionOpen(true);
+    } else {
       handleMentionClose();
     }
   };
 
-  const handleMentionSelect = (agent: Agent) => {
-    // Replace @query with nothing and set the agent
-    const cleaned = input.replace(/@\w*$/, '').trim();
-    setInput(cleaned);
-    setSelectedAgent(agent);
+  /** Insert an @mention for the selected agent */
+  const handleMentionSelect = useCallback((agent: Agent) => {
+    // Replace the @query at cursor with @AgentName
+    const textBeforeCursor = input.slice(0, mentionCursorPos);
+    const textAfterCursor = input.slice(mentionCursorPos);
+    const before = textBeforeCursor.replace(/@\w*$/, '');
+    const newInput = `${before}@${agent.name} ${textAfterCursor}`;
+    setInput(newInput);
     handleMentionClose();
-    inputRef.current?.focus();
-  };
+    // Move cursor to after the inserted mention
+    setTimeout(() => {
+      const pos = before.length + agent.name.length + 2; // +2 for @ and space
+      inputRef.current?.setSelectionRange(pos, pos);
+      inputRef.current?.focus();
+    }, 0);
+  }, [input, mentionCursorPos, handleMentionClose]);
 
   const filteredAgents = agents.filter((a) =>
     !mentionQuery || a.name.toLowerCase().includes(mentionQuery)
@@ -811,37 +832,51 @@ export default function ChatPage() {
   // ── Active SSE abort controller (to cancel streaming on unmount or new send) ──
   const abortRef = useRef<AbortController | null>(null);
 
-  // ── Send message (streaming via SSE) ──
+  // ── Send message (streaming via SSE — multi-agent) ──
   const handleSend = async () => {
     if ((!input.trim() && attachments.length === 0) || sending) return;
 
     const currentAttachments = [...attachments];
+    const currentInput = input;
+
+    // Parse @mentions to find which agents to invoke
+    const mentionedAgents = resolveMentionedAgents(currentInput);
+    const agentIds = mentionedAgents.map((a) => a.id);
+
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: input,
+      content: currentInput,
       timestamp: new Date(),
       attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
-    // Update estimated context with the new user message
-    setContextTokens((prev) => prev + Math.ceil(input.length / 4));
-    const currentInput = input;
-    const currentAgent = selectedAgent;
+    setContextTokens((prev) => prev + Math.ceil(currentInput.length / 4));
     setInput('');
     setAttachments([]);
     setSending(true);
 
-    // Create a placeholder AI message that we'll stream into
-    const aiMsgId = crypto.randomUUID();
-    const aiMsg: Message = {
-      id: aiMsgId,
-      role: 'ai',
-      content: '',
-      timestamp: new Date(),
-      agentName: currentAgent?.name,
-    };
-    setMessages((prev) => [...prev, aiMsg]);
+    // Track per-agent message IDs: the backend will tell us which slot maps
+    // to which agent via `agent_start` events. We start with a single
+    // placeholder for a "default" slot; the backend may add more.
+    const slotMessages = new Map<string, string>(); // slotId -> msgId
+    const slotContent = new Map<string, string>();   // slotId -> streamed text
+
+    // Pre-create placeholders for explicitly mentioned agents
+    if (mentionedAgents.length > 0) {
+      for (const agent of mentionedAgents) {
+        const msgId = crypto.randomUUID();
+        slotMessages.set(agent.id, msgId);
+        slotContent.set(agent.id, '');
+        setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName: agent.name }]);
+      }
+    } else {
+      // No explicit mentions — create a single placeholder (agent TBD by classifier)
+      const defaultMsgId = crypto.randomUUID();
+      slotMessages.set('__default__', defaultMsgId);
+      slotContent.set('__default__', '');
+      setMessages((prev) => [...prev, { id: defaultMsgId, role: 'ai', content: '', timestamp: new Date() }]);
+    }
 
     // Abort any previous stream
     abortRef.current?.abort();
@@ -855,7 +890,7 @@ export default function ChatPage() {
         body: JSON.stringify({
           message: currentInput,
           sessionId,
-          agentId: currentAgent?.id ?? null,
+          agentIds: agentIds.length > 0 ? agentIds : undefined,
           attachments: currentAttachments.length > 0
             ? currentAttachments.map(a => ({ name: a.name, type: a.type, url: a.url, size: a.size }))
             : undefined,
@@ -865,20 +900,22 @@ export default function ChatPage() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
-        setMessages((prev) => prev.map((m) =>
-          m.id === aiMsgId ? { ...m, content: `Error: ${errData.error}` } : m
-        ));
+        // Error on all slots
+        setMessages((prev) => prev.map((m) => {
+          for (const msgId of slotMessages.values()) {
+            if (m.id === msgId) return { ...m, content: `Error: ${errData.error}` };
+          }
+          return m;
+        }));
         setSending(false);
         return;
       }
 
-      // Read the SSE stream with proper event: / data: correlation
       const reader = res.body?.getReader();
       if (!reader) throw new Error('No response body');
 
       const decoder = new TextDecoder();
       let buffer = '';
-      let streamedContent = '';
       let currentEventType = '';
 
       while (true) {
@@ -892,25 +929,19 @@ export default function ChatPage() {
         for (const line of lines) {
           const trimmed = line.trim();
 
-          // Skip comments (keep-alive pings)
           if (trimmed.startsWith(':')) continue;
-
-          // Track event type
           if (trimmed.startsWith('event: ')) {
             currentEventType = trimmed.slice(7).trim();
             continue;
           }
-
-          // Empty line = end of event block, reset
-          if (!trimmed) {
-            currentEventType = '';
-            continue;
-          }
-
+          if (!trimmed) { currentEventType = ''; continue; }
           if (!trimmed.startsWith('data: ')) continue;
 
           try {
             const data = JSON.parse(trimmed.slice(6));
+
+            // Resolve the slot (for multi-agent, events carry a `slot` field)
+            const slot: string = data.slot ?? '__default__';
 
             switch (currentEventType) {
               case 'session':
@@ -920,40 +951,78 @@ export default function ChatPage() {
                 }
                 break;
 
-              case 'token':
-                streamedContent += data.text;
-                setMessages((prev) => prev.map((m) =>
-                  m.id === aiMsgId ? { ...m, content: streamedContent } : m
-                ));
-                break;
-
-              case 'tool':
-                // Tool lifecycle events — could show in UI later
-                break;
-
-              case 'status':
-                // Status updates (e.g., "Using tool X...")
-                break;
-
-              case 'done':
-                // Finalize with the full content from the server
-                setMessages((prev) => prev.map((m) =>
-                  m.id === aiMsgId
-                    ? { ...m, content: data.content, agentName: data.agentName || m.agentName }
-                    : m
-                ));
-                // Update context tokens with actual usage from the LLM
-                if (data.usage) {
-                  const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
-                  if (totalUsed > 0) setContextTokens(totalUsed);
+              case 'agent_start': {
+                // Backend tells us which agent is responding in this slot.
+                // If we have a __default__ placeholder, rebind it.
+                const agentName = data.agentName || 'AI Engine';
+                if (slot === '__default__' && slotMessages.has('__default__')) {
+                  // Rename the default slot
+                  const msgId = slotMessages.get('__default__')!;
+                  slotMessages.delete('__default__');
+                  slotMessages.set(slot, msgId);
+                  slotContent.delete('__default__');
+                  slotContent.set(slot, '');
+                  setMessages((prev) => prev.map((m) =>
+                    m.id === msgId ? { ...m, agentName } : m
+                  ));
+                } else if (!slotMessages.has(slot)) {
+                  // New agent slot (was auto-classified) — create a new placeholder
+                  const msgId = crypto.randomUUID();
+                  slotMessages.set(slot, msgId);
+                  slotContent.set(slot, '');
+                  setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
+                } else {
+                  // Update name on an existing slot
+                  const msgId = slotMessages.get(slot)!;
+                  setMessages((prev) => prev.map((m) =>
+                    m.id === msgId ? { ...m, agentName } : m
+                  ));
                 }
                 break;
+              }
 
-              case 'error':
-                setMessages((prev) => prev.map((m) =>
-                  m.id === aiMsgId ? { ...m, content: `Error: ${data.message}` } : m
-                ));
+              case 'token': {
+                const msgId = slotMessages.get(slot);
+                if (msgId) {
+                  const prev = slotContent.get(slot) ?? '';
+                  const next = prev + data.text;
+                  slotContent.set(slot, next);
+                  setMessages((msgs) => msgs.map((m) =>
+                    m.id === msgId ? { ...m, content: next } : m
+                  ));
+                }
                 break;
+              }
+
+              case 'tool':
+              case 'status':
+                break;
+
+              case 'done': {
+                const msgId = slotMessages.get(slot);
+                if (msgId) {
+                  setMessages((msgs) => msgs.map((m) =>
+                    m.id === msgId
+                      ? { ...m, content: data.content, agentName: data.agentName || m.agentName }
+                      : m
+                  ));
+                }
+                if (data.usage) {
+                  const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
+                  if (totalUsed > 0) setContextTokens((prev) => Math.max(prev, totalUsed));
+                }
+                break;
+              }
+
+              case 'error': {
+                const msgId = slotMessages.get(slot);
+                if (msgId) {
+                  setMessages((msgs) => msgs.map((m) =>
+                    m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
+                  ));
+                }
+                break;
+              }
             }
           } catch {
             // Skip unparseable lines
@@ -963,13 +1032,13 @@ export default function ChatPage() {
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         setMessages((prev) => {
-          const existing = prev.find((m) => m.id === aiMsgId);
-          if (existing && !existing.content) {
-            return prev.map((m) =>
-              m.id === aiMsgId ? { ...m, content: `Failed to connect: ${err.message}` } : m
-            );
-          }
-          return prev;
+          const emptySlotMsgIds = Array.from(slotMessages.values());
+          return prev.map((m) => {
+            if (emptySlotMsgIds.includes(m.id) && !m.content) {
+              return { ...m, content: `Failed to connect: ${err.message}` };
+            }
+            return m;
+          });
         });
       }
     } finally {
@@ -1125,9 +1194,7 @@ export default function ChatPage() {
                   How can I help you today?
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  {selectedAgent
-                    ? `Talking to ${selectedAgent.name}`
-                    : 'Ask anything, or tag an agent with @'}
+                  Ask anything, or tag agents with @
                 </Typography>
               </Box>
               <Stack direction="row" spacing={1} flexWrap="wrap" justifyContent="center" sx={{ maxWidth: 500, gap: 1 }}>
@@ -1163,10 +1230,9 @@ export default function ChatPage() {
                         icon={<SmartToyIcon sx={{ fontSize: '14px !important' }} />}
                         label={a.name}
                         size="small"
-                        variant={selectedAgent?.id === a.id ? 'filled' : 'outlined'}
-                        color={selectedAgent?.id === a.id ? 'primary' : 'default'}
-                        onClick={() => setSelectedAgent(selectedAgent?.id === a.id ? null : a)}
-                        sx={{ fontSize: 12 }}
+                        variant="outlined"
+                        onClick={() => setInput((prev) => `${prev}@${a.name} `)}
+                        sx={{ fontSize: 12, cursor: 'pointer' }}
                       />
                     ))}
                   </Stack>
@@ -1315,24 +1381,29 @@ export default function ChatPage() {
         {/* ── Input area ──────────────────────────────────────────── */}
         <Box sx={{ px: { xs: 2, md: 3 }, pb: 2, pt: 1 }}>
           <Box sx={{ maxWidth: 800, mx: 'auto' }}>
-            {/* Selected agent chip */}
-            {selectedAgent && (
-              <Box sx={{ mb: 1, display: 'flex', alignItems: 'center' }}>
-                <Chip
-                  icon={<SmartToyIcon sx={{ fontSize: '14px !important' }} />}
-                  label={selectedAgent.name}
-                  size="small"
-                  color="primary"
-                  variant="outlined"
-                  onDelete={() => setSelectedAgent(null)}
-                  deleteIcon={<CloseIcon sx={{ fontSize: 14 }} />}
-                  sx={{ fontSize: 12, height: 26 }}
-                />
-                <Typography variant="caption" sx={{ ml: 1, color: 'text.disabled' }}>
-                  will respond to this conversation
-                </Typography>
-              </Box>
-            )}
+            {/* Active @mentions indicator */}
+            {(() => {
+              const mentioned = resolveMentionedAgents(input);
+              if (mentioned.length === 0) return null;
+              return (
+                <Box sx={{ mb: 0.75, display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
+                  <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: 11, mr: 0.5 }}>
+                    Responding:
+                  </Typography>
+                  {mentioned.map((a) => (
+                    <Chip
+                      key={a.id}
+                      icon={<SmartToyIcon sx={{ fontSize: '12px !important' }} />}
+                      label={a.name}
+                      size="small"
+                      color="primary"
+                      variant="outlined"
+                      sx={{ fontSize: 11, height: 22 }}
+                    />
+                  ))}
+                </Box>
+              );
+            })()}
 
             <Paper
               elevation={0}
@@ -1444,14 +1515,20 @@ export default function ChatPage() {
                   </IconButton>
                 </Tooltip>
 
-                {/* @ mention button */}
-                <Tooltip title="Tag an agent">
+                {/* @ mention button — inserts @ into input to trigger autocomplete */}
+                <Tooltip title="Mention an agent (@)">
                   <IconButton
                     size="small"
-                    onClick={handleMentionOpen}
+                    onClick={() => {
+                      setInput((prev) => prev + '@');
+                      setMentionOpen(true);
+                      setMentionQuery('');
+                      inputRef.current?.focus();
+                    }}
+                    disabled={sending}
                     sx={{
                       mb: 0.25,
-                      color: selectedAgent ? 'primary.main' : 'text.disabled',
+                      color: 'text.disabled',
                       '&:hover': { color: 'primary.main' },
                     }}
                   >
@@ -1462,7 +1539,7 @@ export default function ChatPage() {
                 <TextField
                   inputRef={inputRef}
                   fullWidth
-                  placeholder={selectedAgent ? `Message ${selectedAgent.name}...` : 'Message AI Engine...'}
+                  placeholder="Message AI Engine... (type @ to mention agents)"
                   value={input}
                   onChange={handleInputChange}
                   onKeyDown={(e) => {
@@ -1522,55 +1599,50 @@ export default function ChatPage() {
         </Box>
       </Box>
 
-      {/* ── Agent mention popover ───────────────────────────────────── */}
+      {/* ── Inline @mention autocomplete ────────────────────────────── */}
       <Popover
-        open={Boolean(mentionAnchor)}
-        anchorEl={mentionAnchor}
+        open={mentionOpen && filteredAgents.length > 0}
+        anchorEl={inputRef.current}
         onClose={handleMentionClose}
+        disableAutoFocus
+        disableEnforceFocus
+        disableRestoreFocus
         anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
         transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
         slotProps={{
           paper: {
             sx: {
-              mt: -1, minWidth: 220, maxHeight: 300,
+              mt: -1, minWidth: 220, maxHeight: 260,
               borderRadius: 2, border: '1px solid', borderColor: 'divider',
               bgcolor: 'background.paper',
+              boxShadow: 8,
             },
           },
         }}
       >
-        <Box sx={{ p: 1 }}>
-          <Typography variant="caption" sx={{ px: 1, py: 0.5, display: 'block', color: 'text.disabled', fontWeight: 600 }}>
-            Select an agent
+        <Box sx={{ p: 0.75 }}>
+          <Typography variant="caption" sx={{ px: 1, py: 0.5, display: 'block', color: 'text.disabled', fontWeight: 600, fontSize: 10 }}>
+            Mention an agent
           </Typography>
-          <MenuItem
-            onClick={() => handleAgentSelect(null)}
-            selected={!selectedAgent}
-            sx={{ borderRadius: 1, fontSize: 13, py: 0.75, minHeight: 0 }}
-          >
-            <ListItemIcon sx={{ minWidth: 28 }}>
-              <AutoAwesomeIcon sx={{ fontSize: 16 }} />
-            </ListItemIcon>
-            <Typography variant="body2" sx={{ fontSize: 13 }}>Default AI</Typography>
-          </MenuItem>
-          {(mentionQuery ? filteredAgents : agents).map((agent) => (
+          {filteredAgents.map((agent) => (
             <MenuItem
               key={agent.id}
-              onClick={() => mentionAnchor === inputRef.current ? handleMentionSelect(agent) : handleAgentSelect(agent)}
-              selected={selectedAgent?.id === agent.id}
+              onClick={() => handleMentionSelect(agent)}
               sx={{ borderRadius: 1, fontSize: 13, py: 0.75, minHeight: 0 }}
             >
               <ListItemIcon sx={{ minWidth: 28 }}>
-                <SmartToyIcon sx={{ fontSize: 16 }} />
+                <SmartToyIcon sx={{ fontSize: 16, color: 'primary.main' }} />
               </ListItemIcon>
-              <Typography variant="body2" sx={{ fontSize: 13 }}>{agent.name}</Typography>
+              <Box>
+                <Typography variant="body2" sx={{ fontSize: 13, fontWeight: 500 }}>{agent.name}</Typography>
+                {agent.rolePrompt && (
+                  <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: 10, display: 'block', lineHeight: 1.2 }}>
+                    {agent.rolePrompt.slice(0, 60)}{agent.rolePrompt.length > 60 ? '...' : ''}
+                  </Typography>
+                )}
+              </Box>
             </MenuItem>
           ))}
-          {agents.length === 0 && (
-            <Typography variant="caption" sx={{ px: 1, py: 1, display: 'block', color: 'text.disabled' }}>
-              No agents created yet. Create one in the Agents page.
-            </Typography>
-          )}
         </Box>
       </Popover>
 

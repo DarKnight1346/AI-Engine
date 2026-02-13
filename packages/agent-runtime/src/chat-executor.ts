@@ -164,6 +164,7 @@ export interface ChatExecutorResult {
 export type ChatStreamEvent =
   | { type: 'token'; text: string }
   | { type: 'status'; message: string }
+  | { type: 'agent_start'; slot?: string; agentName: string }
   | { type: 'tool_call_start'; name: string; id: string }
   | { type: 'tool_call_end'; name: string; id: string; success: boolean; output: string }
   | { type: 'iteration'; iteration: number; maxIterations: number }

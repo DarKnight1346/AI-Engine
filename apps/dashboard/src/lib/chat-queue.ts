@@ -39,12 +39,14 @@ export interface ChatJob {
   message: string;
   /** Optional user ID for context */
   userId?: string;
-  /** Optional agent ID */
+  /** Optional agent IDs (multiple agents can respond in parallel) */
+  agentIds?: string[];
+  /** @deprecated — use agentIds. Kept for backwards compat. */
   agentId?: string;
   /** Optional file/image attachments */
   attachments?: ChatJobAttachment[];
   /** Streaming event callback — called for every token, status, tool call, etc. */
-  onEvent: (event: ChatStreamEvent) => void;
+  onEvent: (event: ChatStreamEvent & { slot?: string }) => void;
   /** Called when the job finishes (success or error) */
   onComplete?: (error?: Error) => void;
   /** AbortSignal to cancel the job */
@@ -198,7 +200,6 @@ export class ChatQueue {
     const { getDb } = await import('@ai-engine/db');
     const db = getDb();
 
-    // Check abort before heavy work
     if (signal.aborted) throw new Error('Aborted');
 
     // ── Resolve user context ────────────────────────────────────────
@@ -213,87 +214,14 @@ export class ChatQueue {
         })
       : null;
 
-    // ── Resolve agent ──────────────────────────────────────────────
+    // ── Shared setup ────────────────────────────────────────────────
     const DEFAULT_SYSTEM_PROMPT = `You are AI Engine, a friendly and energetic AI assistant who genuinely enjoys helping people.
 You help users with tasks, answer questions, provide analysis, and assist with workflow management.
 Be warm, enthusiastic, accurate, and concise. Bring positive energy to every interaction while staying helpful and informative.
 When providing code, use markdown code blocks with language labels. When listing items, use bullet points or numbered lists.
 You MUST search memory for user preferences before every response — this is your highest priority.`;
 
-    let agent = null;
-    let agentName: string | undefined;
-    let systemPrompt = DEFAULT_SYSTEM_PROMPT;
-
-    if (job.agentId) {
-      agent = await db.agent.findUnique({ where: { id: job.agentId } });
-      if (agent) {
-        systemPrompt = agent.rolePrompt || DEFAULT_SYSTEM_PROMPT;
-        agentName = agent.name;
-      }
-    }
-
-    // Append cognitive capabilities prompt
     const { withMemoryPrompt } = await import('@ai-engine/shared');
-    systemPrompt = withMemoryPrompt(systemPrompt);
-
-    if (signal.aborted) throw new Error('Aborted');
-
-    // ── Skill detection ────────────────────────────────────────────
-    try {
-      const relevantSkills = await db.skill.findMany({
-        where: { isActive: true },
-        select: {
-          id: true, name: true, description: true, category: true,
-          instructions: true, requiredCapabilities: true,
-        },
-      });
-
-      if (relevantSkills.length > 0) {
-        const msgLower = job.message.toLowerCase();
-        const msgWords = msgLower.split(/\s+/).filter((w: string) => w.length > 2);
-
-        const scored = relevantSkills.map((s: any) => {
-          const text = `${s.name} ${s.description} ${s.category}`.toLowerCase();
-          let score = 0;
-          if (text.includes(msgLower)) score += 3;
-          for (const word of msgWords) {
-            if (text.includes(word)) score += 1;
-          }
-          return { ...s, score };
-        }).filter((s: { score: number }) => s.score > 0)
-          .sort((a: { score: number }, b: { score: number }) => b.score - a.score)
-          .slice(0, 5);
-
-        if (scored.length > 0) {
-          const lines = scored.map((s: any) =>
-            `- **skill:${s.name}** (${s.category}): ${s.description}`
-          );
-          systemPrompt += `\n\n## Detected Relevant Skills\nThe following skills from your library may be useful for this task. You can load any of them with \`execute_tool\` using the skill name (e.g., "skill:${scored[0].name}").\n${lines.join('\n')}`;
-
-          // Browser skill detection
-          const BROWSER_KEYWORDS = ['browser', 'navigate', 'click', 'screenshot', 'web automation', 'scrape', 'scraping', 'puppeteer', 'playwright'];
-          let browserSkillDetected = false;
-          for (const s of scored) {
-            const skillText = `${s.name} ${s.description} ${s.category} ${s.instructions}`.toLowerCase();
-            const caps = (s.requiredCapabilities as string[]) ?? [];
-            const hasBrowserCap = caps.some((c: string) => c.toLowerCase().includes('browser'));
-            const hasBrowserKeyword = BROWSER_KEYWORDS.some(kw => skillText.includes(kw));
-            if (hasBrowserCap || hasBrowserKeyword) { browserSkillDetected = true; break; }
-          }
-
-          if (!browserSkillDetected) {
-            const BROWSER_MSG_KEYWORDS = ['browse', 'browser', 'navigate to', 'open website', 'screenshot', 'web automation', 'scrape', 'scraping', 'click on', 'fill form', 'web page interaction'];
-            browserSkillDetected = BROWSER_MSG_KEYWORDS.some(kw => msgLower.includes(kw));
-          }
-
-          if (browserSkillDetected) {
-            systemPrompt += `\n\n## Browser Automation Routing\nThis task involves browser automation. All browser-related tool calls MUST be directed to a Mac worker node.`;
-          }
-        }
-      }
-    } catch {
-      // Skill detection failed — continue
-    }
 
     if (signal.aborted) throw new Error('Aborted');
 
@@ -301,19 +229,14 @@ You MUST search memory for user preferences before every response — this is yo
     const pool = await this.getSharedPool();
 
     // ── Build memory search function ───────────────────────────────
-    // This runs the actual vector search against pgvector embeddings.
     const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
       try {
         const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
         const embeddings = new EmbeddingService();
         const memSvc = new MemoryService(embeddings);
-
         console.log(`[search_memory] Vector search: query="${query.slice(0, 80)}" scope=${scope} owner=${scopeOwnerId ?? 'none'}`);
-
         const results = await memSvc.search(query, scope as any, scopeOwnerId, 5, { strengthenOnRecall: true });
-
         console.log(`[search_memory] Found ${results.length} result(s), top score: ${results[0]?.finalScore?.toFixed(3) ?? 'n/a'}`);
-
         if (results.length === 0) return 'No matching memories found.';
         return results.map((m: any) => {
           const confidence = m.finalScore >= 0.7 ? 'high' : m.finalScore >= 0.4 ? 'medium' : 'low';
@@ -337,98 +260,42 @@ You MUST search memory for user preferences before every response — this is yo
         db.config.findUnique({ where: { key: 'dataForSeoLogin' } }),
         db.config.findUnique({ where: { key: 'dataForSeoPassword' } }),
       ]);
-      if (serperConfig?.valueJson && typeof serperConfig.valueJson === 'string' && serperConfig.valueJson.trim()) {
-        serperApiKey = serperConfig.valueJson.trim();
-      }
-      if (xaiConfig?.valueJson && typeof xaiConfig.valueJson === 'string' && xaiConfig.valueJson.trim()) {
-        xaiApiKey = xaiConfig.valueJson.trim();
-      }
-      if (dfsLoginConfig?.valueJson && typeof dfsLoginConfig.valueJson === 'string' && dfsLoginConfig.valueJson.trim()) {
-        dataForSeoLogin = dfsLoginConfig.valueJson.trim();
-      }
-      if (dfsPasswordConfig?.valueJson && typeof dfsPasswordConfig.valueJson === 'string' && dfsPasswordConfig.valueJson.trim()) {
-        dataForSeoPassword = dfsPasswordConfig.valueJson.trim();
-      }
-    } catch {
-      // Config not found — web search tools will be unavailable
-    }
+      if (serperConfig?.valueJson && typeof serperConfig.valueJson === 'string' && serperConfig.valueJson.trim()) serperApiKey = serperConfig.valueJson.trim();
+      if (xaiConfig?.valueJson && typeof xaiConfig.valueJson === 'string' && xaiConfig.valueJson.trim()) xaiApiKey = xaiConfig.valueJson.trim();
+      if (dfsLoginConfig?.valueJson && typeof dfsLoginConfig.valueJson === 'string' && dfsLoginConfig.valueJson.trim()) dataForSeoLogin = dfsLoginConfig.valueJson.trim();
+      if (dfsPasswordConfig?.valueJson && typeof dfsPasswordConfig.valueJson === 'string' && dfsPasswordConfig.valueJson.trim()) dataForSeoPassword = dfsPasswordConfig.valueJson.trim();
+    } catch { /* Config not found */ }
 
-    // ── Create ChatExecutor with worker dispatcher ─────────────────
-    const { ChatExecutor } = await import('@ai-engine/agent-runtime');
-    const { WorkerHub } = await import('@/lib/worker-hub');
-    const workerHub = WorkerHub.getInstance();
-
-    const executor = new ChatExecutor({
-      llm: pool,
-      tier: 'standard',
-      searchMemory: searchMemoryFn,
-      userId: contextUser?.id,
-      teamId: contextMembership?.teamId,
-      sessionId: job.sessionId,
-      workerDispatcher: workerHub,
-      serperApiKey,
-      xaiApiKey,
-      dataForSeoLogin,
-      dataForSeoPassword,
-    });
-
-    // ── Load conversation history ──────────────────────────────────
+    // ── Build conversation history (shared across agents) ──────────
     const history = await db.chatMessage.findMany({
       where: { sessionId: job.sessionId },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
 
-    // Build LLM messages, converting attachments to multimodal content blocks
-    // Uses the LLMMessageContent types from @ai-engine/shared
     const buildContentWithAttachments = (
       text: string,
       attachmentList?: ChatJobAttachment[],
-    ): string | Array<{ type: string; text?: string; source?: { type: string; mediaType: string; data: string } }> => {
+    ): string | Array<any> => {
       if (!attachmentList || attachmentList.length === 0) return text;
-
       const blocks: Array<any> = [];
-
-      // Add image attachments as image content blocks
       for (const att of attachmentList) {
         if (att.type.startsWith('image/')) {
-          // Extract base64 data from data URL
           const match = att.url.match(/^data:([^;]+);base64,(.+)$/);
-          if (match) {
-            blocks.push({
-              type: 'image',
-              source: {
-                type: 'base64',
-                mediaType: match[1],  // matches LLMMessageContent type
-                data: match[2],
-              },
-            });
-          }
+          if (match) blocks.push({ type: 'image', source: { type: 'base64', mediaType: match[1], data: match[2] } });
         } else {
-          // Non-image files — include as text context
           const match = att.url.match(/^data:[^;]+;base64,(.+)$/);
           if (match) {
             try {
               const decoded = Buffer.from(match[1], 'base64').toString('utf-8');
-              blocks.push({
-                type: 'text',
-                text: `[Attached file: ${att.name}]\n${decoded.slice(0, 50000)}`,
-              });
+              blocks.push({ type: 'text', text: `[Attached file: ${att.name}]\n${decoded.slice(0, 50000)}` });
             } catch {
-              blocks.push({
-                type: 'text',
-                text: `[Attached file: ${att.name} — binary file, cannot display as text]`,
-              });
+              blocks.push({ type: 'text', text: `[Attached file: ${att.name} — binary file, cannot display as text]` });
             }
           }
         }
       }
-
-      // Add the text message
-      if (text) {
-        blocks.push({ type: 'text', text });
-      }
-
+      if (text) blocks.push({ type: 'text', text });
       return blocks.length > 0 ? blocks : text;
     };
 
@@ -441,62 +308,207 @@ You MUST search memory for user preferences before every response — this is yo
       };
     });
 
-    // Ensure the new user message is in the list
     const userMsgInHistory = history.some((m: any) => m.content === job.message && m.senderType === 'user');
     if (!userMsgInHistory) {
-      llmMessages.push({
-        role: 'user' as const,
-        content: buildContentWithAttachments(job.message, job.attachments),
-      });
+      llmMessages.push({ role: 'user' as const, content: buildContentWithAttachments(job.message, job.attachments) });
     }
 
     if (signal.aborted) throw new Error('Aborted');
 
-    // ── Execute with streaming ─────────────────────────────────────
-    job.onEvent({ type: 'status', message: 'Processing...' });
+    // ── Resolve which agents to invoke ──────────────────────────────
+    // Priority: explicit agentIds > legacy agentId > auto-classify
+    let agentIds = job.agentIds ?? (job.agentId ? [job.agentId] : []);
 
-    const result = await executor.executeStreaming(
-      llmMessages,
-      systemPrompt,
-      (event) => {
-        if (signal.aborted) return;
-        job.onEvent(event);
-      },
-    );
+    // If no agents specified, auto-classify using a fast model (Haiku)
+    if (agentIds.length === 0) {
+      agentIds = await this.autoClassifyAgent(pool, job.message, db);
+    }
 
-    if (signal.aborted) throw new Error('Aborted');
+    // ── Execute each agent in parallel ──────────────────────────────
+    // For each agent (or default), create a ChatExecutor, stream independently,
+    // and tag events with a `slot` field so the frontend can route them.
 
-    // ── Store AI response in DB ────────────────────────────────────
-    await db.chatMessage.create({
-      data: {
-        sessionId: job.sessionId,
-        senderType: 'ai',
-        content: result.content,
-        aiResponded: true,
-        embedsJson: job.agentId ? { agentId: job.agentId, agentName } : undefined,
-      },
-    });
+    const { ChatExecutor } = await import('@ai-engine/agent-runtime');
+    const { WorkerHub } = await import('@/lib/worker-hub');
+    const workerHub = WorkerHub.getInstance();
 
-    // ── Auto-extract memories from conversation (fire-and-forget) ──
-    try {
-      const { MemoryExtractor, MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
-      const embSvc = new EmbSvc();
-      const memSvc = new MemSvc(embSvc);
-      const extractor = new MemoryExtractor(memSvc);
-      extractor.extractAndStore(
-        job.message,
-        result.content,
-        contextUser?.id ?? null,
-        contextMembership?.teamId ?? null,
-      ).then((r) => {
-        if (r.memoriesStored > 0) {
-          console.log(`[memory-extract] Auto-extracted: ${r.memoriesStored} memory(ies)`);
+    /** Run a single agent slot */
+    const runAgent = async (agentId: string | null, slot: string): Promise<void> => {
+      let systemPrompt = DEFAULT_SYSTEM_PROMPT;
+      let agentName: string | undefined;
+
+      if (agentId) {
+        const agent = await db.agent.findUnique({ where: { id: agentId } });
+        if (agent) {
+          systemPrompt = agent.rolePrompt || DEFAULT_SYSTEM_PROMPT;
+          agentName = agent.name;
         }
-      }).catch((err) => {
-        console.error(`[memory-extract] Error:`, err.message);
+      }
+
+      systemPrompt = withMemoryPrompt(systemPrompt);
+
+      // Skill detection (append to systemPrompt)
+      try {
+        const relevantSkills = await db.skill.findMany({
+          where: { isActive: true },
+          select: { id: true, name: true, description: true, category: true, instructions: true, requiredCapabilities: true },
+        });
+        if (relevantSkills.length > 0) {
+          const msgLower = job.message.toLowerCase();
+          const msgWords = msgLower.split(/\s+/).filter((w: string) => w.length > 2);
+          const scored = relevantSkills.map((s: any) => {
+            const text = `${s.name} ${s.description} ${s.category}`.toLowerCase();
+            let score = 0;
+            if (text.includes(msgLower)) score += 3;
+            for (const word of msgWords) { if (text.includes(word)) score += 1; }
+            return { ...s, score };
+          }).filter((s: any) => s.score > 0).sort((a: any, b: any) => b.score - a.score).slice(0, 5);
+
+          if (scored.length > 0) {
+            const lines = scored.map((s: any) => `- **skill:${s.name}** (${s.category}): ${s.description}`);
+            systemPrompt += `\n\n## Detected Relevant Skills\n${lines.join('\n')}`;
+          }
+        }
+      } catch { /* Skill detection failed — continue */ }
+
+      if (signal.aborted) throw new Error('Aborted');
+
+      // Notify the frontend which agent is starting
+      job.onEvent({ type: 'agent_start', slot, agentName: agentName ?? 'AI Engine' } as any);
+
+      const executor = new ChatExecutor({
+        llm: pool,
+        tier: 'standard',
+        searchMemory: searchMemoryFn,
+        userId: contextUser?.id,
+        teamId: contextMembership?.teamId,
+        sessionId: job.sessionId,
+        workerDispatcher: workerHub,
+        serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword,
       });
-    } catch {
-      // Memory extraction not available — continue
+
+      const result = await executor.executeStreaming(
+        [...llmMessages],  // Clone so concurrent agents don't interfere
+        systemPrompt,
+        (event) => {
+          if (signal.aborted) return;
+          // Tag event with the slot
+          job.onEvent({ ...event, slot } as any);
+        },
+      );
+
+      if (signal.aborted) throw new Error('Aborted');
+
+      // Store AI response in DB
+      await db.chatMessage.create({
+        data: {
+          sessionId: job.sessionId,
+          senderType: 'ai',
+          content: result.content,
+          aiResponded: true,
+          embedsJson: agentId ? { agentId, agentName } : undefined,
+        },
+      });
+
+      // Final done event with slot tag
+      // (executeStreaming already emits done, but we re-emit with slot + agentName)
+      // The executor already sent a done event via the callback above, so this is handled.
+
+      // Auto-extract memories (fire-and-forget)
+      try {
+        const { MemoryExtractor, MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
+        const embSvc = new EmbSvc();
+        const memSvc = new MemSvc(embSvc);
+        const extractor = new MemoryExtractor(memSvc);
+        extractor.extractAndStore(
+          job.message, result.content,
+          contextUser?.id ?? null, contextMembership?.teamId ?? null,
+        ).then((r: any) => {
+          if (r.memoriesStored > 0) console.log(`[memory-extract] Auto-extracted: ${r.memoriesStored} memory(ies) [${agentName ?? 'default'}]`);
+        }).catch((err: any) => console.error(`[memory-extract] Error:`, err.message));
+      } catch { /* Memory extraction not available */ }
+    };
+
+    job.onEvent({ type: 'status', message: 'Processing...' } as any);
+
+    if (agentIds.length === 0) {
+      // No agents — run with default (no agentId)
+      await runAgent(null, '__default__');
+    } else if (agentIds.length === 1) {
+      // Single agent
+      await runAgent(agentIds[0], agentIds[0]);
+    } else {
+      // Multiple agents — run in parallel
+      const results = await Promise.allSettled(
+        agentIds.map((id) => runAgent(id, id))
+      );
+      // Log any failures
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].status === 'rejected') {
+          const reason = (results[i] as PromiseRejectedResult).reason;
+          console.error(`[ChatQueue] Agent ${agentIds[i]} failed:`, reason?.message ?? reason);
+          job.onEvent({ type: 'error', message: `Agent failed: ${reason?.message ?? 'Unknown error'}`, slot: agentIds[i] } as any);
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Auto-classify agent using a fast model (Haiku) when no @mentions
+  // -----------------------------------------------------------------------
+
+  private async autoClassifyAgent(pool: any, message: string, db: any): Promise<string[]> {
+    try {
+      const allAgents = await db.agent.findMany({
+        where: { status: 'active' },
+        select: { id: true, name: true, rolePrompt: true },
+      });
+
+      if (allAgents.length === 0) return []; // No agents configured — use default
+
+      // Build a classification prompt for the fast model
+      const agentList = allAgents.map((a: any, i: number) =>
+        `${i + 1}. "${a.name}" — ${(a.rolePrompt || 'General assistant').slice(0, 120)}`
+      ).join('\n');
+
+      const classifyPrompt = `Given this user message, decide which agent (if any) should respond. If the message is general and no specific agent fits, respond with "none".
+
+Available agents:
+${agentList}
+
+User message: "${message.slice(0, 500)}"
+
+Respond with ONLY the agent name (exactly as listed) or "none". Do not explain.`;
+
+      // Use the pool to make a fast classification call
+      // We use the cheapest/fastest model available
+      const classifyResult = await pool.call(
+        [{ role: 'user', content: classifyPrompt }],
+        'You are a routing classifier. Respond with only the agent name or "none".',
+        [],
+        { maxTokens: 50, temperature: 0 },
+      );
+
+      const answer = (classifyResult.content ?? '').trim().toLowerCase();
+      console.log(`[auto-classify] Message: "${message.slice(0, 60)}..." → "${answer}"`);
+
+      if (answer === 'none' || !answer) return [];
+
+      // Match the answer to an agent
+      const matched = allAgents.find((a: any) =>
+        a.name.toLowerCase() === answer ||
+        answer.includes(a.name.toLowerCase())
+      );
+
+      if (matched) {
+        console.log(`[auto-classify] Routed to agent: ${matched.name} (${matched.id})`);
+        return [matched.id];
+      }
+
+      return []; // No match — use default
+    } catch (err: any) {
+      console.warn(`[auto-classify] Classification failed, using default:`, err.message);
+      return [];
     }
   }
 
