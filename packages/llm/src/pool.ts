@@ -192,15 +192,15 @@ const PROXY_TIER_MAPPING: Record<LLMTier, string> = {
 };
 
 /**
- * Tier mapping for NVIDIA NIM — matched to Claude equivalents:
- *   fast     → Nemotron Nano 8B   (≈ Haiku — blazing fast, good for tool routing & simple tasks)
- *   standard → Llama 3.3 70B      (≈ Sonnet — strong all-rounder with native tool calling)
- *   heavy    → Nemotron Ultra 253B (≈ Opus — top-tier reasoning, coding, deep analysis)
+ * Tier mapping for NVIDIA NIM:
+ *   fast     → Nemotron 70B Instruct (≈ Haiku — fast, capable, native tool calling)
+ *   standard → Kimi K2.5            (≈ Sonnet — 256K context, strong reasoning & tool use)
+ *   heavy    → Kimi K2.5            (≈ Opus  — same model, powerful enough for deep tasks)
  */
 const NVIDIA_TIER_MAPPING: Record<LLMTier, string> = {
-  fast: 'nvidia/llama-3.1-nemotron-nano-8b-v1',
-  standard: 'meta/llama-3.3-70b-instruct',
-  heavy: 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+  fast: 'nvidia/llama-3.1-nemotron-70b-instruct',
+  standard: 'moonshotai/kimi-k2.5',
+  heavy: 'moonshotai/kimi-k2.5',
 };
 
 /** Callback signature for streaming chunks from the LLM. */

@@ -679,9 +679,8 @@ export default function SettingsPage() {
             <Typography variant="h3" sx={{ mb: 2 }}>LLM Fallback Provider</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               When all primary API keys are exhausted or rate-limited, the system automatically falls back to
-              <strong> NVIDIA NIM</strong> with tiered models matched to Claude equivalents:
-              <strong> Nemotron Nano 8B</strong> (fast), <strong>Llama 3.3 70B</strong> (standard),
-              and <strong>Nemotron Ultra 253B</strong> (heavy). All support tool calling natively.
+              <strong> NVIDIA NIM</strong> with tiered models: <strong>Nemotron Nano 8B</strong> for fast/lightweight tasks
+              and <strong>Kimi K2.5</strong> (256K context) for standard and heavy workloads.
             </Typography>
 
             <Divider sx={{ my: 2 }} />
@@ -692,9 +691,9 @@ export default function SettingsPage() {
                 <Typography variant="subtitle1" fontWeight={600}>NVIDIA NIM — Tiered Models</Typography>
               </Stack>
               <Typography variant="body2" color="text.secondary">
-                Tier-matched models on NVIDIA NIM: <strong>Nano 8B</strong> for fast lookups (like Haiku),{' '}
-                <strong>Llama 3.3 70B</strong> for general tasks (like Sonnet), and{' '}
-                <strong>Nemotron Ultra 253B</strong> for deep reasoning (like Opus).
+                <strong>Nemotron Nano 8B</strong> handles fast/lightweight tasks (like Haiku).{' '}
+                <strong>Kimi K2.5</strong> handles standard and heavy workloads — 256K context with strong
+                reasoning and tool-use capabilities.
                 Used automatically when primary keys run out of tokens.
                 Get an API key from{' '}
                 <a href="https://build.nvidia.com" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>build.nvidia.com</a>.
