@@ -884,15 +884,15 @@ export class LLMPool {
 
   /**
    * Build the request body for NVIDIA NIM API calls.
-   * Supports tiered models: Nano 8B, Llama 3.3 70B, Nemotron Ultra 253B.
+   * Supports tiered agentic models: Nemotron 70B, DeepSeek V3.1 Terminus, Mistral Large 3.
    */
   private buildNvidiaBody(
     model: string, messages: LLMMessage[], options: LLMCallOptions, stream: boolean,
   ): Record<string, any> {
-    // Scale max_tokens to model capability — smaller models generate shorter outputs
-    const isNano = model.includes('nano');
-    const isUltra = model.includes('ultra');
-    const defaultMaxTokens = isNano ? 4096 : isUltra ? 16384 : 8192;
+    // Scale max_tokens by tier — fast tier gets less, heavy gets more
+    const isFastTier = model.includes('nemotron-70b');
+    const isHeavyTier = model.includes('mistral-large');
+    const defaultMaxTokens = isFastTier ? 4096 : isHeavyTier ? 16384 : 8192;
 
     const body: Record<string, any> = {
       model,
