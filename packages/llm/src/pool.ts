@@ -199,7 +199,7 @@ const PROXY_TIER_MAPPING: Record<LLMTier, string> = {
  */
 const NVIDIA_TIER_MAPPING: Record<LLMTier, string> = {
   fast: 'nvidia/llama-3.1-nemotron-70b-instruct',
-  standard: 'deepseek-ai/deepseek-v3_1-terminus',
+  standard: 'deepseek-ai/deepseek-v3.1-terminus',
   heavy: 'mistralai/mistral-large-3-675b-instruct-2512',
 };
 
