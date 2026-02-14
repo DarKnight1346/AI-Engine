@@ -192,15 +192,15 @@ const PROXY_TIER_MAPPING: Record<LLMTier, string> = {
 };
 
 /**
- * Tier mapping for NVIDIA NIM:
- *   fast     → Nemotron 70B Instruct (≈ Haiku — fast, capable, native tool calling)
- *   standard → Kimi K2.5            (≈ Sonnet — 256K context, strong reasoning & tool use)
- *   heavy    → Kimi K2.5            (≈ Opus  — same model, powerful enough for deep tasks)
+ * Tier mapping for NVIDIA NIM — agentic models with native tool calling:
+ *   fast     → Nemotron 70B Instruct       (fast, NVIDIA-optimized, native tool calling)
+ *   standard → DeepSeek V3.1 Terminus 685B (strict function calling, Think/Non-Think, strong agents)
+ *   heavy    → Mistral Large 3 675B        (41B active MoE, 256K context, multimodal, enterprise agentic)
  */
 const NVIDIA_TIER_MAPPING: Record<LLMTier, string> = {
   fast: 'nvidia/llama-3.1-nemotron-70b-instruct',
-  standard: 'moonshotai/kimi-k2.5',
-  heavy: 'moonshotai/kimi-k2.5',
+  standard: 'deepseek-ai/deepseek-v3_1-terminus',
+  heavy: 'mistralai/mistral-large-3-675b-instruct-2512',
 };
 
 /** Callback signature for streaming chunks from the LLM. */
