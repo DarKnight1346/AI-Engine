@@ -84,7 +84,7 @@ export async function POST(request: NextRequest) {
         fileSize: BigInt(file.size),
         storageUrl,
         attachmentType,
-        analysis,
+        ...(analysis != null ? { analysis } : {}),
       },
     });
 
