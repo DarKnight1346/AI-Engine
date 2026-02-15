@@ -5,12 +5,11 @@ import {
   Box, Typography, Card, CardContent, Button, Avatar, Chip, Stack,
   List, ListItem, ListItemAvatar, ListItemText, Slider, TextField,
   Divider, Paper, CircularProgress, Dialog, DialogTitle, DialogContent,
-  DialogActions, Alert, Snackbar, IconButton, Tooltip,
+  DialogActions, Alert, Snackbar,
 } from '@mui/material';
 import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import GroupIcon from '@mui/icons-material/Group';
 import SaveIcon from '@mui/icons-material/Save';
-import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DeleteIcon from '@mui/icons-material/Delete';
 
 interface TeamMember {
@@ -45,8 +44,9 @@ export default function TeamPage() {
   // Invite dialog
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteDisplayName, setInviteDisplayName] = useState('');
+  const [invitePassword, setInvitePassword] = useState('');
   const [inviting, setInviting] = useState(false);
-  const [inviteResult, setInviteResult] = useState<{ message: string; token?: string } | null>(null);
 
   // AI settings editing
   const [sensitivity, setSensitivity] = useState(50);
@@ -107,32 +107,34 @@ export default function TeamPage() {
   const handleInvite = useCallback(async () => {
     if (!inviteEmail.trim() || !team) return;
     setInviting(true);
-    setInviteResult(null);
     try {
       const res = await fetch('/api/team/invite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ teamId: team.id, email: inviteEmail.trim() }),
+        body: JSON.stringify({
+          teamId: team.id,
+          email: inviteEmail.trim(),
+          password: invitePassword || undefined,
+          displayName: inviteDisplayName.trim() || undefined,
+        }),
       });
       const result = await res.json();
       if (result.error) {
         setSnack({ open: true, message: result.error, severity: 'error' });
       } else {
-        setInviteResult({ message: result.message, token: result.inviteToken });
-        if (!result.inviteToken) {
-          // User was added directly
-          setSnack({ open: true, message: result.message, severity: 'success' });
-          setInviteOpen(false);
-          setInviteEmail('');
-          reload();
-        }
+        setSnack({ open: true, message: result.message, severity: 'success' });
+        setInviteOpen(false);
+        setInviteEmail('');
+        setInviteDisplayName('');
+        setInvitePassword('');
+        reload();
       }
     } catch (err: any) {
       setSnack({ open: true, message: err.message, severity: 'error' });
     } finally {
       setInviting(false);
     }
-  }, [inviteEmail, team, reload]);
+  }, [inviteEmail, invitePassword, inviteDisplayName, team, reload]);
 
   // ── Save AI settings ──
   const handleSaveSettings = useCallback(async () => {
@@ -210,7 +212,7 @@ export default function TeamPage() {
         <Paper sx={{ p: 3 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
             <Typography variant="h3">Members ({team.members.length})</Typography>
-            <Button startIcon={<PersonAddIcon />} variant="outlined" size="small" onClick={() => { setInviteOpen(true); setInviteResult(null); setInviteEmail(''); }}>
+            <Button startIcon={<PersonAddIcon />} variant="outlined" size="small" onClick={() => { setInviteOpen(true); setInviteEmail(''); setInviteDisplayName(''); setInvitePassword(''); }}>
               Invite
             </Button>
           </Box>
@@ -294,33 +296,18 @@ export default function TeamPage() {
 
       {/* Invite Dialog */}
       <Dialog open={inviteOpen} onClose={() => setInviteOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Invite Team Member</DialogTitle>
+        <DialogTitle>Add Team Member</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Email Address" fullWidth value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} autoFocus type="email" placeholder="colleague@company.com" />
-            {inviteResult && (
-              <Alert severity="info">
-                {inviteResult.message}
-                {inviteResult.token && (
-                  <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography variant="caption" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                      Token: {inviteResult.token.slice(0, 20)}...
-                    </Typography>
-                    <Tooltip title="Copy token">
-                      <IconButton size="small" onClick={() => { navigator.clipboard.writeText(inviteResult.token!); setSnack({ open: true, message: 'Token copied', severity: 'success' }); }}>
-                        <ContentCopyIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                )}
-              </Alert>
-            )}
+            <TextField label="Display Name" fullWidth value={inviteDisplayName} onChange={(e) => setInviteDisplayName(e.target.value)} placeholder="John Doe" helperText="Optional. Defaults to the part before @ in the email." />
+            <TextField label="Password" fullWidth value={invitePassword} onChange={(e) => setInvitePassword(e.target.value)} type="password" placeholder="Initial login password" helperText="Required for new users (min 8 characters). Not needed if the user already has an account." />
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setInviteOpen(false)}>Close</Button>
+          <Button onClick={() => setInviteOpen(false)}>Cancel</Button>
           <Button variant="contained" onClick={handleInvite} disabled={!inviteEmail.trim() || inviting} startIcon={inviting ? <CircularProgress size={16} /> : undefined}>
-            {inviting ? 'Inviting...' : 'Invite'}
+            {inviting ? 'Adding...' : 'Add Member'}
           </Button>
         </DialogActions>
       </Dialog>
