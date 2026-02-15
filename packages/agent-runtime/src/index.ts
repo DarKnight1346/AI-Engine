@@ -25,7 +25,8 @@ export type { SubAgentTask, SubAgentResult, SubAgentOptions, DagProgressCallback
 export { ProjectOrchestrator } from './project-orchestrator.js';
 
 // Planning mode tools
-export { createPlanningTools, getPlanningModeSystemPrompt } from './planning-tools.js';
+export { createPlanningTools, createPrdTools, createTaskTools, getPlanningModeSystemPrompt } from './planning-tools.js';
+export type { PlanningDbClient } from './planning-tools.js';
 
 // Services
 export { SshKeyService } from './services/ssh-key-service.js';

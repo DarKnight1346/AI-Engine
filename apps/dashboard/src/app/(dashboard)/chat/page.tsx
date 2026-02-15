@@ -1859,6 +1859,7 @@ export default function ChatPage() {
                 if (stableCount >= 3) {
                   setSending(false);
                   recoverySessionRef.current = null;
+                  setTimeout(() => inputRef.current?.focus(), 50);
                   return;
                 }
               }
@@ -1868,6 +1869,7 @@ export default function ChatPage() {
           if (recoverySessionRef.current === sid) {
             setSending(false);
             recoverySessionRef.current = null;
+            setTimeout(() => inputRef.current?.focus(), 50);
           }
         })();
       }
@@ -1938,6 +1940,7 @@ export default function ChatPage() {
 
     // Restore report state for the target session
     restoreReportState(sid);
+    setTimeout(() => inputRef.current?.focus(), 100);
   }, [loadMessages, loadBackgroundTasks, saveReportState, restoreReportState, sessionId, activeReport, clarification]);
 
   // ── New conversation ──
@@ -2133,6 +2136,7 @@ export default function ChatPage() {
           return m;
         }));
         setSending(false);
+        setTimeout(() => inputRef.current?.focus(), 50);
         return;
       }
 
@@ -2509,6 +2513,8 @@ export default function ChatPage() {
     } finally {
       setSending(false);
       abortRef.current = null;
+      // Auto-focus the chat input after the agent finishes responding
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 

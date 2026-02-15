@@ -1,22 +1,25 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Box, Typography, Paper, TextField, Button, Stack, Divider,
   CircularProgress, Chip, IconButton, Alert, Card, CardContent,
-  Grid, Badge, Tooltip, LinearProgress,
+  Badge, Tooltip, LinearProgress, Tabs, Tab, alpha, useTheme,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
-import DeleteIcon from '@mui/icons-material/Delete';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import ImageIcon from '@mui/icons-material/Image';
 import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
 import DescriptionIcon from '@mui/icons-material/Description';
-import CloseIcon from '@mui/icons-material/Close';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import PersonIcon from '@mui/icons-material/Person';
+import ArticleIcon from '@mui/icons-material/Article';
+import AccountTreeIcon from '@mui/icons-material/AccountTree';
+import ListAltIcon from '@mui/icons-material/ListAlt';
+import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
+import RichMarkdown from '../RichMarkdown';
 
 interface PlanningModeProps {
   projectId: string;
@@ -26,10 +29,12 @@ interface PlanningModeProps {
 }
 
 interface ProjectTask {
+  id?: string;
   title: string;
   description: string;
   taskType: 'feature' | 'bugfix' | 'test' | 'qa' | 'documentation';
   priority: number;
+  status?: string;
   dependencies: string[];
 }
 
@@ -38,6 +43,8 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   attachments?: Attachment[];
+  /** Structured questions attached to an assistant message (for clickable responses). */
+  questions?: PlanningQuestion[];
   timestamp: Date;
 }
 
@@ -51,7 +58,73 @@ interface Attachment {
   uploadedAt: string;
 }
 
+/** Structured question from the planning agent with clickable options. */
+interface PlanningQuestion {
+  id: string;
+  prompt: string;
+  options?: Array<{ id: string; label: string }>;
+  allowFreeText?: boolean;
+}
+
+// Color map for task types
+const TASK_TYPE_COLORS: Record<string, string> = {
+  feature: '#818cf8',
+  bugfix: '#f87171',
+  test: '#34d399',
+  qa: '#fbbf24',
+  documentation: '#38bdf8',
+};
+
+/**
+ * Build a Mermaid flowchart definition from the task dependency graph.
+ * Tasks are laid out top-down with arrows showing dependencies.
+ */
+function buildMermaidGraph(tasks: ProjectTask[]): string {
+  if (tasks.length === 0) return '';
+
+  const lines: string[] = ['graph TD'];
+
+  // Create a safe node ID from the task index
+  const nodeId = (idx: number) => `T${idx}`;
+
+  // Build a title-to-index map for resolving dependency names
+  const titleToIdx = new Map<string, number>();
+  tasks.forEach((t, i) => titleToIdx.set(t.title, i));
+
+  // Define nodes with styling
+  tasks.forEach((task, i) => {
+    const id = nodeId(i);
+    // Escape special mermaid characters in the label
+    const label = task.title.replace(/"/g, "'").replace(/[[\](){}]/g, ' ');
+    const typeTag = task.taskType.toUpperCase();
+    lines.push(`  ${id}["<b>${label}</b><br/><small>P${task.priority} · ${typeTag}</small>"]`);
+  });
+
+  lines.push('');
+
+  // Define edges (dependency → task)
+  tasks.forEach((task, i) => {
+    for (const dep of task.dependencies) {
+      const depIdx = titleToIdx.get(dep);
+      if (depIdx !== undefined) {
+        lines.push(`  ${nodeId(depIdx)} --> ${nodeId(i)}`);
+      }
+    }
+  });
+
+  lines.push('');
+
+  // Style nodes by task type
+  tasks.forEach((task, i) => {
+    const color = TASK_TYPE_COLORS[task.taskType] || '#818cf8';
+    lines.push(`  style ${nodeId(i)} fill:${color}22,stroke:${color},color:#e2e8f0`);
+  });
+
+  return lines.join('\n');
+}
+
 export default function PlanningMode({ projectId, projectName, onComplete, onCancel }: PlanningModeProps) {
+  const theme = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -60,11 +133,19 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [prd, setPrd] = useState('');
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
-  const [readyToBuild, setReadyToBuild] = useState(false);
+  // Right panel is visible whenever we have PRD content or tasks
+  const hasPrdOrTasks = prd.length > 0 || tasks.length > 0;
   const [progress, setProgress] = useState(0);
+  const [rightTab, setRightTab] = useState(0); // 0=PRD, 1=Graph, 2=Task List
+  const [selectedTask, setSelectedTask] = useState<number | null>(null);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Build the mermaid graph definition whenever tasks change
+  const mermaidGraph = useMemo(() => buildMermaidGraph(tasks), [tasks]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -74,11 +155,24 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
     scrollToBottom();
   }, [messages]);
 
-  // Load conversation history
+  // Load conversation history and existing PRD/tasks
   useEffect(() => {
     loadConversationHistory();
     loadAttachments();
+    loadPrdAndTasks();
   }, [projectId]);
+
+  /** Load existing PRD and tasks from the database. */
+  const loadPrdAndTasks = async () => {
+    try {
+      const res = await fetch(`/api/projects/plan?projectId=${projectId}`);
+      const data = await res.json();
+      if (data.prd) setPrd(data.prd);
+      if (data.tasks?.length > 0) setTasks(data.tasks);
+    } catch (err) {
+      console.warn('Failed to load PRD/tasks:', err);
+    }
+  };
 
   const loadConversationHistory = async () => {
     try {
@@ -170,8 +264,9 @@ The more context you provide, the better I can help you build exactly what you e
     }
   };
 
-  const handleSend = async () => {
-    if ((!input.trim() && pendingAttachments.length === 0) || loading) return;
+  const handleSend = async (overrideMessage?: string) => {
+    const messageText = overrideMessage || input.trim();
+    if ((!messageText && pendingAttachments.length === 0) || loading) return;
 
     setLoading(true);
     setUploading(pendingAttachments.length > 0);
@@ -192,7 +287,7 @@ The more context you provide, the better I can help you build exactly what you e
       const userMessage: Message = {
         id: `user-${Date.now()}`,
         role: 'user',
-        content: input.trim(),
+        content: messageText,
         attachments: uploadedAttachments,
         timestamp: new Date(),
       };
@@ -214,14 +309,20 @@ The more context you provide, the better I can help you build exactly what you e
       });
 
       // Call AI planning agent
-      const aiResponseText = await generateAIResponse(newMessages, uploadedAttachments);
+      const aiResult = await generateAIResponse(newMessages, uploadedAttachments);
       
       const aiMessage: Message = {
         id: `ai-${Date.now()}`,
         role: 'assistant',
-        content: aiResponseText,
+        content: aiResult.text,
+        questions: aiResult.questions,
         timestamp: new Date(),
       };
+
+      // Reset question answers for new set of questions
+      if (aiResult.questions && aiResult.questions.length > 0) {
+        setQuestionAnswers({});
+      }
       
       setMessages([...newMessages, aiMessage]);
 
@@ -236,14 +337,19 @@ The more context you provide, the better I can help you build exactly what you e
       setMessages([...messages, errorMessage]);
     } finally {
       setLoading(false);
+      // Auto-focus the chat input after the agent finishes responding
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 
-  const generateAIResponse = async (conversationHistory: Message[], newAttachments: Attachment[]) => {
+  const generateAIResponse = async (
+    conversationHistory: Message[],
+    newAttachments: Attachment[],
+  ): Promise<{ text: string; questions?: PlanningQuestion[] }> => {
     setProgress(10);
 
     try {
-      // Call memory-based planning API
+      // Call the real planning agent API (runs LLM with planning tools)
       const response = await fetch('/api/projects/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -254,242 +360,114 @@ The more context you provide, the better I can help you build exactly what you e
         }),
       });
 
-      setProgress(30);
+      setProgress(60);
 
       const data = await response.json();
       if (data.error) throw new Error(data.error);
 
-      setProgress(60);
-
-      // Build context info about attachments
-      let contextInfo = '';
-      if (newAttachments.length > 0) {
-        contextInfo = '\n\n**Attachments received:**\n';
-        newAttachments.forEach(att => {
-          contextInfo += `- ${att.filename} (${att.attachmentType})\n`;
-        });
-      }
-
-      setProgress(80);
-
-      // Use AI response from server (which used memory-based context)
-      const aiResponseText = data.response || await generateFallbackResponse(conversationHistory, contextInfo);
+      // Update PRD and tasks from the database state returned by the agent
+      if (data.prd) setPrd(data.prd);
+      if (data.tasks) setTasks(data.tasks);
 
       setProgress(100);
-
-      return aiResponseText;
-    } catch (error) {
+      return {
+        text: data.response,
+        questions: data.questions ?? undefined,
+      };
+    } catch (error: any) {
       console.error('AI generation error:', error);
-      // Fallback to client-side simulation if API fails
-      return await generateFallbackResponse(conversationHistory, '');
+      setProgress(100);
+      return { text: `I encountered an issue while processing your message: ${error.message}. Please try again.` };
     }
   };
 
-  const generateFallbackResponse = async (conversationHistory: Message[], contextInfo: string): Promise<string> => {
-    setProgress(60);
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Generate response based on conversation depth
-    const userMessageCount = conversationHistory.filter(m => m.role === 'user').length;
-    let aiResponse = '';
-
-    // Check if any uploaded attachments include images (use component-level state)
-    const hasImageAttachments = attachments.some(a => a.attachmentType === 'image');
-
-    if (userMessageCount === 1) {
-      // First response - ask clarifying questions
-      aiResponse = `Great! I understand you want to build this application.${contextInfo}
-
-Let me ask a few clarifying questions to better understand your vision:
-
-## Target Audience
-- Who are the primary users?
-- What problem does this solve for them?
-
-## Core Features
-- What are the must-have features for the MVP?
-- What features can wait for later versions?
-
-## Technical Constraints
-- Any preferred technologies or frameworks?
-- Platform requirements (web, mobile, desktop)?
-- Any integration requirements?
-
-## Design & UX
-${hasImageAttachments ? '- I see you\'ve shared UI references! These are helpful. Should we follow this design style?' : '- Do you have a design system or brand guidelines?'}
-- Any specific UX patterns or interactions you want?
-
-Please share as much detail as you'd like - the more I know, the better!`;
-    } else if (userMessageCount < 4) {
-      // Middle conversation - continue gathering requirements
-      aiResponse = `Excellent! This is becoming clearer.${contextInfo}
-
-Based on what you've shared, I'm building a picture of:
-- **Primary goal**: [Summarize user's goal]
-- **Key features**: [List mentioned features]
-- **Target users**: [Describe users]
-
-## Next Questions
-
-To create a comprehensive plan, I'd like to understand:
-
-1. **Data & Storage**: What data needs to be stored? Any specific data models?
-2. **Authentication**: Do users need accounts? What login methods?
-3. **Performance**: Expected number of users? Any performance requirements?
-4. **Deployment**: Where should this be hosted? Any DevOps preferences?
-
-Keep sharing - we're making great progress!`;
-    } else {
-      // Ready to generate PRD
-      aiResponse = `Perfect! I now have a comprehensive understanding of your project.${contextInfo}
-
-Let me generate the **Product Requirements Document (PRD)** and break this down into actionable tasks for the agent swarm.
-
-## Summary
-
-Based on our conversation, here's what we're building:
-- **Project**: ${projectName}
-- **Goal**: [Synthesized from conversation]
-- **Key Features**: [List all discussed features]
-- **Tech Stack**: [Proposed stack based on requirements]
-
-## Generating...
-
-Creating detailed PRD and task breakdown now...`;
-
-      // Generate PRD and tasks
-      setTimeout(() => {
-        generatePRDAndTasks();
-      }, 2000);
-    }
-
-    setProgress(100);
-    return aiResponse;
-  };
-
+  /**
+   * Trigger PRD & task generation by sending a prompt to the planning agent.
+   * The agent will use save_prd and add_task tools to persist everything to the DB.
+   */
   const generatePRDAndTasks = () => {
-    // Generate comprehensive PRD
-    const generatedPRD = `# Product Requirements Document: ${projectName}
+    const promptMessage = 'Please generate a comprehensive PRD now using save_prd, and create all the tasks using add_task. ' +
+      'First call get_comprehensive_context to gather everything we have discussed, then write the full PRD and create a complete task breakdown with proper dependencies.';
+    setInput(promptMessage);
+    // Trigger send on next tick so the input state is set
+    setTimeout(() => {
+      handleSend(promptMessage);
+    }, 0);
+  };
 
-## Executive Summary
-[Generated from conversation]
+  /**
+   * Submit answers to the agent's clarification questions.
+   * Formats the answers and sends them as a user message.
+   */
+  const handleSubmitAnswers = async (questions: PlanningQuestion[], answers: Record<string, string>) => {
+    // Format the answers as a clear user response
+    const answerLines = questions.map((q) => {
+      const answer = answers[q.id];
+      if (!answer) return null;
+      return `**${q.prompt}**\n${answer}`;
+    }).filter(Boolean);
 
-## Goals & Objectives
-- Primary goal: [From user input]
-- Success metrics: [Based on discussion]
+    if (answerLines.length === 0) return;
 
-## User Stories
-[Generated from conversation about users and their needs]
+    const formattedMessage = answerLines.join('\n\n');
 
-## Functional Requirements
-### Must-Have (MVP)
-1. [Feature 1 from conversation]
-2. [Feature 2 from conversation]
+    // Set as input and trigger send
+    setInput(formattedMessage);
+    setQuestionAnswers({});
 
-### Nice-to-Have
-1. [Future features discussed]
+    // Clear questions from the last message to mark them as answered
+    setMessages((prev) => prev.map((msg, idx) => {
+      if (idx === prev.length - 1 && msg.questions) {
+        return { ...msg, questions: undefined };
+      }
+      return msg;
+    }));
 
-## Technical Specifications
-- **Frontend**: [Based on requirements]
-- **Backend**: [Based on requirements]
-- **Database**: [Based on data needs]
-- **Authentication**: [Based on discussion]
-- **Hosting**: [Based on preferences]
+    // Small delay to let the state update, then send
+    setTimeout(async () => {
+      // Manually trigger send with the formatted message
+      setLoading(true);
+      try {
+        const userMessage: Message = {
+          id: `user-${Date.now()}`,
+          role: 'user',
+          content: formattedMessage,
+          timestamp: new Date(),
+        };
 
-## Design Requirements
-${attachments.some(a => a.attachmentType === 'image') ? '- Follow design patterns from provided mockups' : '- Modern, clean UI following best practices'}
+        setInput('');
+        const newMessages = [...messages.map((msg, idx) =>
+          idx === messages.length - 1 && msg.questions ? { ...msg, questions: undefined } : msg
+        ), userMessage];
+        setMessages(newMessages);
 
-## Success Criteria
-- All MVP features implemented
-- Test coverage > 80%
-- Performance meets requirements
-- Deployed and accessible
+        await fetch('/api/projects/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId, role: 'user', content: formattedMessage }),
+        });
 
-## Timeline
-Estimated completion with agent swarm: [Based on task count]
-`;
+        const aiResult = await generateAIResponse(newMessages, []);
+        const aiMessage: Message = {
+          id: `ai-${Date.now()}`,
+          role: 'assistant',
+          content: aiResult.text,
+          questions: aiResult.questions,
+          timestamp: new Date(),
+        };
 
-    setPrd(generatedPRD);
+        if (aiResult.questions && aiResult.questions.length > 0) {
+          setQuestionAnswers({});
+        }
 
-    // Generate tasks
-    const generatedTasks: ProjectTask[] = [
-      {
-        title: 'Project setup and initialization',
-        description: 'Initialize project structure, dependencies, and configuration',
-        taskType: 'feature',
-        priority: 10,
-        dependencies: [],
-      },
-      {
-        title: 'Database schema design and implementation',
-        description: 'Create database models based on PRD requirements',
-        taskType: 'feature',
-        priority: 9,
-        dependencies: ['Project setup and initialization'],
-      },
-      {
-        title: 'Authentication system',
-        description: 'Implement user authentication and authorization',
-        taskType: 'feature',
-        priority: 9,
-        dependencies: ['Database schema design and implementation'],
-      },
-      {
-        title: 'Core API endpoints',
-        description: 'Build RESTful API endpoints for core functionality',
-        taskType: 'feature',
-        priority: 8,
-        dependencies: ['Authentication system'],
-      },
-      {
-        title: 'Frontend UI components',
-        description: 'Create reusable UI components following design system',
-        taskType: 'feature',
-        priority: 7,
-        dependencies: ['Project setup and initialization'],
-      },
-      {
-        title: 'Integration testing',
-        description: 'Write integration tests for all features',
-        taskType: 'test',
-        priority: 6,
-        dependencies: ['Core API endpoints', 'Frontend UI components'],
-      },
-      {
-        title: 'Code documentation',
-        description: 'Add comprehensive inline documentation',
-        taskType: 'documentation',
-        priority: 4,
-        dependencies: ['Core API endpoints'],
-      },
-    ];
-
-    setTasks(generatedTasks);
-    setReadyToBuild(true);
-
-    // Add final message
-    const finalMessage: Message = {
-      id: `final-${Date.now()}`,
-      role: 'assistant',
-      content: `## ✅ PRD Complete!
-
-I've generated a comprehensive Product Requirements Document and broken it down into **${generatedTasks.length} actionable tasks**.
-
-### What Happens Next
-
-When you click **"Start Building"**:
-1. **Agent swarm launches** - Multiple AI agents will start working in parallel
-2. **Autonomous execution** - Agents will work continuously until complete
-3. **Real-time monitoring** - You can watch progress as they work
-4. **Quality assurance** - Specialized QA agents will test everything
-
-The swarm will run autonomously - this could take hours or days depending on complexity. You can pause anytime and resume later.
-
-**Ready to bring your vision to life?**`,
-      timestamp: new Date(),
-    };
-
-    setMessages(prev => [...prev, finalMessage]);
+        setMessages([...newMessages, aiMessage]);
+      } catch (error: any) {
+        console.error('Error:', error);
+      } finally {
+        setLoading(false);
+        setTimeout(() => inputRef.current?.focus(), 50);
+      }
+    }, 50);
   };
 
   const getAttachmentIcon = (type: string) => {
@@ -503,74 +481,193 @@ The swarm will run autonomously - this could take hours or days depending on com
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {progress > 0 && (
+      {progress > 0 && progress < 100 && (
         <LinearProgress variant="determinate" value={progress} sx={{ height: 2 }} />
       )}
 
-      <Box sx={{ display: 'flex', gap: 2, flexGrow: 1, overflow: 'hidden' }}>
-        {/* Chat Interface */}
-        <Paper sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <Box sx={{ display: 'flex', gap: 2, flexGrow: 1, overflow: 'hidden', p: 2 }}>
+        {/* ── Chat Interface (left side) ── */}
+        <Paper
+          sx={{
+            flex: hasPrdOrTasks ? '0 0 420px' : 1,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            transition: 'flex 0.3s ease',
+          }}
+          elevation={0}
+          variant="outlined"
+        >
           {/* Messages */}
-          <Box sx={{ flexGrow: 1, overflow: 'auto', p: 3 }}>
+          <Box sx={{ flexGrow: 1, overflow: 'auto', p: 2.5 }}>
             {messages.map((msg) => (
               <Box
                 key={msg.id}
                 sx={{
-                  mb: 3,
+                  mb: 2.5,
                   display: 'flex',
                   justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
                 }}
               >
-                <Paper
+                <Box
                   sx={{
-                    p: 2,
-                    maxWidth: '75%',
-                    bgcolor: msg.role === 'user' ? 'primary.main' : 'background.paper',
-                    color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary',
-                    borderRadius: 2,
+                    maxWidth: hasPrdOrTasks ? '95%' : '75%',
+                    minWidth: 0,
                   }}
-                  elevation={msg.role === 'user' ? 3 : 1}
                 >
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                    {msg.role === 'assistant' ? <SmartToyIcon fontSize="small" /> : <PersonIcon fontSize="small" />}
-                    <Typography variant="caption" fontWeight={600}>
+                  {/* Sender label */}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.5, px: 0.5 }}>
+                    {msg.role === 'assistant'
+                      ? <SmartToyIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+                      : <PersonIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+                    }
+                    <Typography variant="caption" color="text.secondary" fontWeight={600}>
                       {msg.role === 'assistant' ? 'AI Planning Agent' : 'You'}
                     </Typography>
                   </Box>
-                  
-                  <Typography
-                    variant="body1"
-                    sx={{ whiteSpace: 'pre-wrap', '& h1': { fontSize: '1.5rem', mt: 2, mb: 1 }, '& h2': { fontSize: '1.25rem', mt: 2, mb: 1 } }}
-                    component="div"
-                  >
-                    {msg.content.split('\n').map((line, i) => {
-                      if (line.startsWith('# ')) return <Typography key={i} variant="h5" gutterBottom>{line.slice(2)}</Typography>;
-                      if (line.startsWith('## ')) return <Typography key={i} variant="h6" gutterBottom sx={{ mt: 2 }}>{line.slice(3)}</Typography>;
-                      if (line.startsWith('- ')) return <Typography key={i} component="li" sx={{ ml: 2 }}>{line.slice(2)}</Typography>;
-                      return <Typography key={i}>{line || ' '}</Typography>;
-                    })}
-                  </Typography>
 
-                  {msg.attachments && msg.attachments.length > 0 && (
-                    <Box sx={{ mt: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                      {msg.attachments.map((att) => (
-                        <Chip
-                          key={att.id}
-                          icon={getAttachmentIcon(att.attachmentType)}
-                          label={att.filename}
-                          size="small"
-                          variant="outlined"
-                        />
+                  <Paper
+                    sx={{
+                      p: 2,
+                      bgcolor: msg.role === 'user'
+                        ? alpha(theme.palette.primary.main, 0.15)
+                        : alpha(theme.palette.background.paper, 0.6),
+                      borderRadius: 2,
+                      border: '1px solid',
+                      borderColor: msg.role === 'user'
+                        ? alpha(theme.palette.primary.main, 0.25)
+                        : 'divider',
+                    }}
+                    elevation={0}
+                  >
+                    {/* Use RichMarkdown for assistant messages, plain text for user */}
+                    {msg.role === 'assistant' ? (
+                      <RichMarkdown content={msg.content} />
+                    ) : (
+                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+                        {msg.content}
+                      </Typography>
+                    )}
+
+                    {msg.attachments && msg.attachments.length > 0 && (
+                      <Box sx={{ mt: 1.5, display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+                        {msg.attachments.map((att) => (
+                          <Chip
+                            key={att.id}
+                            icon={getAttachmentIcon(att.attachmentType)}
+                            label={att.filename}
+                            size="small"
+                            variant="outlined"
+                            sx={{ fontSize: 11 }}
+                          />
+                        ))}
+                      </Box>
+                    )}
+                  </Paper>
+
+                  {/* ── Clarification Questions Panel ── */}
+                  {msg.questions && msg.questions.length > 0 && !loading && (
+                    <Box sx={{
+                      mt: 1.5, p: 2, borderRadius: 2,
+                      border: '1px solid',
+                      borderColor: alpha(theme.palette.primary.main, 0.3),
+                      bgcolor: alpha(theme.palette.primary.main, 0.03),
+                    }}>
+                      <Typography variant="caption" sx={{ fontWeight: 700, color: 'primary.main', mb: 1.5, display: 'block' }}>
+                        Please answer to continue:
+                      </Typography>
+
+                      {msg.questions.map((q) => (
+                        <Box key={q.id} sx={{ mb: 2, '&:last-child': { mb: 0 } }}>
+                          <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.75 }}>
+                            {q.prompt}
+                          </Typography>
+
+                          {/* Option chips */}
+                          {q.options && q.options.length > 0 && (
+                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mb: q.allowFreeText ? 1 : 0 }}>
+                              {q.options.map((opt) => (
+                                <Chip
+                                  key={opt.id}
+                                  label={opt.label}
+                                  clickable
+                                  onClick={() => setQuestionAnswers((prev) => ({ ...prev, [q.id]: opt.label }))}
+                                  sx={{
+                                    borderRadius: '16px',
+                                    border: '1px solid',
+                                    borderColor: questionAnswers[q.id] === opt.label
+                                      ? 'primary.main'
+                                      : alpha(theme.palette.common.white, 0.15),
+                                    bgcolor: questionAnswers[q.id] === opt.label
+                                      ? alpha(theme.palette.primary.main, 0.15)
+                                      : 'transparent',
+                                    color: questionAnswers[q.id] === opt.label ? 'primary.main' : 'text.secondary',
+                                    fontWeight: questionAnswers[q.id] === opt.label ? 600 : 400,
+                                    fontSize: '0.8rem',
+                                    transition: 'all 0.15s ease',
+                                    '&:hover': {
+                                      bgcolor: alpha(theme.palette.primary.main, 0.1),
+                                      borderColor: 'primary.main',
+                                    },
+                                  }}
+                                />
+                              ))}
+                            </Box>
+                          )}
+
+                          {/* Free text input */}
+                          {(q.allowFreeText || !q.options || q.options.length === 0) && (
+                            <TextField
+                              size="small"
+                              fullWidth
+                              placeholder="Type your answer..."
+                              value={questionAnswers[q.id] ?? ''}
+                              onChange={(e) => setQuestionAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                              sx={{
+                                '& .MuiOutlinedInput-root': {
+                                  fontSize: '0.85rem',
+                                  bgcolor: alpha(theme.palette.common.white, 0.03),
+                                },
+                              }}
+                            />
+                          )}
+                        </Box>
                       ))}
+
+                      <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+                        <Button
+                          variant="contained"
+                          size="small"
+                          onClick={() => handleSubmitAnswers(msg.questions!, questionAnswers)}
+                          disabled={Object.keys(questionAnswers).length === 0}
+                          startIcon={<SendIcon />}
+                        >
+                          Submit Answers
+                        </Button>
+                        <Button
+                          variant="text"
+                          size="small"
+                          color="inherit"
+                          onClick={() => {
+                            // Skip — clear the questions
+                            setMessages((prev) => prev.map((m) =>
+                              m.id === msg.id ? { ...m, questions: undefined } : m
+                            ));
+                          }}
+                          sx={{ color: 'text.secondary' }}
+                        >
+                          Skip
+                        </Button>
+                      </Stack>
                     </Box>
                   )}
-                </Paper>
+                </Box>
               </Box>
             ))}
             
             {loading && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <CircularProgress size={20} />
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 1 }}>
+                <CircularProgress size={18} />
                 <Typography variant="body2" color="text.secondary">
                   {uploading ? 'Uploading files...' : 'AI is thinking...'}
                 </Typography>
@@ -581,9 +678,9 @@ The swarm will run autonomously - this could take hours or days depending on com
           </Box>
 
           {/* Input Area */}
-          <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
+          <Box sx={{ p: 1.5, borderTop: 1, borderColor: 'divider' }}>
             {pendingAttachments.length > 0 && (
-              <Box sx={{ mb: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+              <Box sx={{ mb: 1, display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
                 {pendingAttachments.map((file, index) => (
                   <Chip
                     key={index}
@@ -595,7 +692,7 @@ The swarm will run autonomously - this could take hours or days depending on com
               </Box>
             )}
             
-            <Stack direction="row" spacing={1}>
+            <Stack direction="row" spacing={1} alignItems="flex-end">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -607,18 +704,21 @@ The swarm will run autonomously - this could take hours or days depending on com
               <Tooltip title="Attach files (images, PDFs, docs)">
                 <IconButton
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={loading || readyToBuild}
+                  disabled={loading}
+                  size="small"
                 >
                   <Badge badgeContent={pendingAttachments.length} color="primary">
-                    <AttachFileIcon />
+                    <AttachFileIcon fontSize="small" />
                   </Badge>
                 </IconButton>
               </Tooltip>
               
               <TextField
+                inputRef={inputRef}
                 fullWidth
                 multiline
                 maxRows={4}
+                size="small"
                 placeholder="Describe your project, ask questions, share ideas..."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -628,75 +728,298 @@ The swarm will run autonomously - this could take hours or days depending on com
                     handleSend();
                   }
                 }}
-                disabled={loading || readyToBuild}
+                disabled={loading}
               />
               
               <Button
                 variant="contained"
-                onClick={handleSend}
-                disabled={(!input.trim() && pendingAttachments.length === 0) || loading || readyToBuild}
-                sx={{ minWidth: 100 }}
-                startIcon={loading ? <CircularProgress size={20} /> : <SendIcon />}
+                onClick={() => handleSend()}
+                disabled={(!input.trim() && pendingAttachments.length === 0) || loading}
+                size="small"
+                sx={{ minWidth: 80 }}
+                startIcon={loading ? <CircularProgress size={16} /> : <SendIcon />}
               >
                 Send
               </Button>
+
+              {/* Show "Generate PRD" button after at least 2 user messages and no PRD yet */}
+              {messages.filter(m => m.role === 'user').length >= 2 && !prd && (
+                <Tooltip title="Generate PRD and task breakdown from the planning conversation">
+                  <Button
+                    variant="outlined"
+                    color="secondary"
+                    onClick={generatePRDAndTasks}
+                    disabled={loading}
+                    size="small"
+                    sx={{ minWidth: 130, whiteSpace: 'nowrap' }}
+                    startIcon={loading ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
+                  >
+                    Generate PRD
+                  </Button>
+                </Tooltip>
+              )}
             </Stack>
           </Box>
         </Paper>
 
-        {/* Tasks Preview (shown when ready) */}
-        {readyToBuild && tasks.length > 0 && (
-          <Paper sx={{ width: 400, overflow: 'auto', p: 2 }}>
-            <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <CheckCircleIcon color="success" />
-              Ready to Build
-            </Typography>
-            <Divider sx={{ mb: 2 }} />
-            
-            <Alert severity="success" sx={{ mb: 2 }}>
-              <Typography variant="body2" fontWeight={600}>
-                {tasks.length} tasks generated
-              </Typography>
-              <Typography variant="caption">
-                Agent swarm will work autonomously
-              </Typography>
-            </Alert>
+        {/* ── PRD & Tasks Panel (right side, shown when PRD or tasks exist) ── */}
+        {hasPrdOrTasks && (
+          <Paper
+            sx={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              minWidth: 0,
+            }}
+            elevation={0}
+            variant="outlined"
+          >
+            {/* Header with tabs */}
+            <Box sx={{ borderBottom: 1, borderColor: 'divider', px: 1 }}>
+              <Stack direction="row" alignItems="center" justifyContent="space-between">
+                <Tabs
+                  value={rightTab}
+                  onChange={(_, v) => setRightTab(v)}
+                  sx={{
+                    minHeight: 42,
+                    '& .MuiTab-root': { minHeight: 42, py: 0.5, textTransform: 'none', fontSize: 13 },
+                  }}
+                >
+                  <Tab icon={<ArticleIcon sx={{ fontSize: 16 }} />} iconPosition="start" label="PRD" />
+                  <Tab icon={<AccountTreeIcon sx={{ fontSize: 16 }} />} iconPosition="start" label="Dependency Graph" />
+                  <Tab icon={<ListAltIcon sx={{ fontSize: 16 }} />} iconPosition="start" label={`Tasks (${tasks.length})`} />
+                </Tabs>
 
-            <Typography variant="subtitle2" gutterBottom>
-              Task Breakdown
-            </Typography>
-            <Stack spacing={1}>
-              {tasks.map((task, idx) => (
-                <Card key={idx} variant="outlined">
-                  <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
-                    <Typography variant="subtitle2" gutterBottom>
-                      {task.title}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" display="block">
-                      {task.description}
-                    </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5, mt: 1 }}>
-                      <Chip label={task.taskType} size="small" />
-                      <Chip label={`P${task.priority}`} size="small" color="primary" />
+                <Chip
+                  icon={<CheckCircleIcon sx={{ fontSize: 14 }} />}
+                  label="Ready to build"
+                  size="small"
+                  color="success"
+                  variant="outlined"
+                  sx={{ mr: 1 }}
+                />
+              </Stack>
+            </Box>
+
+            {/* Tab content */}
+            <Box sx={{ flexGrow: 1, overflow: 'auto' }}>
+              {/* ── PRD Tab ── */}
+              {rightTab === 0 && (
+                <Box sx={{ p: 3 }}>
+                  {prd ? (
+                    <RichMarkdown content={prd} />
+                  ) : (
+                    <Box sx={{ textAlign: 'center', py: 6, color: 'text.secondary' }}>
+                      <ArticleIcon sx={{ fontSize: 48, mb: 1, opacity: 0.3 }} />
+                      <Typography variant="body2">No PRD generated yet.</Typography>
                     </Box>
-                  </CardContent>
-                </Card>
-              ))}
-            </Stack>
+                  )}
+                </Box>
+              )}
 
-            <Stack direction="row" spacing={2} sx={{ mt: 3 }}>
-              <Button onClick={onCancel} fullWidth>
-                Cancel
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => onComplete(prd, tasks)}
-                fullWidth
-                startIcon={<AutoAwesomeIcon />}
+              {/* ── Dependency Graph Tab ── */}
+              {rightTab === 1 && (
+                <Box sx={{ p: 2 }}>
+                  {tasks.length > 0 && mermaidGraph ? (
+                    <>
+                      {/* Legend */}
+                      <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 2, px: 1 }}>
+                        {Object.entries(TASK_TYPE_COLORS).map(([type, color]) => (
+                          <Box key={type} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: color }} />
+                            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'capitalize' }}>
+                              {type}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Box>
+
+                      {/* Mermaid graph */}
+                      <RichMarkdown content={`\`\`\`mermaid\n${mermaidGraph}\n\`\`\``} />
+
+                      {/* Stats bar */}
+                      <Box sx={{
+                        mt: 2, p: 1.5, borderRadius: 1.5,
+                        bgcolor: alpha(theme.palette.background.default, 0.5),
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        display: 'flex', gap: 3, flexWrap: 'wrap',
+                      }}>
+                        <Box>
+                          <Typography variant="caption" color="text.secondary">Total Tasks</Typography>
+                          <Typography variant="subtitle2">{tasks.length}</Typography>
+                        </Box>
+                        <Box>
+                          <Typography variant="caption" color="text.secondary">Root Tasks</Typography>
+                          <Typography variant="subtitle2">
+                            {tasks.filter(t => t.dependencies.length === 0).length}
+                          </Typography>
+                        </Box>
+                        <Box>
+                          <Typography variant="caption" color="text.secondary">Max Depth</Typography>
+                          <Typography variant="subtitle2">
+                            {(() => {
+                              // Calculate max dependency chain depth
+                              const titleToTask = new Map(tasks.map(t => [t.title, t]));
+                              const memo = new Map<string, number>();
+                              const getDepth = (title: string): number => {
+                                if (memo.has(title)) return memo.get(title)!;
+                                const task = titleToTask.get(title);
+                                if (!task || task.dependencies.length === 0) { memo.set(title, 0); return 0; }
+                                const d = 1 + Math.max(...task.dependencies.map(dep => getDepth(dep)));
+                                memo.set(title, d);
+                                return d;
+                              };
+                              return Math.max(0, ...tasks.map(t => getDepth(t.title)));
+                            })()}
+                          </Typography>
+                        </Box>
+                        <Box>
+                          <Typography variant="caption" color="text.secondary">Highest Priority</Typography>
+                          <Typography variant="subtitle2">P{Math.max(...tasks.map(t => t.priority))}</Typography>
+                        </Box>
+                      </Box>
+                    </>
+                  ) : (
+                    <Box sx={{ textAlign: 'center', py: 6, color: 'text.secondary' }}>
+                      <AccountTreeIcon sx={{ fontSize: 48, mb: 1, opacity: 0.3 }} />
+                      <Typography variant="body2">No tasks to visualize.</Typography>
+                    </Box>
+                  )}
+                </Box>
+              )}
+
+              {/* ── Task List Tab ── */}
+              {rightTab === 2 && (
+                <Box sx={{ p: 2 }}>
+                  {tasks.length > 0 ? (
+                    <Stack spacing={1}>
+                      {tasks.map((task, idx) => (
+                        <Card
+                          key={idx}
+                          variant="outlined"
+                          sx={{
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease',
+                            borderColor: selectedTask === idx
+                              ? TASK_TYPE_COLORS[task.taskType] || 'primary.main'
+                              : 'divider',
+                            bgcolor: selectedTask === idx
+                              ? alpha(TASK_TYPE_COLORS[task.taskType] || '#818cf8', 0.06)
+                              : 'transparent',
+                            '&:hover': {
+                              borderColor: alpha(TASK_TYPE_COLORS[task.taskType] || '#818cf8', 0.5),
+                              bgcolor: alpha(TASK_TYPE_COLORS[task.taskType] || '#818cf8', 0.03),
+                            },
+                          }}
+                          onClick={() => setSelectedTask(selectedTask === idx ? null : idx)}
+                        >
+                          <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                            <Stack direction="row" alignItems="flex-start" spacing={1.5}>
+                              {/* Priority badge */}
+                              <Box sx={{
+                                minWidth: 32, height: 32, borderRadius: 1,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                bgcolor: alpha(TASK_TYPE_COLORS[task.taskType] || '#818cf8', 0.15),
+                                color: TASK_TYPE_COLORS[task.taskType] || '#818cf8',
+                                fontWeight: 700, fontSize: 12,
+                                flexShrink: 0,
+                              }}>
+                                P{task.priority}
+                              </Box>
+
+                              <Box sx={{ minWidth: 0, flex: 1 }}>
+                                <Typography variant="subtitle2" sx={{ lineHeight: 1.3, mb: 0.25 }}>
+                                  {task.title}
+                                </Typography>
+
+                                {/* Expanded details */}
+                                {selectedTask === idx && (
+                                  <Box sx={{ mt: 1 }}>
+                                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1, lineHeight: 1.5 }}>
+                                      {task.description}
+                                    </Typography>
+
+                                    {task.dependencies.length > 0 && (
+                                      <Box sx={{ mt: 0.75 }}>
+                                        <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                                          Depends on:
+                                        </Typography>
+                                        <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ mt: 0.25 }}>
+                                          {task.dependencies.map((dep, di) => (
+                                            <Chip
+                                              key={di}
+                                              label={dep}
+                                              size="small"
+                                              icon={<ArrowForwardIcon />}
+                                              sx={{ fontSize: 10, height: 22, '& .MuiChip-icon': { fontSize: 12 } }}
+                                              variant="outlined"
+                                            />
+                                          ))}
+                                        </Stack>
+                                      </Box>
+                                    )}
+                                  </Box>
+                                )}
+                              </Box>
+
+                              {/* Task type chip */}
+                              <Chip
+                                label={task.taskType}
+                                size="small"
+                                sx={{
+                                  fontSize: 10, height: 20, flexShrink: 0,
+                                  bgcolor: alpha(TASK_TYPE_COLORS[task.taskType] || '#818cf8', 0.15),
+                                  color: TASK_TYPE_COLORS[task.taskType] || '#818cf8',
+                                  fontWeight: 600,
+                                  textTransform: 'capitalize',
+                                }}
+                              />
+                            </Stack>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </Stack>
+                  ) : (
+                    <Box sx={{ textAlign: 'center', py: 6, color: 'text.secondary' }}>
+                      <ListAltIcon sx={{ fontSize: 48, mb: 1, opacity: 0.3 }} />
+                      <Typography variant="body2">No tasks generated yet.</Typography>
+                    </Box>
+                  )}
+                </Box>
+              )}
+            </Box>
+
+            {/* Action buttons (always visible at bottom) */}
+            <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
+              <Alert
+                severity={tasks.length > 0 ? 'success' : 'info'}
+                sx={{ mb: 2, py: 0.5 }}
+                icon={<AutoAwesomeIcon fontSize="small" />}
               >
-                Start Building
-              </Button>
-            </Stack>
+                <Typography variant="body2" fontWeight={600}>
+                  {tasks.length > 0
+                    ? `${tasks.length} tasks ready — keep chatting to refine, or start building`
+                    : 'Keep chatting to build out the task tree'}
+                </Typography>
+              </Alert>
+              <Stack direction="row" spacing={2}>
+                <Button onClick={onCancel} fullWidth variant="outlined" color="inherit">
+                  Cancel
+                </Button>
+                <Button
+                  variant="contained"
+                  onClick={() => onComplete(prd, tasks)}
+                  fullWidth
+                  startIcon={<AutoAwesomeIcon />}
+                  size="large"
+                  disabled={tasks.length === 0}
+                >
+                  Start Building
+                </Button>
+              </Stack>
+            </Box>
           </Paper>
         )}
       </Box>
