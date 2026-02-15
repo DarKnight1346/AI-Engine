@@ -19,7 +19,12 @@ import ArticleIcon from '@mui/icons-material/Article';
 import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import ListAltIcon from '@mui/icons-material/ListAlt';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
+import DashboardIcon from '@mui/icons-material/Dashboard';
 import RichMarkdown from '../RichMarkdown';
+import DependencyGraph from './DependencyGraph';
+import WireframeGallery from './WireframeGallery';
+import WireframeEditor from './WireframeEditor';
+import type { Wireframe } from './WireframeEditor';
 
 interface PlanningModeProps {
   projectId: string;
@@ -75,54 +80,6 @@ const TASK_TYPE_COLORS: Record<string, string> = {
   documentation: '#38bdf8',
 };
 
-/**
- * Build a Mermaid flowchart definition from the task dependency graph.
- * Tasks are laid out top-down with arrows showing dependencies.
- */
-function buildMermaidGraph(tasks: ProjectTask[]): string {
-  if (tasks.length === 0) return '';
-
-  const lines: string[] = ['graph TD'];
-
-  // Create a safe node ID from the task index
-  const nodeId = (idx: number) => `T${idx}`;
-
-  // Build a title-to-index map for resolving dependency names
-  const titleToIdx = new Map<string, number>();
-  tasks.forEach((t, i) => titleToIdx.set(t.title, i));
-
-  // Define nodes with styling
-  tasks.forEach((task, i) => {
-    const id = nodeId(i);
-    // Escape special mermaid characters in the label
-    const label = task.title.replace(/"/g, "'").replace(/[[\](){}]/g, ' ');
-    const typeTag = task.taskType.toUpperCase();
-    lines.push(`  ${id}["<b>${label}</b><br/><small>P${task.priority} · ${typeTag}</small>"]`);
-  });
-
-  lines.push('');
-
-  // Define edges (dependency → task)
-  tasks.forEach((task, i) => {
-    for (const dep of task.dependencies) {
-      const depIdx = titleToIdx.get(dep);
-      if (depIdx !== undefined) {
-        lines.push(`  ${nodeId(depIdx)} --> ${nodeId(i)}`);
-      }
-    }
-  });
-
-  lines.push('');
-
-  // Style nodes by task type
-  tasks.forEach((task, i) => {
-    const color = TASK_TYPE_COLORS[task.taskType] || '#818cf8';
-    lines.push(`  style ${nodeId(i)} fill:${color}22,stroke:${color},color:#e2e8f0`);
-  });
-
-  return lines.join('\n');
-}
-
 export default function PlanningMode({ projectId, projectName, onComplete, onCancel }: PlanningModeProps) {
   const theme = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -133,33 +90,49 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [prd, setPrd] = useState('');
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
-  // Right panel is visible whenever we have PRD content or tasks
-  const hasPrdOrTasks = prd.length > 0 || tasks.length > 0;
+  const [wireframes, setWireframes] = useState<Wireframe[]>([]);
+  const [wireframeEditorOpen, setWireframeEditorOpen] = useState(false);
+  const [editingWireframe, setEditingWireframe] = useState<Wireframe | null>(null);
+  // Right panel is visible whenever we have PRD content, tasks, or wireframes
+  const hasPrdOrTasks = prd.length > 0 || tasks.length > 0 || wireframes.length > 0;
   const [progress, setProgress] = useState(0);
-  const [rightTab, setRightTab] = useState(0); // 0=PRD, 1=Graph, 2=Task List
+  const [rightTab, setRightTab] = useState(0); // 0=PRD, 1=Wireframes, 2=Graph, 3=Task List
   const [selectedTask, setSelectedTask] = useState<number | null>(null);
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Build the mermaid graph definition whenever tasks change
-  const mermaidGraph = useMemo(() => buildMermaidGraph(tasks), [tasks]);
+  const scrollToBottom = useCallback((smooth = true) => {
+    requestAnimationFrame(() => {
+      const el = chatScrollRef.current;
+      if (el) {
+        el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+      }
+    });
+  }, []);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
+  // Scroll on new messages
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, scrollToBottom]);
 
-  // Load conversation history and existing PRD/tasks
+  // Re-scroll when the layout shifts (PRD/tasks panel appears/disappears causing
+  // the chat column to resize). Fire immediately + after the 300ms CSS transition.
+  useEffect(() => {
+    scrollToBottom(false);
+    const timer = setTimeout(() => scrollToBottom(false), 350);
+    return () => clearTimeout(timer);
+  }, [hasPrdOrTasks, scrollToBottom]);
+
+  // Load conversation history and existing PRD/tasks/wireframes
   useEffect(() => {
     loadConversationHistory();
     loadAttachments();
     loadPrdAndTasks();
+    loadWireframes();
   }, [projectId]);
 
   /** Load existing PRD and tasks from the database. */
@@ -171,6 +144,17 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
       if (data.tasks?.length > 0) setTasks(data.tasks);
     } catch (err) {
       console.warn('Failed to load PRD/tasks:', err);
+    }
+  };
+
+  /** Load wireframes for this project. */
+  const loadWireframes = async () => {
+    try {
+      const res = await fetch(`/api/projects/wireframes?projectId=${projectId}`);
+      const data = await res.json();
+      if (data.wireframes) setWireframes(data.wireframes);
+    } catch (err) {
+      console.warn('Failed to load wireframes:', err);
     }
   };
 
@@ -365,9 +349,11 @@ The more context you provide, the better I can help you build exactly what you e
       const data = await response.json();
       if (data.error) throw new Error(data.error);
 
-      // Update PRD and tasks from the database state returned by the agent
+      // Update PRD, tasks, and wireframes from the database state returned by the agent
       if (data.prd) setPrd(data.prd);
       if (data.tasks) setTasks(data.tasks);
+      if (data.wireframes) setWireframes(data.wireframes);
+      else loadWireframes(); // Refresh wireframes in case the agent created any
 
       setProgress(100);
       return {
@@ -479,6 +465,87 @@ The more context you provide, the better I can help you build exactly what you e
     }
   };
 
+  // ── Wireframe CRUD handlers ──
+
+  const existingFeatureTags = useMemo(() => {
+    const tags = new Set<string>();
+    for (const wf of wireframes) {
+      const ft = Array.isArray(wf.featureTags) ? wf.featureTags : [];
+      ft.forEach((t: string) => tags.add(t));
+    }
+    return Array.from(tags);
+  }, [wireframes]);
+
+  const handleWireframeCreate = () => {
+    setEditingWireframe(null);
+    setWireframeEditorOpen(true);
+  };
+
+  const handleWireframeEdit = (wf: Wireframe) => {
+    setEditingWireframe(wf);
+    setWireframeEditorOpen(true);
+  };
+
+  const handleWireframeSave = async (wf: Wireframe) => {
+    try {
+      if (wf.id) {
+        await fetch('/api/projects/wireframes', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: wf.id, ...wf }),
+        });
+      } else {
+        await fetch('/api/projects/wireframes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...wf, projectId }),
+        });
+      }
+      await loadWireframes();
+    } catch (err) {
+      console.error('Failed to save wireframe:', err);
+    }
+  };
+
+  const handleWireframeDelete = async (wf: Wireframe, force?: boolean) => {
+    if (!wf.id) return;
+    try {
+      const res = await fetch(`/api/projects/wireframes?id=${wf.id}${force ? '&force=true' : ''}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.warning && !force) return; // Dialog handled by gallery
+      await loadWireframes();
+    } catch (err) {
+      console.error('Failed to delete wireframe:', err);
+    }
+  };
+
+  const handleWireframeDuplicate = async (wf: Wireframe) => {
+    try {
+      let newName = `${wf.name} (copy)`;
+      let counter = 2;
+      while (wireframes.some((w) => w.name === newName)) {
+        newName = `${wf.name} (copy ${counter++})`;
+      }
+      await fetch('/api/projects/wireframes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId,
+          name: newName,
+          description: wf.description,
+          wireframeType: wf.wireframeType,
+          elements: wf.elements,
+          featureTags: wf.featureTags,
+          canvasWidth: wf.canvasWidth,
+          canvasHeight: wf.canvasHeight,
+        }),
+      });
+      await loadWireframes();
+    } catch (err) {
+      console.error('Failed to duplicate wireframe:', err);
+    }
+  };
+
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {progress > 0 && progress < 100 && (
@@ -499,7 +566,7 @@ The more context you provide, the better I can help you build exactly what you e
           variant="outlined"
         >
           {/* Messages */}
-          <Box sx={{ flexGrow: 1, overflow: 'auto', p: 2.5 }}>
+          <Box ref={chatScrollRef} sx={{ flexGrow: 1, overflow: 'auto', p: 2.5 }}>
             {messages.map((msg) => (
               <Box
                 key={msg.id}
@@ -787,6 +854,7 @@ The more context you provide, the better I can help you build exactly what you e
                   }}
                 >
                   <Tab icon={<ArticleIcon sx={{ fontSize: 16 }} />} iconPosition="start" label="PRD" />
+                  <Tab icon={<DashboardIcon sx={{ fontSize: 16 }} />} iconPosition="start" label={`Wireframes${wireframes.length > 0 ? ` (${wireframes.length})` : ''}`} />
                   <Tab icon={<AccountTreeIcon sx={{ fontSize: 16 }} />} iconPosition="start" label="Dependency Graph" />
                   <Tab icon={<ListAltIcon sx={{ fontSize: 16 }} />} iconPosition="start" label={`Tasks (${tasks.length})`} />
                 </Tabs>
@@ -818,12 +886,23 @@ The more context you provide, the better I can help you build exactly what you e
                 </Box>
               )}
 
-              {/* ── Dependency Graph Tab ── */}
+              {/* ── Wireframes Tab ── */}
               {rightTab === 1 && (
+                <WireframeGallery
+                  wireframes={wireframes}
+                  onEdit={handleWireframeEdit}
+                  onCreate={handleWireframeCreate}
+                  onDelete={handleWireframeDelete}
+                  onDuplicate={handleWireframeDuplicate}
+                />
+              )}
+
+              {/* ── Dependency Graph Tab ── */}
+              {rightTab === 2 && (
                 <Box sx={{ p: 2 }}>
-                  {tasks.length > 0 && mermaidGraph ? (
+                  {tasks.length > 0 ? (
                     <>
-                      {/* Legend */}
+                      {/* Task-type legend */}
                       <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 2, px: 1 }}>
                         {Object.entries(TASK_TYPE_COLORS).map(([type, color]) => (
                           <Box key={type} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -835,8 +914,8 @@ The more context you provide, the better I can help you build exactly what you e
                         ))}
                       </Box>
 
-                      {/* Mermaid graph */}
-                      <RichMarkdown content={`\`\`\`mermaid\n${mermaidGraph}\n\`\`\``} />
+                      {/* Interactive dependency graph */}
+                      <DependencyGraph tasks={tasks} taskTypeColors={TASK_TYPE_COLORS} />
 
                       {/* Stats bar */}
                       <Box sx={{
@@ -860,7 +939,6 @@ The more context you provide, the better I can help you build exactly what you e
                           <Typography variant="caption" color="text.secondary">Max Depth</Typography>
                           <Typography variant="subtitle2">
                             {(() => {
-                              // Calculate max dependency chain depth
                               const titleToTask = new Map(tasks.map(t => [t.title, t]));
                               const memo = new Map<string, number>();
                               const getDepth = (title: string): number => {
@@ -891,7 +969,7 @@ The more context you provide, the better I can help you build exactly what you e
               )}
 
               {/* ── Task List Tab ── */}
-              {rightTab === 2 && (
+              {rightTab === 3 && (
                 <Box sx={{ p: 2 }}>
                   {tasks.length > 0 ? (
                     <Stack spacing={1}>
@@ -1023,6 +1101,16 @@ The more context you provide, the better I can help you build exactly what you e
           </Paper>
         )}
       </Box>
+
+      {/* ── Wireframe Editor Modal ── */}
+      <WireframeEditor
+        open={wireframeEditorOpen}
+        onClose={() => setWireframeEditorOpen(false)}
+        onSave={handleWireframeSave}
+        wireframe={editingWireframe}
+        allWireframes={wireframes}
+        existingFeatureTags={existingFeatureTags}
+      />
     </Box>
   );
 }

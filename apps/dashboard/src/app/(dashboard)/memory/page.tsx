@@ -25,6 +25,7 @@ interface MemoryEntry {
   type: string;
   content: string;
   importance: number;
+  scope: 'personal' | 'team' | 'global' | 'project';
   createdAt: string;
 }
 
@@ -83,6 +84,20 @@ export default function MemoryPage() {
     if (p === 'high') return 'error';
     if (p === 'medium') return 'warning';
     return 'success';
+  };
+
+  const scopeLabel = (s: string) => {
+    if (s === 'personal') return 'User';
+    if (s === 'team') return 'Team';
+    if (s === 'project') return 'Project';
+    return 'Global';
+  };
+
+  const scopeColor = (s: string): 'primary' | 'secondary' | 'warning' | 'default' => {
+    if (s === 'personal') return 'primary';
+    if (s === 'team') return 'secondary';
+    if (s === 'project') return 'warning';
+    return 'default';
   };
 
   const filteredMemories = search
@@ -276,7 +291,18 @@ export default function MemoryPage() {
                 }
               >
                 <ListItemText
-                  primary={entry.content}
+                  primary={
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Chip
+                        label={scopeLabel(entry.scope)}
+                        size="small"
+                        color={scopeColor(entry.scope)}
+                        variant={entry.scope === 'global' ? 'outlined' : 'filled'}
+                        sx={{ fontWeight: 600, fontSize: '0.7rem', height: 22 }}
+                      />
+                      <Typography variant="body1" component="span">{entry.content}</Typography>
+                    </Box>
+                  }
                   secondary={`${entry.type} · importance ${Math.round(entry.importance * 100)}% · ${new Date(entry.createdAt).toLocaleDateString()}`}
                 />
               </ListItem>

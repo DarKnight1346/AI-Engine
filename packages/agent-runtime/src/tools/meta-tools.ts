@@ -359,6 +359,24 @@ export function getMetaToolDefinitions(options?: { includeOrchestration?: boolea
 }
 
 // ---------------------------------------------------------------------------
+// Shared service singletons — avoids creating new EmbeddingService/MemoryService
+// instances on every tool call (each instance loads an ML model, causing memory
+// exhaustion during multi-agent sessions with many search_memory/store_memory calls).
+// ---------------------------------------------------------------------------
+
+let _sharedEmbeddingService: any = null;
+let _sharedMemoryService: any = null;
+
+async function getSharedMemoryServices(): Promise<{ memSvc: any; embSvc: any }> {
+  if (!_sharedEmbeddingService || !_sharedMemoryService) {
+    const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
+    if (!_sharedEmbeddingService) _sharedEmbeddingService = new EmbeddingService();
+    if (!_sharedMemoryService) _sharedMemoryService = new MemoryService(_sharedEmbeddingService);
+  }
+  return { memSvc: _sharedMemoryService, embSvc: _sharedEmbeddingService };
+}
+
+// ---------------------------------------------------------------------------
 // Individual meta-tool implementations
 // ---------------------------------------------------------------------------
 
@@ -464,9 +482,7 @@ function createMemoryTool(opts: MetaToolOptions): Tool {
         // Deep recall: multi-hop associative search
         if (deep) {
           console.log(`[search_memory] Deep recall: query="${query.slice(0, 80)}" scope="${scope || 'all'}"`);
-          const { MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
-          const embSvc = new EmbSvc();
-          const memSvc = new MemSvc(embSvc);
+          const { memSvc } = await getSharedMemoryServices();
 
           const scopes: Array<{ name: string; id: string | null }> = [];
           if (scope && scope !== 'all') {
@@ -529,9 +545,7 @@ function createMemoryTool(opts: MetaToolOptions): Tool {
 
       // Also search episodic memory (conversation summaries) for temporal context
       try {
-        const { MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
-        const embSvc = new EmbSvc();
-        const memSvc = new MemSvc(embSvc);
+        const { memSvc } = await getSharedMemoryServices();
         const episodes = await memSvc.searchEpisodic(query, opts.userId ?? null, opts.teamId ?? null, 3);
         for (const ep of episodes) {
           if (ep.similarity > 0.3) {
@@ -773,10 +787,8 @@ function createStoreMemoryTool(opts: MetaToolOptions): Tool {
           : '';
 
       try {
-        // Use the full MemoryService which handles embedding + auto-linking
-        const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
-        const embeddings = new EmbeddingService();
-        const memService = new MemoryService(embeddings);
+        // Use shared MemoryService singleton (avoids loading ML model per call)
+        const { memSvc: memService } = await getSharedMemoryServices();
 
         console.log(`[store_memory] Storing: scope=${scope}, type=${type}, importance=${importance}, content="${content.slice(0, 80)}"`);
 

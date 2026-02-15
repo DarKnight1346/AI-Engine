@@ -291,7 +291,7 @@ model AgentPinnedSkill {
 // ============================================================
 model MemoryEntry {
   id             String   @id @default(uuid())
-  scope          String   // global | team | personal
+  scope          String   // global | team | personal | project
   scopeOwnerId   String?  @map("scope_owner_id")
   type           String   // conversation | knowledge | reflection | observation
   content        String
@@ -506,6 +506,7 @@ model Project {
   logs          ProjectLog[]
   conversations ProjectConversation[]
   attachments   ProjectAttachment[]
+  wireframes    ProjectWireframe[]
 
   @@index([status, createdAt])
   @@map("projects")
@@ -540,6 +541,27 @@ model ProjectAttachment {
 
   @@index([projectId, uploadedAt])
   @@map("project_attachments")
+}
+
+model ProjectWireframe {
+  id            String   @id @default(uuid())
+  projectId     String   @map("project_id")
+  name          String                                // "Post Box", "Profile Page", "Nav Bar"
+  description   String?
+  wireframeType String   @default("component") @map("wireframe_type") // page | component | modal | section
+  elements      Json     @default("[]")               // WireframeElement[] (primitives + wireframeRefs)
+  featureTags   Json     @default("[]")               // string[] - features this wireframe covers
+  canvasWidth   Int      @default(800) @map("canvas_width")
+  canvasHeight  Int      @default(600) @map("canvas_height")
+  sortOrder     Int      @default(0) @map("sort_order")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@index([projectId, sortOrder])
+  @@map("project_wireframes")
 }
 
 model ProjectTask {

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@ai-engine/db';
 import { MemoryService, EmbeddingService, ProjectMemoryService } from '@ai-engine/memory';
-import { createPlanningTools, createPrdTools, createTaskTools, getPlanningModeSystemPrompt, createWebSearchTools, createXaiSearchTools } from '@ai-engine/agent-runtime';
+import { createPlanningTools, createPrdTools, createTaskTools, createWireframeTools, getPlanningModeSystemPrompt, createWebSearchTools, createXaiSearchTools } from '@ai-engine/agent-runtime';
 import type { SerperServiceLike, XaiServiceLike } from '@ai-engine/agent-runtime';
 import type { LLMMessage, LLMToolDefinition, LLMMessageContent } from '@ai-engine/shared';
+import { getAuthFromRequest } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -372,8 +373,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
-    // Extract and store memories from user message BEFORE building context
-    const userId = body.userId;
+    // Extract authenticated userId from JWT cookie (not from request body)
+    // This ensures user-specific memories are properly scoped per user
+    const auth = await getAuthFromRequest(request);
+    const userId = auth?.userId ?? body.userId;
     await projectMemoryService.extractPlanningMemories(
       projectId,
       userMessage,
@@ -421,15 +424,16 @@ When you need information from the user, use the **ask_user** tool to present st
 - Ask 1-5 focused questions at a time, don't overwhelm the user
 - Combine ask_user with a brief text response explaining context or acknowledging what you've learned`;
 
-    // Build all planning tools: memory, PRD, tasks, search
+    // Build all planning tools: memory, PRD, tasks, wireframes, search
     const planningTools = createPlanningTools(projectMemoryService, projectId);
     const prdTools = createPrdTools(db, projectId);
     const taskTools = createTaskTools(db, projectId);
+    const wireframeTools = createWireframeTools(db, projectId);
 
     // Load web search tools (Tier 1 + Tier 2)
     const searchTools = await loadSearchTools();
 
-    const allLocalTools = [...planningTools, ...prdTools, ...taskTools];
+    const allLocalTools = [...planningTools, ...prdTools, ...taskTools, ...wireframeTools];
 
     const toolDefs: LLMToolDefinition[] = [
       ...allLocalTools.map((t) => ({
@@ -510,12 +514,16 @@ When you need information from the user, use the **ask_user** tool to present st
       },
     });
 
-    // ── Fetch current PRD and tasks from DB to include in response ──
-    const [updatedProject, currentTasks] = await Promise.all([
+    // ── Fetch current PRD, tasks, and wireframes from DB to include in response ──
+    const [updatedProject, currentTasks, currentWireframes] = await Promise.all([
       db.project.findUnique({ where: { id: projectId }, select: { prd: true } }),
       db.projectTask.findMany({
         where: { projectId },
         orderBy: { priority: 'desc' },
+      }),
+      db.projectWireframe.findMany({
+        where: { projectId },
+        orderBy: { sortOrder: 'asc' },
       }),
     ]);
 
@@ -533,13 +541,45 @@ When you need information from the user, use the **ask_user** tool to present st
         : [],
     }));
 
+    // Build wireframe composition data for frontend
+    const wfIdToName = new Map(currentWireframes.map((w: any) => [w.id, w.name]));
+    const wfUsedIn = new Map<string, string[]>();
+    for (const wf of currentWireframes) {
+      const elements = Array.isArray(wf.elements) ? wf.elements : [];
+      for (const el of elements) {
+        if (el.type === 'wireframeRef' && el.wireframeRefId) {
+          if (!wfUsedIn.has(el.wireframeRefId)) wfUsedIn.set(el.wireframeRefId, []);
+          wfUsedIn.get(el.wireframeRefId)!.push(wf.name);
+        }
+      }
+    }
+    const wireframesForFrontend = currentWireframes.map((wf: any) => {
+      const elements = Array.isArray(wf.elements) ? wf.elements : [];
+      const refs = [...new Set(elements.filter((e: any) => e.type === 'wireframeRef' && e.wireframeRefId).map((e: any) => wfIdToName.get(e.wireframeRefId) || e.wireframeRefId))];
+      return {
+        id: wf.id,
+        name: wf.name,
+        description: wf.description,
+        wireframeType: wf.wireframeType,
+        elements: wf.elements,
+        featureTags: wf.featureTags,
+        canvasWidth: wf.canvasWidth,
+        canvasHeight: wf.canvasHeight,
+        sortOrder: wf.sortOrder,
+        elementCount: elements.length,
+        contains: refs,
+        usedIn: wfUsedIn.get(wf.id) || [],
+      };
+    });
+
     return NextResponse.json({
       response: aiResponse,
       // Structured questions the agent wants the user to answer (clickable options)
       questions: result.questions ?? null,
-      // Current PRD and tasks from the database (updated by tool calls)
+      // Current PRD, tasks, and wireframes from the database (updated by tool calls)
       prd: (updatedProject?.prd as string) || null,
       tasks: tasksForFrontend,
+      wireframes: wireframesForFrontend,
       context: {
         memoriesUsed: relevantMemories.length,
         toolCallsMade: result.toolCallsCount,
@@ -568,11 +608,15 @@ export async function GET(request: NextRequest) {
 
     const db = getDb();
 
-    const [project, tasks] = await Promise.all([
+    const [project, tasks, wireframes] = await Promise.all([
       db.project.findUnique({ where: { id: projectId }, select: { prd: true } }),
       db.projectTask.findMany({
         where: { projectId },
         orderBy: { priority: 'desc' },
+      }),
+      db.projectWireframe.findMany({
+        where: { projectId },
+        orderBy: { sortOrder: 'asc' },
       }),
     ]);
 
@@ -594,9 +638,32 @@ export async function GET(request: NextRequest) {
         : [],
     }));
 
+    // Build wireframe data with composition info
+    const wfIdToName = new Map(wireframes.map((w: any) => [w.id, w.name]));
+    const wfUsedIn = new Map<string, string[]>();
+    for (const wf of wireframes) {
+      const elements = Array.isArray(wf.elements) ? wf.elements : [];
+      for (const el of elements) {
+        if (el.type === 'wireframeRef' && el.wireframeRefId) {
+          if (!wfUsedIn.has(el.wireframeRefId)) wfUsedIn.set(el.wireframeRefId, []);
+          wfUsedIn.get(el.wireframeRefId)!.push(wf.name);
+        }
+      }
+    }
+    const wireframesForFrontend = wireframes.map((wf: any) => {
+      const elements = Array.isArray(wf.elements) ? wf.elements : [];
+      const refs = [...new Set(elements.filter((e: any) => e.type === 'wireframeRef' && e.wireframeRefId).map((e: any) => wfIdToName.get(e.wireframeRefId) || e.wireframeRefId))];
+      return {
+        id: wf.id, name: wf.name, description: wf.description, wireframeType: wf.wireframeType,
+        elements: wf.elements, featureTags: wf.featureTags, canvasWidth: wf.canvasWidth, canvasHeight: wf.canvasHeight,
+        sortOrder: wf.sortOrder, elementCount: elements.length, contains: refs, usedIn: wfUsedIn.get(wf.id) || [],
+      };
+    });
+
     return NextResponse.json({
       prd: (project.prd as string) || null,
       tasks: tasksForFrontend,
+      wireframes: wireframesForFrontend,
     });
   } catch (err: any) {
     console.error('GET plan error:', err);

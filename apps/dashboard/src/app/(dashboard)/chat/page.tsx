@@ -1557,6 +1557,81 @@ export default function ChatPage() {
   const hasRunningTasksRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
 
+  // ── Batched streaming state update refs ──
+  // Accumulate SSE token/report updates in refs and flush to React state
+  // on a 50ms interval instead of on every single token. This prevents
+  // thousands of setState calls per second from crashing the browser when
+  // multiple sub-agents stream in parallel.
+  const pendingSlotContentRef = useRef<Map<string, string>>(new Map());
+  const pendingReportRef = useRef<ReportState | null>(null);
+  const reportDirtyRef = useRef(false);
+  const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const slotMessagesRef = useRef<Map<string, string>>(new Map());
+
+  /** Start the batched-flush interval when streaming begins. */
+  const startFlushTimer = useCallback(() => {
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = setInterval(() => {
+      // Flush accumulated slot content to messages state
+      const pending = pendingSlotContentRef.current;
+      if (pending.size > 0) {
+        const updates = new Map(pending);
+        pending.clear();
+        setMessages((msgs) => {
+          let changed = false;
+          const next = msgs.map((m) => {
+            for (const [msgId, content] of updates) {
+              if (m.id === msgId && m.content !== content) {
+                changed = true;
+                return { ...m, content };
+              }
+            }
+            return m;
+          });
+          return changed ? next : msgs;
+        });
+      }
+
+      // Flush accumulated report state
+      if (reportDirtyRef.current && pendingReportRef.current) {
+        const snap = { ...pendingReportRef.current, sections: [...pendingReportRef.current.sections] };
+        reportDirtyRef.current = false;
+        setActiveReport(snap);
+      }
+    }, 50);
+  }, []);
+
+  /** Stop the flush timer (on stream end or unmount). */
+  const stopFlushTimer = useCallback(() => {
+    if (flushTimerRef.current) {
+      clearInterval(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    // Final flush
+    const pending = pendingSlotContentRef.current;
+    if (pending.size > 0) {
+      const updates = new Map(pending);
+      pending.clear();
+      setMessages((msgs) => {
+        let changed = false;
+        const next = msgs.map((m) => {
+          for (const [msgId, content] of updates) {
+            if (m.id === msgId && m.content !== content) {
+              changed = true;
+              return { ...m, content };
+            }
+          }
+          return m;
+        });
+        return changed ? next : msgs;
+      });
+    }
+    if (reportDirtyRef.current && pendingReportRef.current) {
+      setActiveReport({ ...pendingReportRef.current, sections: [...pendingReportRef.current.sections] });
+      reportDirtyRef.current = false;
+    }
+  }, []);
+
   // ── Report persistence helpers ──
   // Save/restore report & clarification state to sessionStorage so they
   // survive chat switches and page navigations within the session.
@@ -2086,6 +2161,12 @@ export default function ChatPage() {
     const slotMessages = new Map<string, string>(); // slotId -> msgId
     const slotContent = new Map<string, string>();   // slotId -> streamed text
 
+    // Wire up batched-flush refs for this streaming session
+    slotMessagesRef.current = slotMessages;
+    pendingSlotContentRef.current.clear();
+    pendingReportRef.current = null;
+    reportDirtyRef.current = false;
+
     // Pre-create placeholders for explicitly mentioned agents
     if (mentionedAgents.length > 0) {
       for (const agent of mentionedAgents) {
@@ -2101,6 +2182,9 @@ export default function ChatPage() {
       slotContent.set('__default__', '');
       setMessages((prev) => [...prev, { id: defaultMsgId, role: 'ai', content: '', timestamp: new Date() }]);
     }
+
+    // Start the batched state-flush timer (50ms interval)
+    startFlushTimer();
 
     // Abort any previous stream
     abortRef.current?.abort();
@@ -2221,9 +2305,8 @@ export default function ChatPage() {
                     const prev = slotContent.get(slot) ?? '';
                     const next = prev + data.text;
                     slotContent.set(slot, next);
-                    setMessages((msgs) => msgs.map((m) =>
-                      m.id === msgId ? { ...m, content: next } : m
-                    ));
+                    // Accumulate in ref — flushed to state by the 50ms interval timer
+                    pendingSlotContentRef.current.set(msgId, next);
                   }
                   break;
                 }
@@ -2265,30 +2348,51 @@ export default function ChatPage() {
                     status: 'pending' as const,
                     tier: s.tier,
                   }));
-                  setActiveReport({
+                  const outline: ReportState = {
                     title: data.title ?? 'Report',
                     sections,
                     completed: 0,
                     total: sections.length,
-                  });
+                  };
+                  // Initialize the mutable ref for batched streaming updates
+                  pendingReportRef.current = outline;
+                  reportDirtyRef.current = true;
+                  setActiveReport(outline);
                   break;
                 }
 
                 case 'report_section_stream': {
-                  // Incremental token from a sub-agent — append to the section's content
-                  setActiveReport((prev) => {
-                    if (!prev) return prev;
-                    const sections = prev.sections.map((s) =>
-                      s.id === data.sectionId
-                        ? { ...s, content: (s.content ?? '') + (data.text ?? '') }
-                        : s
-                    );
-                    return { ...prev, sections };
-                  });
+                  // Incremental token from a sub-agent — accumulate in ref,
+                  // flushed to state by the 50ms interval timer.
+                  const report = pendingReportRef.current;
+                  if (report) {
+                    const sec = report.sections.find((s) => s.id === data.sectionId);
+                    if (sec) {
+                      sec.content = (sec.content ?? '') + (data.text ?? '');
+                      reportDirtyRef.current = true;
+                    }
+                  }
                   break;
                 }
 
                 case 'report_section_update': {
+                  // Update both the mutable ref AND React state for section-level changes
+                  // (these are infrequent — only when a section starts/completes)
+                  const reportRef = pendingReportRef.current;
+                  if (reportRef) {
+                    const sec = reportRef.sections.find((s) => s.id === data.sectionId);
+                    if (sec) {
+                      sec.status = data.status as ReportSectionState['status'];
+                      if (data.content != null) sec.content = data.content;
+                      if (data.tier != null) sec.tier = data.tier;
+                    }
+                    reportRef.completed = reportRef.sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
+                    // Persist when sections complete
+                    if (data.status === 'complete' || data.status === 'failed') {
+                      try { if (streamSessionId) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(reportRef)); } catch {}
+                    }
+                    reportDirtyRef.current = true;
+                  }
                   setActiveReport((prev) => {
                     if (!prev) return prev;
                     const sections = prev.sections.map((s) =>
@@ -2297,17 +2401,24 @@ export default function ChatPage() {
                         : s
                     );
                     const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
-                    const updated = { ...prev, sections, completed };
-                    // Persist when sections complete so report survives navigation
-                    if (data.status === 'complete' || data.status === 'failed') {
-                      try { if (streamSessionId) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(updated)); } catch {}
-                    }
-                    return updated;
+                    return { ...prev, sections, completed };
                   });
                   break;
                 }
 
                 case 'report_section_added': {
+                  const reportR = pendingReportRef.current;
+                  if (reportR) {
+                    reportR.sections.push({
+                      id: data.section.id,
+                      title: data.section.title,
+                      status: 'complete',
+                      content: data.section.content,
+                    });
+                    reportR.total += 1;
+                    reportR.completed += 1;
+                    reportDirtyRef.current = true;
+                  }
                   setActiveReport((prev) => {
                     if (!prev) return prev;
                     const newSection: ReportSectionState = {
@@ -2327,11 +2438,11 @@ export default function ChatPage() {
                 }
 
                 case 'subtask_complete': {
-                  // Already handled by report_section_update, but we can update the count
-                  setActiveReport((prev) => {
-                    if (!prev) return prev;
-                    return { ...prev, completed: data.completed ?? prev.completed };
-                  });
+                  const reportRf = pendingReportRef.current;
+                  if (reportRf && data.completed != null) {
+                    reportRf.completed = data.completed;
+                    reportDirtyRef.current = true;
+                  }
                   break;
                 }
 
@@ -2511,6 +2622,8 @@ export default function ChatPage() {
         }
       }
     } finally {
+      // Stop batched flush timer and do a final flush
+      stopFlushTimer();
       setSending(false);
       abortRef.current = null;
       // Auto-focus the chat input after the agent finishes responding
@@ -2529,6 +2642,11 @@ export default function ChatPage() {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
         pollingIntervalRef.current = null;
+      }
+      // Stop the batched flush timer
+      if (flushTimerRef.current) {
+        clearInterval(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
     };
   }, []);

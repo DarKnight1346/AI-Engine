@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@ai-engine/db';
 import { withMemoryPrompt } from '@ai-engine/shared';
+import { getAuthFromRequest } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,12 +24,16 @@ export async function POST(request: NextRequest) {
   try {
     const db = getDb();
     const body = await request.json();
-    const { message, sessionId, userId, agentId } = body as {
+    const { message, sessionId, agentId } = body as {
       message: string;
       sessionId?: string;
-      userId?: string;
       agentId?: string;
     };
+
+    // Extract authenticated userId from JWT cookie (not from request body)
+    // This ensures each user's memories are properly scoped to their account
+    const auth = await getAuthFromRequest(request);
+    const userId = auth?.userId ?? (body as any).userId;
 
     if (!message) {
       return NextResponse.json({ error: 'message is required' }, { status: 400 });

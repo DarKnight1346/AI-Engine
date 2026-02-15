@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@ai-engine/db';
+import { getAuthFromRequest } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,14 +29,21 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     if (!body.content?.trim()) return NextResponse.json({ error: 'Content is required' }, { status: 400 });
 
-    const user = await db.user.findFirst({ where: { role: 'admin' } });
+    // Use authenticated user from JWT cookie (not hardcoded admin)
+    const auth = await getAuthFromRequest(request);
+    const userId = auth?.userId;
+    const user = userId
+      ? await db.user.findUnique({ where: { id: userId } })
+      : await db.user.findFirst({ where: { role: 'admin' } });
+
+    const scope = body.scope ?? 'personal';
     const entry = await db.memoryEntry.create({
       data: {
         content: body.content.trim(),
         type: body.type ?? 'knowledge',
         importance: body.importance ?? 0.5,
-        scope: body.scope ?? 'personal',
-        scopeOwnerId: user?.id ?? '',
+        scope,
+        scopeOwnerId: scope === 'personal' ? (user?.id ?? '') : (user?.id ?? ''),
       },
     });
     return NextResponse.json({ entry }, { status: 201 });

@@ -16,14 +16,14 @@ import type { Prisma } from '@ai-engine/db';
  * 2. Store them as project-scoped memories with ZERO decay (permanent)
  * 3. Retrieve only semantically relevant memories when building AI context
  * 
- * ## Memory Scoping: Project vs User Separation
+ * ## Memory Scoping: Project vs User vs Team Separation
  * 
- * **Project Requirements** (scope='team', scopeOwnerId=projectId):
+ * **Project Requirements** (scope='project', scopeOwnerId=projectId):
  * - Features, specifications, technical decisions
  * - Architecture choices, constraints, design decisions
  * - Target audience, business requirements
  * - Stored with decayRate=0.0 (NEVER forgotten)
- * - NEVER pollutes user or team context
+ * - NEVER pollutes user, team, or global context
  * 
  * **User Information** (scope='personal', scopeOwnerId=userId):
  * - Personal preferences ("I prefer React")
@@ -33,7 +33,8 @@ import type { Prisma } from '@ai-engine/db';
  * - Kept separate from project requirements
  * 
  * This architecture ensures:
- * - Project knowledge is permanent and never mixes with personal context
+ * - Project knowledge is permanent and isolated per project
+ * - Team memories stay separate from project-specific requirements
  * - Context stays manageable (15-50 memories vs 100+ messages)
  * - Semantic search retrieves only relevant information
  * - No pollution between projects, users, or teams
@@ -47,11 +48,11 @@ export class ProjectMemoryService {
   /**
    * Extract and store memories from a planning conversation message
    * 
-   * IMPORTANT: Project memories are stored separately from user memories:
-   * - Project requirements/decisions: scope='team', scopeOwnerId=projectId (NEVER decay)
+   * IMPORTANT: Project memories are stored separately from user/team memories:
+   * - Project requirements/decisions: scope='project', scopeOwnerId=projectId (NEVER decay)
    * - Personal user info: scope='personal', scopeOwnerId=userId (normal decay)
    * 
-   * This ensures project requirements never pollute user context and never decay.
+   * This ensures project requirements never pollute user or team context and never decay.
    */
   async extractPlanningMemories(
     projectId: string,
@@ -69,7 +70,7 @@ export class ProjectMemoryService {
       try {
         // Determine if this is project-related or user-related
         if (fact.isProjectRequirement) {
-          // Store as PROJECT memory (scope=team, owner=projectId)
+          // Store as PROJECT memory (scope=project, owner=projectId)
           // CRITICAL: Use decayRate=0 so project requirements NEVER decay
           await this.storeProjectMemory(
             projectId,
@@ -133,7 +134,7 @@ export class ProjectMemoryService {
 
     // Create memory entry with ZERO decay (project requirements never fade)
     const data: Prisma.MemoryEntryUncheckedCreateInput = {
-      scope: 'team',
+      scope: 'project',
       scopeOwnerId: projectId,
       type,
       content,
@@ -197,7 +198,7 @@ export class ProjectMemoryService {
   /**
    * Retrieve relevant project context for AI
    * 
-   * ONLY searches project-scoped memories (scope='team', scopeOwnerId=projectId)
+   * ONLY searches project-scoped memories (scope='project', scopeOwnerId=projectId)
    * This ensures project context never mixes with user or team context
    */
   async getRelevantContext(
@@ -205,10 +206,10 @@ export class ProjectMemoryService {
     query: string,
     limit: number = 15,
   ): Promise<ScoredMemoryEntry[]> {
-    // Search ONLY in project scope (team/projectId)
+    // Search ONLY in project scope (project/projectId)
     return await this.memoryService.search(
       query,
-      'team',
+      'project',
       projectId, // scopeOwnerId = projectId keeps it isolated
       limit,
       {
@@ -238,7 +239,7 @@ export class ProjectMemoryService {
     // Deep search ONLY in project scope
     return await this.memoryService.deepSearch(
       query,
-      'team',
+      'project',
       projectId, // scopeOwnerId = projectId keeps it isolated
       limit,
       3, // 3 hops for comprehensive associative recall
@@ -435,7 +436,7 @@ export class ProjectMemoryService {
     // Get all project memories sorted by importance
     const memories = await this.memoryService.search(
       'project requirements features goals', // Broad query to get everything
-      'team',
+      'project',
       projectId,
       100, // Get many memories
       { strengthenOnRecall: false },

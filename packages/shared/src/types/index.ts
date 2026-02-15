@@ -339,7 +339,7 @@ export interface SkillSearchResult {
 // ============================================================
 // Memory
 // ============================================================
-export type MemoryScope = 'global' | 'team' | 'personal';
+export type MemoryScope = 'global' | 'team' | 'personal' | 'project';
 export type MemoryEntryType = 'conversation' | 'knowledge' | 'reflection' | 'observation';
 export type MemorySource = 'explicit' | 'conversation' | 'consolidation' | 'inference';
 

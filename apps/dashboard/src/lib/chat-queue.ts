@@ -196,10 +196,15 @@ export class ChatQueue {
       const abortController = new AbortController();
       this.activeJobs.set(job.jobId, { job, abortController });
 
-      // If the caller's signal aborts, propagate to our controller
-      if (job.signal) {
-        job.signal.addEventListener('abort', () => abortController.abort(), { once: true });
-      }
+      // NOTE: We intentionally do NOT propagate the caller's signal (which
+      // represents the HTTP connection lifetime) to the execution's abort
+      // controller.  The execution must run to completion and persist its
+      // result to the database regardless of whether the frontend is still
+      // connected.  The caller's signal is only used in stream/route.ts to
+      // close the SSE stream; it should never prevent the DB write.
+      //
+      // Explicit cancellation (e.g. a future "Stop" button) should call
+      // queue.cancel(jobId) directly, which aborts the controller.
 
       this.executeJob(job, abortController.signal)
         .catch((err) => {
@@ -249,11 +254,23 @@ You MUST search memory for user preferences before every response — this is yo
     const pool = await this.getSharedPool();
 
     // ── Build memory search function ───────────────────────────────
+    // Share a single EmbeddingService + MemoryService for this entire job
+    // instead of creating new instances on every search call (each instance
+    // loads an ML model, causing memory exhaustion during multi-agent sessions).
+    let _jobEmbSvc: any = null;
+    let _jobMemSvc: any = null;
+    const getJobMemoryServices = async () => {
+      if (!_jobEmbSvc || !_jobMemSvc) {
+        const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
+        if (!_jobEmbSvc) _jobEmbSvc = new EmbeddingService();
+        if (!_jobMemSvc) _jobMemSvc = new MemoryService(_jobEmbSvc);
+      }
+      return { embSvc: _jobEmbSvc, memSvc: _jobMemSvc };
+    };
+
     const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
       try {
-        const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
-        const embeddings = new EmbeddingService();
-        const memSvc = new MemoryService(embeddings);
+        const { memSvc } = await getJobMemoryServices();
         console.log(`[search_memory] Vector search: query="${query.slice(0, 80)}" scope=${scope} owner=${scopeOwnerId ?? 'none'}`);
         const results = await memSvc.search(query, scope as any, scopeOwnerId, 5, { strengthenOnRecall: true });
         console.log(`[search_memory] Found ${results.length} result(s), top score: ${results[0]?.finalScore?.toFixed(3) ?? 'n/a'}`);
@@ -399,7 +416,9 @@ You MUST search memory for user preferences before every response — this is yo
       // Notify the frontend which agent is starting
       job.onEvent({ type: 'agent_start', slot, agentName: agentName ?? 'AI Engine' } as any);
 
-      // Build the base executor options (reused for sub-agent creation)
+      // Build the base executor options (reused for sub-agent creation).
+      // Share the embedding service so sub-agents don't each load the ML model.
+      const { embSvc: sharedEmbedding } = await getJobMemoryServices();
       const baseExecutorOptions = {
         llm: pool,
         tier: 'standard' as const,
@@ -409,6 +428,7 @@ You MUST search memory for user preferences before every response — this is yo
         sessionId: job.sessionId,
         workerDispatcher: workerHub,
         serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword,
+        sharedEmbeddingService: sharedEmbedding,
       };
 
       const executor = new ChatExecutor({
@@ -417,8 +437,7 @@ You MUST search memory for user preferences before every response — this is yo
         parentExecutorOptions: baseExecutorOptions,
         // Forward orchestration events through to the SSE stream
         onSubtaskEvent: (subEvent: any) => {
-          if (signal.aborted) return;
-          job.onEvent({ ...subEvent, slot } as any);
+          try { job.onEvent({ ...subEvent, slot } as any); } catch { /* stream closed */ }
         },
         // Clarification callback — registers in the pending map and blocks
         onClarificationRequest: (questions: any[], resolve: (answers: Record<string, string>) => void) => {
@@ -515,34 +534,42 @@ You MUST search memory for user preferences before every response — this is yo
         [...llmMessages],  // Clone so concurrent agents don't interfere
         systemPrompt,
         (event) => {
-          if (signal.aborted) return;
-          // Tag event with the slot
-          job.onEvent({ ...event, slot } as any);
+          // Best-effort forward — if the SSE stream is already closed (client
+          // disconnected) the send() try-catch in the route handler will
+          // silently swallow the error.  We intentionally do NOT gate this on
+          // signal.aborted so that events flow for as long as the stream is
+          // open, without coupling DB persistence to client connectivity.
+          try { job.onEvent({ ...event, slot } as any); } catch { /* stream closed */ }
         },
       );
 
-      if (signal.aborted) throw new Error('Aborted');
-
-      // Store AI response in DB
-      await db.chatMessage.create({
-        data: {
-          sessionId: job.sessionId,
-          senderType: 'ai',
-          content: result.content,
-          aiResponded: true,
-          embedsJson: agentId ? { agentId, agentName } : undefined,
-        },
-      });
+      // ── ALWAYS persist the AI response ──
+      // The DB write must NOT be gated on signal.aborted.  The agent has
+      // finished its work — the result must be durable regardless of whether
+      // the frontend is still connected.  This is the core fix for responses
+      // vanishing on page refresh / navigation.
+      try {
+        await db.chatMessage.create({
+          data: {
+            sessionId: job.sessionId,
+            senderType: 'ai',
+            content: result.content,
+            aiResponded: true,
+            embedsJson: agentId ? { agentId, agentName } : undefined,
+          },
+        });
+      } catch (dbErr: any) {
+        console.error(`[ChatQueue] DB write failed for session ${job.sessionId} slot ${slot}:`, dbErr.message);
+      }
 
       // Final done event with slot tag
       // (executeStreaming already emits done, but we re-emit with slot + agentName)
       // The executor already sent a done event via the callback above, so this is handled.
 
-      // Auto-extract memories (fire-and-forget)
+      // Auto-extract memories (fire-and-forget, reuse shared services)
       try {
-        const { MemoryExtractor, MemoryService: MemSvc, EmbeddingService: EmbSvc } = await import('@ai-engine/memory');
-        const embSvc = new EmbSvc();
-        const memSvc = new MemSvc(embSvc);
+        const { MemoryExtractor } = await import('@ai-engine/memory');
+        const { memSvc } = await getJobMemoryServices();
         const extractor = new MemoryExtractor(memSvc);
         extractor.extractAndStore(
           job.message, result.content,

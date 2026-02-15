@@ -338,7 +338,9 @@ export async function runSubAgent(
   const tier = autoSelectTier(task);
   const systemPrompt = buildSubAgentSystemPrompt(task, context);
 
-  // Create a focused ChatExecutor for this sub-task
+  // Create a focused ChatExecutor for this sub-task.
+  // Critically, share the parent's EmbeddingService to avoid loading the
+  // embedding model once per sub-agent (which quickly exhausts memory).
   const executorOptions: ChatExecutorOptions = {
     llm: options.parentOptions.llm,
     toolConfig: options.parentOptions.toolConfig,
@@ -355,6 +357,8 @@ export async function runSubAgent(
     dataForSeoLogin: options.parentOptions.dataForSeoLogin,
     dataForSeoPassword: options.parentOptions.dataForSeoPassword,
     workerDispatcher: options.parentOptions.workerDispatcher,
+    // Reuse the parent's shared embedding service (avoids N model loads)
+    sharedEmbeddingService: (options.parentOptions as any).sharedEmbeddingService,
     // No backgroundTaskCallback — sub-agents run synchronously
     // No additionalTools — sub-agents use standard tool discovery
   };

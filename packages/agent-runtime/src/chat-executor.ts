@@ -174,6 +174,14 @@ export interface ChatExecutorOptions {
   workerDispatcher?: WorkerToolDispatcher;
 
   /**
+   * Shared EmbeddingService instance. When provided, reused for tool
+   * index semantic search instead of creating a new one per executor.
+   * Critical for multi-agent: without sharing, each sub-agent loads
+   * its own copy of the embedding model, quickly exhausting memory.
+   */
+  sharedEmbeddingService?: any;
+
+  /**
    * Callback for handling long-running tool executions in the background.
    *
    * When the agent calls a tool that's known to take >10 seconds (e.g.
@@ -297,11 +305,15 @@ export class ChatExecutor {
     // Initialize tool index with built-in dashboard-safe tools
     this.toolIndex = new ToolIndex();
 
-    // Wire up semantic search via local embedding model (768-dim, runs on CPU).
-    // Embeddings are computed lazily on first discover_tools call, not here.
-    // Note: EmbeddingService satisfies EmbeddingProvider at runtime; the cast
-    // works around stale .d.ts files that may not reflect the latest source.
-    this.toolIndex.setEmbeddingProvider(new EmbeddingService() as any);
+    // Reuse a shared EmbeddingService when provided (critical for sub-agents
+    // to avoid loading the embedding model N times and exhausting memory).
+    // Falls back to creating a new instance for top-level executors.
+    const embeddingService = options.sharedEmbeddingService ?? new EmbeddingService();
+    // Store on options so sub-agents created from parentExecutorOptions inherit it
+    if (!options.sharedEmbeddingService) {
+      (options as any).sharedEmbeddingService = embeddingService;
+    }
+    this.toolIndex.setEmbeddingProvider(embeddingService as any);
 
     this.registerBuiltInTools();
 

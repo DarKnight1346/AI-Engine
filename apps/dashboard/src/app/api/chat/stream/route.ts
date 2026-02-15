@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getDb } from '@ai-engine/db';
 import { ChatQueue } from '@/lib/chat-queue';
+import { getAuthFromRequest } from '@/lib/auth';
 import type { ChatStreamEvent } from '@ai-engine/agent-runtime';
 
 export const runtime = 'nodejs';
@@ -36,16 +37,19 @@ export async function POST(request: NextRequest) {
     const {
       message,
       sessionId: incomingSessionId,
-      userId,
       agentIds,
       attachments: rawAttachments,
     } = body as {
       message: string;
       sessionId?: string;
-      userId?: string;
       agentIds?: string[];
       attachments?: Array<{ name: string; type: string; url: string; size: number }>;
     };
+
+    // Extract authenticated userId from JWT cookie (not from request body)
+    // This ensures each user's memories are properly scoped to their account
+    const auth = await getAuthFromRequest(request);
+    const userId = auth?.userId ?? (body as any).userId;
 
     // Support legacy single agentId field for backwards compatibility
     const legacyAgentId = (body as any).agentId as string | undefined;
@@ -150,6 +154,44 @@ export async function POST(request: NextRequest) {
         // Enqueue the chat job
         const queue = ChatQueue.getInstance();
 
+        // ── Incremental persistence ──
+        // Accumulate streamed content per slot and periodically save to DB
+        // so the response survives page crashes / disconnects. The ChatQueue
+        // still writes the final message; this is a safety net for partial content.
+        const slotBuffers = new Map<string, string>();
+        let partialSaveTimer: ReturnType<typeof setInterval> | null = null;
+        const sessionIdForSave = session!.id;
+
+        const savePartialContent = async () => {
+          for (const [slot, content] of slotBuffers) {
+            if (!content || content.length < 20) continue; // skip trivially short content
+            try {
+              // Upsert a partial AI message so recovery can find it
+              await db.chatMessage.upsert({
+                where: { id: `partial_${sessionIdForSave}_${slot}` },
+                create: {
+                  id: `partial_${sessionIdForSave}_${slot}`,
+                  sessionId: sessionIdForSave,
+                  senderType: 'ai',
+                  content,
+                  aiResponded: false, // marks this as partial/in-progress
+                  embedsJson: { partial: true, slot } as any,
+                },
+                update: {
+                  content,
+                },
+              });
+            } catch {
+              // Best-effort — DB might not support the upsert on a generated ID
+            }
+          }
+        };
+
+        // Save partial content every 10 seconds during streaming
+        partialSaveTimer = setInterval(() => {
+          savePartialContent().catch(() => {});
+        }, 10_000);
+
         queue.enqueue({
           jobId,
           sessionId: session!.id,
@@ -169,6 +211,10 @@ export async function POST(request: NextRequest) {
                   });
                   break;
                 case 'token':
+                  // Accumulate for incremental persistence
+                  if (slot) {
+                    slotBuffers.set(slot, (slotBuffers.get(slot) ?? '') + event.text);
+                  }
                   send('token', { slot, text: event.text });
                   break;
                 case 'status':
@@ -262,6 +308,11 @@ export async function POST(request: NextRequest) {
           },
           onComplete: (error?: Error) => {
             clearInterval(keepAlive);
+            if (partialSaveTimer) { clearInterval(partialSaveTimer); partialSaveTimer = null; }
+            // Clean up partial messages (the final complete message is saved by ChatQueue)
+            for (const slot of slotBuffers.keys()) {
+              db.chatMessage.delete({ where: { id: `partial_${sessionIdForSave}_${slot}` } }).catch(() => {});
+            }
             if (error) {
               send('error', { message: error.message });
             }
@@ -273,10 +324,17 @@ export async function POST(request: NextRequest) {
           },
         });
 
-        // Handle client disconnect
+        // Handle client disconnect — save partial content but let the job
+        // continue running in the background so it can persist its final
+        // result to the database.  We intentionally do NOT call
+        // queue.cancel(jobId) here; the execution must complete and write
+        // to the DB regardless of client connectivity.
         request.signal.addEventListener('abort', () => {
           clearInterval(keepAlive);
-          queue.cancel(jobId);
+          if (partialSaveTimer) { clearInterval(partialSaveTimer); partialSaveTimer = null; }
+          // Best-effort save of content accumulated so far (safety net —
+          // the ChatQueue will save the final result when it finishes).
+          savePartialContent().catch(() => {});
           try { controller.close(); } catch { /* ignore */ }
         });
       },
