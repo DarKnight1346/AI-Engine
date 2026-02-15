@@ -547,7 +547,7 @@ When you need information from the user, use the **ask_user** tool to present st
     for (const wf of currentWireframes) {
       const elements = Array.isArray(wf.elements) ? wf.elements : [];
       for (const el of elements) {
-        if (el.type === 'wireframeRef' && el.wireframeRefId) {
+        if (el && el.type === 'wireframeRef' && el.wireframeRefId) {
           if (!wfUsedIn.has(el.wireframeRefId)) wfUsedIn.set(el.wireframeRefId, []);
           wfUsedIn.get(el.wireframeRefId)!.push(wf.name);
         }
@@ -644,7 +644,7 @@ export async function GET(request: NextRequest) {
     for (const wf of wireframes) {
       const elements = Array.isArray(wf.elements) ? wf.elements : [];
       for (const el of elements) {
-        if (el.type === 'wireframeRef' && el.wireframeRefId) {
+        if (el && el.type === 'wireframeRef' && el.wireframeRefId) {
           if (!wfUsedIn.has(el.wireframeRefId)) wfUsedIn.set(el.wireframeRefId, []);
           wfUsedIn.get(el.wireframeRefId)!.push(wf.name);
         }
