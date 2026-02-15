@@ -5,18 +5,6 @@ export const dynamic = 'force-dynamic';
 
 // ── Helpers ──
 
-interface WireframeElement {
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  label: string;
-  wireframeRefId?: string;
-  props?: Record<string, unknown>;
-}
-
 /**
  * Compute composition relationships for all wireframes in a project.
  * Returns maps of wireframeId -> names of wireframes it contains / is used in.
@@ -28,10 +16,10 @@ function computeComposition(wireframes: Array<{ id: string; name: string; elemen
   const usedInMap = new Map<string, string[]>();
 
   for (const wf of wireframes) {
-    const elements = (Array.isArray(wf.elements) ? wf.elements : []) as WireframeElement[];
+    const elements: any[] = Array.isArray(wf.elements) ? wf.elements : [];
     const refs = elements
-      .filter((el) => el.type === 'wireframeRef' && el.wireframeRefId)
-      .map((el) => el.wireframeRefId!);
+      .filter((el: any) => el.type === 'wireframeRef' && el.wireframeRefId)
+      .map((el: any) => el.wireframeRefId!);
 
     const uniqueRefs = [...new Set(refs)];
     const refNames = uniqueRefs
@@ -70,7 +58,7 @@ export async function GET(request: NextRequest) {
     const { containsMap, usedInMap } = computeComposition(wireframes);
 
     const result = wireframes.map((wf: any) => {
-      const elements = (Array.isArray(wf.elements) ? wf.elements : []) as WireframeElement[];
+      const elements: any[] = Array.isArray(wf.elements) ? wf.elements : [];
       return {
         id: wf.id,
         name: wf.name,
@@ -190,9 +178,9 @@ export async function PUT(request: NextRequest) {
 
     // If elements contain wireframeRefs, validate they still exist
     if (fields.elements && Array.isArray(fields.elements)) {
-      const refIds = (fields.elements as WireframeElement[])
-        .filter((el) => el.type === 'wireframeRef' && el.wireframeRefId)
-        .map((el) => el.wireframeRefId!);
+      const refIds = (fields.elements as any[])
+        .filter((el: any) => el.type === 'wireframeRef' && el.wireframeRefId)
+        .map((el: any) => el.wireframeRefId!);
 
       if (refIds.length > 0) {
         const found = await db.projectWireframe.findMany({
@@ -203,8 +191,8 @@ export async function PUT(request: NextRequest) {
         const missing = refIds.filter((r) => !foundIds.has(r));
         if (missing.length > 0) {
           // Remove stale references rather than failing
-          fields.elements = (fields.elements as WireframeElement[]).filter(
-            (el) => el.type !== 'wireframeRef' || !el.wireframeRefId || foundIds.has(el.wireframeRefId),
+          fields.elements = (fields.elements as any[]).filter(
+            (el: any) => el.type !== 'wireframeRef' || !el.wireframeRefId || foundIds.has(el.wireframeRefId),
           );
         }
       }
@@ -260,8 +248,8 @@ export async function DELETE(request: NextRequest) {
 
     const referencingWireframes = allWireframes.filter((wf: any) => {
       if (wf.id === id) return false;
-      const elements = (Array.isArray(wf.elements) ? wf.elements : []) as WireframeElement[];
-      return elements.some((el) => el.type === 'wireframeRef' && el.wireframeRefId === id);
+      const elements: any[] = Array.isArray(wf.elements) ? wf.elements : [];
+      return elements.some((el: any) => el.type === 'wireframeRef' && el.wireframeRefId === id);
     });
 
     if (referencingWireframes.length > 0 && !force) {
@@ -275,13 +263,13 @@ export async function DELETE(request: NextRequest) {
     // If force or no references, clean up refs in parent wireframes and delete
     if (referencingWireframes.length > 0) {
       for (const parent of referencingWireframes) {
-        const elements = (Array.isArray(parent.elements) ? parent.elements : []) as unknown as WireframeElement[];
+        const elements: any[] = Array.isArray(parent.elements) ? parent.elements : [];
         const cleaned = elements.filter(
-          (el) => !(el.type === 'wireframeRef' && el.wireframeRefId === id),
+          (el: any) => !(el.type === 'wireframeRef' && el.wireframeRefId === id),
         );
         await db.projectWireframe.update({
           where: { id: parent.id },
-          data: { elements: cleaned },
+          data: { elements: cleaned as any },
         });
       }
     }
