@@ -144,7 +144,9 @@ export type DashboardWsMessage =
   | { type: 'update:available'; version: string; bundleUrl: string }
   | { type: 'keys:sync'; publicKey: string; privateKey: string; fingerprint: string }
   | { type: 'docker:task:assign'; taskId: string; projectId: string; agentId: string; containerConfig: DockerContainerConfig; taskPrompt: string; repoUrl: string }
-  | { type: 'docker:task:cancel'; taskId: string; containerId: string };
+  | { type: 'docker:task:finalize'; taskId: string; commitMessage: string }
+  | { type: 'docker:task:cancel'; taskId: string; containerId: string }
+  | { type: 'docker:cleanup'; projectId: string };
 
 // ============================================================
 // Config
