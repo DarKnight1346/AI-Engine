@@ -28,7 +28,7 @@ interface WireframeGalleryProps {
   onDuplicate: (wireframe: Wireframe) => void;
 }
 
-const TYPE_ICONS: Record<string, React.ReactNode> = {
+const TYPE_ICONS: Record<string, React.ReactElement> = {
   page: <WebIcon sx={{ fontSize: 14 }} />,
   component: <WidgetsIcon sx={{ fontSize: 14 }} />,
   modal: <OpenInNewIcon sx={{ fontSize: 14 }} />,
@@ -172,7 +172,7 @@ export default function WireframeGallery({ wireframes, onEdit, onCreate, onDelet
                           {wf.name}
                         </Typography>
                         <Chip
-                          icon={TYPE_ICONS[wf.wireframeType]}
+                          icon={TYPE_ICONS[wf.wireframeType] ?? undefined}
                           label={wf.wireframeType}
                           size="small"
                           sx={{
