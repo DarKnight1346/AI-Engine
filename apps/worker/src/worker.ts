@@ -1,11 +1,16 @@
 import os from 'os';
 import crypto from 'crypto';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
+import { execFile as execFileCb, exec as execCb } from 'child_process';
+import { promisify } from 'util';
 import { DashboardClient } from './dashboard-client.js';
 import { EnvironmentTools } from '@ai-engine/agent-runtime';
 import type { Tool, ToolContext } from '@ai-engine/agent-runtime';
 import type { NodeCapabilities, WorkerConfig, DashboardWsMessage } from '@ai-engine/shared';
+
+const execFile = promisify(execFileCb);
+const exec = promisify(execCb);
 
 /**
  * Worker — a thin tool execution node.
@@ -27,9 +32,25 @@ export class Worker {
   private client: DashboardClient | null = null;
   private running = false;
   private browserPool: any = null;
+  private dockerAvailable = false;
+  private keysReceived = false;
 
   /** Registered tools available for execution (browser, shell, filesystem, etc.) */
   private tools = new Map<string, Tool>();
+
+  /** Path to stored SSH keys */
+  private keysDir = join(os.homedir(), '.ai-engine', 'keys');
+
+  /**
+   * Active Docker containers: taskId → container info.
+   * All Docker containers run HERE on the worker, not on the dashboard.
+   */
+  private activeContainers = new Map<string, {
+    containerId: string;
+    containerName: string;
+    projectId: string;
+    branchName: string;
+  }>();
 
   async start(): Promise<void> {
     console.log('[worker] Starting...');
@@ -45,6 +66,10 @@ export class Worker {
       this.tools.set(tool.name, tool);
     }
     console.log(`[worker] Registered ${this.tools.size} environment tools`);
+
+    // Check Docker availability
+    this.dockerAvailable = await this.detectDocker();
+    console.log(`[worker] Docker: ${this.dockerAvailable ? 'available' : 'not available'}`);
 
     // Initialise browser pool if capable
     if (capabilities.browserCapable) {
@@ -74,9 +99,15 @@ export class Worker {
       onUpdateAvailable: (msg) => {
         console.log(`[worker] Update available: v${msg.version} — ${msg.bundleUrl}`);
       },
+      onKeysSync: (msg) => this.handleKeysSync(msg),
+      onDockerTaskAssign: (msg) => this.handleDockerTaskAssign(msg),
+      onDockerTaskFinalize: (msg) => this.handleDockerTaskFinalize(msg),
+      onDockerTaskCancel: (msg) => this.handleDockerTaskCancel(msg),
+      onDockerCleanup: (msg) => this.handleDockerCleanup(msg),
     });
 
     const workerId = await this.client.connect();
+    this.client.dockerAvailable = this.dockerAvailable;
     console.log(`[worker] Connected as ${workerId}. Ready for tool execution.`);
     this.running = true;
   }
@@ -84,6 +115,15 @@ export class Worker {
   async shutdown(): Promise<void> {
     console.log('[worker] Shutting down...');
     this.running = false;
+
+    // Clean up all active Docker containers
+    for (const [taskId, container] of this.activeContainers) {
+      try {
+        await exec(`docker rm -f ${container.containerName}`);
+        console.log(`[worker] Cleaned up container ${container.containerName} for task ${taskId}`);
+      } catch { /* ignore */ }
+    }
+    this.activeContainers.clear();
 
     if (this.browserPool) {
       try { await this.browserPool.shutdown(); } catch { /* ignore */ }
@@ -167,6 +207,414 @@ export class Worker {
       msg.taskId,
       'This worker operates in tool-execution mode. Tasks (LLM agentic loops) should be run on the dashboard server.',
     );
+  }
+
+  // -----------------------------------------------------------------------
+  // SSH key handling
+  // -----------------------------------------------------------------------
+
+  /**
+   * Handle SSH key distribution from the dashboard.
+   * Stores keys locally so Docker containers and Git can use them.
+   */
+  private async handleKeysSync(
+    msg: { type: 'keys:sync'; publicKey: string; privateKey: string; fingerprint: string },
+  ): Promise<void> {
+    try {
+      await mkdir(this.keysDir, { recursive: true });
+
+      // Write private key (PEM format)
+      await writeFile(join(this.keysDir, 'id_ed25519'), msg.privateKey, { mode: 0o600 });
+
+      // Write public key (OpenSSH format)
+      await writeFile(join(this.keysDir, 'id_ed25519.pub'), msg.publicKey + '\n', { mode: 0o644 });
+
+      this.keysReceived = true;
+      console.log(`[worker] SSH keys stored (fingerprint: ${msg.fingerprint})`);
+
+      // Acknowledge receipt
+      this.client?.sendKeysReceived(msg.fingerprint);
+    } catch (err: any) {
+      console.error('[worker] Failed to store SSH keys:', err.message);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Docker task execution (containers run HERE on the worker)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Handle a Docker-based task assignment from the dashboard.
+   *
+   * This is the FULL lifecycle — everything happens on this worker machine:
+   *   1. Create a Docker container with the project repo cloned
+   *   2. Create a feature branch for the task
+   *   3. Execute the task prompt inside the container (shell commands)
+   *   4. Commit all changes and merge branch to main
+   *   5. Destroy the container
+   *   6. Report results back to the dashboard
+   */
+  private async handleDockerTaskAssign(
+    msg: {
+      type: 'docker:task:assign';
+      taskId: string;
+      projectId: string;
+      agentId: string;
+      containerConfig: any;
+      taskPrompt: string;
+      rolePrompt?: string;
+      repoUrl: string;
+    },
+  ): Promise<void> {
+    if (!this.dockerAvailable) {
+      this.client?.sendDockerTaskComplete(msg.taskId, {
+        success: false,
+        error: 'Docker is not available on this worker',
+      });
+      return;
+    }
+
+    console.log(`[worker] Docker task assigned: ${msg.taskId} (project: ${msg.projectId})`);
+    this.client?.sendLog('info', `Creating Docker container for task ${msg.taskId}`, msg.taskId);
+
+    const containerName = `aie-${msg.projectId.slice(0, 8)}-${msg.taskId.slice(0, 8)}`;
+    const branchName = msg.containerConfig?.branchName ?? `task/${msg.taskId.slice(0, 8)}`;
+    const image = msg.containerConfig?.image || 'ai-engine-worker:latest';
+    let containerId = '';
+
+    try {
+      // ---------------------------------------------------------------
+      // 1. Ensure the base Docker image exists on this worker
+      // ---------------------------------------------------------------
+      await this.ensureDockerImage(image);
+
+      // ---------------------------------------------------------------
+      // 2. Create and start the container
+      // ---------------------------------------------------------------
+      const dockerArgs = [
+        'run', '-d',
+        '--name', containerName,
+        '-v', `${this.keysDir}:/root/.ssh:ro`,
+        '-w', '/workspace',
+        '-e', `TASK_ID=${msg.taskId}`,
+        '-e', `PROJECT_ID=${msg.projectId}`,
+        '-e', `BRANCH_NAME=${branchName}`,
+        '-e', 'GIT_SSH_COMMAND=ssh -i /tmp/git_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null',
+        ...(msg.containerConfig?.memoryLimit ? ['--memory', msg.containerConfig.memoryLimit] : []),
+        ...(msg.containerConfig?.cpuLimit ? ['--cpus', msg.containerConfig.cpuLimit] : []),
+        image,
+        'tail', '-f', '/dev/null', // keep container alive
+      ];
+
+      const { stdout: cidRaw } = await execFile('docker', dockerArgs, { timeout: 60_000 });
+      containerId = cidRaw.trim();
+
+      // Track this container
+      this.activeContainers.set(msg.taskId, {
+        containerId,
+        containerName,
+        projectId: msg.projectId,
+        branchName,
+      });
+
+      this.client?.sendDockerStatus(containerId, msg.taskId, 'created');
+
+      // ---------------------------------------------------------------
+      // 3. Setup inside the container: git config, clone repo, branch
+      // ---------------------------------------------------------------
+      const setupCommands = [
+        'git config --global user.email "ai-engine@local"',
+        'git config --global user.name "AI Engine"',
+        // Copy SSH key to a location with correct perms (bind mount is read-only)
+        'mkdir -p /tmp/.ssh',
+        'cp /root/.ssh/id_ed25519 /tmp/.ssh/id_ed25519',
+        'chmod 600 /tmp/.ssh/id_ed25519',
+        'cp /root/.ssh/id_ed25519.pub /tmp/.ssh/id_ed25519.pub 2>/dev/null || true',
+        // Clone the repo
+        `GIT_SSH_COMMAND="ssh -i /tmp/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git clone "${msg.repoUrl}" /workspace/project`,
+        'cd /workspace/project',
+        `git checkout -b "${branchName}"`,
+      ].join(' && ');
+
+      await this.dockerExec(containerName, ['sh', '-c', setupCommands], 120_000);
+      this.client?.sendLog('info', `Container ${containerName} ready, branch: ${branchName}`, msg.taskId);
+      this.client?.sendDockerStatus(containerId, msg.taskId, 'running');
+
+      // ---------------------------------------------------------------
+      // 4. Execute the task inside the container
+      //    The agent loop runs on the dashboard and routes tool calls here.
+      //    For now, tool:execute calls from the dashboard for this task
+      //    will be intercepted and routed into this container.
+      //    The container is kept alive until finalization.
+      // ---------------------------------------------------------------
+      // Nothing to do here — the container stays alive and the dashboard
+      // will send tool:execute requests that we route into it.
+      // Finalization happens when the dashboard sends docker:task:finalize.
+
+    } catch (err: any) {
+      console.error(`[worker] Docker task setup failed (${msg.taskId}):`, err.message);
+      this.client?.sendDockerTaskComplete(msg.taskId, {
+        success: false,
+        error: `Container setup failed: ${err.message}`,
+        merged: false,
+        filesChanged: 0,
+        commitsCreated: 0,
+      });
+      // Clean up the failed container
+      await this.removeContainer(containerName);
+      this.activeContainers.delete(msg.taskId);
+    }
+  }
+
+  /**
+   * Handle finalization of a Docker task.
+   * Commits all changes, merges to main, cleans up the container.
+   */
+  private async handleDockerTaskFinalize(
+    msg: { type: 'docker:task:finalize'; taskId: string; commitMessage?: string },
+  ): Promise<void> {
+    const container = this.activeContainers.get(msg.taskId);
+    if (!container) {
+      console.warn(`[worker] No active container for task ${msg.taskId}`);
+      this.client?.sendDockerTaskComplete(msg.taskId, {
+        success: false,
+        error: 'No active container for this task',
+        merged: false,
+        filesChanged: 0,
+        commitsCreated: 0,
+      });
+      return;
+    }
+
+    const { containerName, branchName } = container;
+    const commitMsg = msg.commitMessage ?? `Task ${msg.taskId} completed`;
+
+    try {
+      this.client?.sendLog('info', `Finalizing task ${msg.taskId}: committing and merging...`, msg.taskId);
+
+      // Stage and commit changes
+      const commitScript = [
+        'cd /workspace/project',
+        'git add -A',
+        `git diff --cached --quiet || git commit -m "${commitMsg.replace(/"/g, '\\"')}"`,
+      ].join(' && ');
+
+      await this.dockerExec(containerName, ['sh', '-c', commitScript], 30_000);
+
+      // Count files changed and commits on this branch
+      let filesChanged = 0;
+      let commitsCreated = 0;
+      try {
+        const { stdout: diffStat } = await this.dockerExec(
+          containerName,
+          ['sh', '-c', 'cd /workspace/project && git diff --stat main...HEAD --shortstat'],
+          10_000,
+        );
+        const filesMatch = diffStat.match(/(\d+) files? changed/);
+        if (filesMatch) filesChanged = parseInt(filesMatch[1], 10);
+
+        const { stdout: logCount } = await this.dockerExec(
+          containerName,
+          ['sh', '-c', 'cd /workspace/project && git rev-list --count main..HEAD'],
+          10_000,
+        );
+        commitsCreated = parseInt(logCount.trim(), 10) || 0;
+      } catch { /* stats are best-effort */ }
+
+      // Merge branch into main
+      let merged = false;
+      try {
+        const mergeScript = [
+          'cd /workspace/project',
+          'git checkout main',
+          `git merge --no-ff "${branchName}" -m "Merge ${branchName}"`,
+        ].join(' && ');
+
+        await this.dockerExec(containerName, ['sh', '-c', mergeScript], 30_000);
+        merged = true;
+      } catch (mergeErr: any) {
+        console.error(`[worker] Merge failed for ${branchName}:`, mergeErr.message);
+        // Abort the merge if it failed
+        try {
+          await this.dockerExec(containerName, ['sh', '-c', 'cd /workspace/project && git merge --abort'], 10_000);
+        } catch { /* ignore */ }
+      }
+
+      // Push changes back to the bare repo (main branch)
+      if (merged) {
+        try {
+          const pushScript = [
+            'cd /workspace/project',
+            'GIT_SSH_COMMAND="ssh -i /tmp/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git push origin main',
+          ].join(' && ');
+          await this.dockerExec(containerName, ['sh', '-c', pushScript], 30_000);
+        } catch (pushErr: any) {
+          console.error(`[worker] Push failed for task ${msg.taskId}:`, pushErr.message);
+        }
+      }
+
+      // Get the output summary
+      let output = '';
+      try {
+        const { stdout } = await this.dockerExec(
+          containerName,
+          ['sh', '-c', `cd /workspace/project && git log --oneline main...${branchName} 2>/dev/null || echo "No commits"`],
+          10_000,
+        );
+        output = stdout.trim();
+      } catch { /* ignore */ }
+
+      // Clean up the container
+      await this.removeContainer(containerName);
+      this.activeContainers.delete(msg.taskId);
+
+      this.client?.sendDockerTaskComplete(msg.taskId, {
+        success: true,
+        merged,
+        filesChanged,
+        commitsCreated,
+        branchName,
+        output: output || `Completed with ${filesChanged} file(s) changed`,
+      });
+
+      console.log(`[worker] Task ${msg.taskId} finalized: ${filesChanged} files, ${commitsCreated} commits, merged: ${merged}`);
+
+    } catch (err: any) {
+      console.error(`[worker] Finalization failed for task ${msg.taskId}:`, err.message);
+
+      // Clean up on failure
+      await this.removeContainer(containerName);
+      this.activeContainers.delete(msg.taskId);
+
+      this.client?.sendDockerTaskComplete(msg.taskId, {
+        success: false,
+        error: `Finalization failed: ${err.message}`,
+        merged: false,
+        filesChanged: 0,
+        commitsCreated: 0,
+      });
+    }
+  }
+
+  /**
+   * Handle cancellation of a single Docker task.
+   * Destroys the container without committing.
+   */
+  private async handleDockerTaskCancel(
+    msg: { type: 'docker:task:cancel'; taskId: string },
+  ): Promise<void> {
+    const container = this.activeContainers.get(msg.taskId);
+    if (container) {
+      console.log(`[worker] Cancelling Docker task ${msg.taskId}, removing container ${container.containerName}`);
+      await this.removeContainer(container.containerName);
+      this.activeContainers.delete(msg.taskId);
+    }
+  }
+
+  /**
+   * Handle cleanup of all Docker containers for a project.
+   * Called when a project is paused, stopped, or deleted.
+   */
+  private async handleDockerCleanup(
+    msg: { type: 'docker:cleanup'; projectId: string },
+  ): Promise<void> {
+    console.log(`[worker] Cleaning up all Docker containers for project ${msg.projectId}`);
+    let removed = 0;
+
+    for (const [taskId, container] of this.activeContainers) {
+      if (container.projectId === msg.projectId) {
+        await this.removeContainer(container.containerName);
+        this.activeContainers.delete(taskId);
+        removed++;
+      }
+    }
+
+    // Also try to remove any orphaned containers matching the project ID prefix
+    try {
+      const prefix = `aie-${msg.projectId.slice(0, 8)}`;
+      const { stdout } = await exec(`docker ps -a --filter "name=${prefix}" --format "{{.Names}}"`);
+      const names = stdout.trim().split('\n').filter(Boolean);
+      for (const name of names) {
+        await this.removeContainer(name);
+        removed++;
+      }
+    } catch { /* ignore */ }
+
+    console.log(`[worker] Cleaned up ${removed} container(s) for project ${msg.projectId}`);
+  }
+
+  // -----------------------------------------------------------------------
+  // Docker helpers
+  // -----------------------------------------------------------------------
+
+  /** Check if Docker daemon is running. */
+  private async detectDocker(): Promise<boolean> {
+    try {
+      await execFile('docker', ['info'], { timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Execute a command inside a Docker container. */
+  private async dockerExec(
+    containerName: string,
+    command: string[],
+    timeoutMs = 30_000,
+  ): Promise<{ stdout: string; stderr: string }> {
+    return execFile('docker', ['exec', containerName, ...command], {
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024, // 10 MB
+    });
+  }
+
+  /** Stop and remove a Docker container (best-effort). */
+  private async removeContainer(containerName: string): Promise<void> {
+    try {
+      await exec(`docker rm -f ${containerName}`);
+    } catch { /* container may not exist */ }
+  }
+
+  /**
+   * Ensure a Docker image exists on this worker.
+   * Builds the default ai-engine-worker image if it doesn't exist.
+   */
+  private async ensureDockerImage(imageName: string): Promise<void> {
+    try {
+      await execFile('docker', ['image', 'inspect', imageName], { timeout: 10_000 });
+      return; // Image exists
+    } catch {
+      // Image doesn't exist, build it
+    }
+
+    if (imageName !== 'ai-engine-worker:latest') {
+      // Try pulling non-default images
+      try {
+        await execFile('docker', ['pull', imageName], { timeout: 300_000 });
+        return;
+      } catch {
+        throw new Error(`Docker image "${imageName}" not found and could not be pulled`);
+      }
+    }
+
+    // Build the default worker image
+    console.log('[worker] Building ai-engine-worker:latest Docker image...');
+    const dockerfile = `
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \\
+    git curl wget openssh-client build-essential \\
+    python3 python3-pip \\
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \\
+    && apt-get install -y nodejs \\
+    && npm install -g pnpm
+WORKDIR /workspace
+`.trim();
+
+    await exec(`echo '${dockerfile}' | docker build -t ai-engine-worker:latest -`, { timeout: 600_000 });
+    console.log('[worker] ai-engine-worker:latest image built successfully');
   }
 
   // -----------------------------------------------------------------------

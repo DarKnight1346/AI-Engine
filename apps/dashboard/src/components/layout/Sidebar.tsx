@@ -18,12 +18,14 @@ import DnsIcon from '@mui/icons-material/Dns';
 import GroupIcon from '@mui/icons-material/Group';
 import SettingsIcon from '@mui/icons-material/Settings';
 import MenuIcon from '@mui/icons-material/Menu';
+import AccountTreeIcon from '@mui/icons-material/AccountTree';
 
 const DRAWER_WIDTH = 240;
 const MINI_WIDTH = 72;
 
 const navItems = [
   { label: 'Chat', icon: <ChatIcon />, path: '/chat' },
+  { label: 'Projects', icon: <AccountTreeIcon />, path: '/projects' },
   { label: 'Boards', icon: <DashboardIcon />, path: '/boards' },
   { label: 'Agents', icon: <SmartToyIcon />, path: '/agents' },
   { label: 'Schedules', icon: <ScheduleIcon />, path: '/schedules' },

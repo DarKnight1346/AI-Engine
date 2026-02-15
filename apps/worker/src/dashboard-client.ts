@@ -20,6 +20,14 @@ export interface DashboardClientOptions {
   onAgentResponse: (msg: Extract<DashboardWsMessage, { type: 'agent:response' }>) => void;
   onConfigUpdate: (msg: Extract<DashboardWsMessage, { type: 'config:update' }>) => void;
   onUpdateAvailable: (msg: Extract<DashboardWsMessage, { type: 'update:available' }>) => void;
+  onKeysSync?: (msg: any) => void;
+  onDockerTaskAssign?: (msg: any) => void;
+  /** Worker should finalize the Docker task (commit/merge/cleanup) */
+  onDockerTaskFinalize?: (msg: any) => void;
+  /** Worker should cancel/destroy a single Docker task container */
+  onDockerTaskCancel?: (msg: any) => void;
+  /** Worker should clean up all Docker containers for a project */
+  onDockerCleanup?: (msg: any) => void;
 }
 
 export class DashboardClient {
@@ -31,10 +39,13 @@ export class DashboardClient {
   private stopped = false;
   private activeTasks = 0;
   private connected = false;
+  private _dockerAvailable = false;
 
   constructor(opts: DashboardClientOptions) {
     this.opts = opts;
   }
+
+  set dockerAvailable(v: boolean) { this._dockerAvailable = v; }
 
   // -----------------------------------------------------------------------
   // Lifecycle
@@ -136,6 +147,18 @@ export class DashboardClient {
     this.sendRaw({ type: 'log', level, message, taskId });
   }
 
+  sendKeysReceived(fingerprint: string): void {
+    this.sendRaw({ type: 'keys:received', fingerprint });
+  }
+
+  sendDockerStatus(containerId: string, taskId: string, status: string, output?: string): void {
+    this.sendRaw({ type: 'docker:status', containerId, taskId, status, output } as any);
+  }
+
+  sendDockerTaskComplete(taskId: string, result: any): void {
+    this.sendRaw({ type: 'docker:task:complete', taskId, result });
+  }
+
   // -----------------------------------------------------------------------
   // Internal
   // -----------------------------------------------------------------------
@@ -190,6 +213,39 @@ export class DashboardClient {
       case 'update:available':
         this.opts.onUpdateAvailable(msg);
         break;
+
+      case 'keys:sync':
+        this.opts.onKeysSync?.(msg);
+        break;
+
+      case 'docker:task:assign':
+        this.opts.onDockerTaskAssign?.(msg);
+        break;
+
+      case 'docker:task:finalize':
+        this.opts.onDockerTaskFinalize?.(msg);
+        break;
+
+      case 'docker:task:cancel':
+        this.opts.onDockerTaskCancel?.(msg);
+        break;
+
+      case 'docker:cleanup':
+        this.opts.onDockerCleanup?.(msg);
+        break;
+
+      default: {
+        // Handle any additional message types that may arrive
+        const rawMsg = msg as any;
+        if (rawMsg.type === 'docker:task:finalize') {
+          this.opts.onDockerTaskFinalize?.(rawMsg);
+        } else if (rawMsg.type === 'docker:task:cancel') {
+          this.opts.onDockerTaskCancel?.(rawMsg);
+        } else if (rawMsg.type === 'docker:cleanup') {
+          this.opts.onDockerCleanup?.(rawMsg);
+        }
+        break;
+      }
     }
   }
 
@@ -210,6 +266,7 @@ export class DashboardClient {
         load: loadAvg,
         activeTasks: this.activeTasks,
         capabilities: this.opts.capabilities,
+        dockerAvailable: this._dockerAvailable,
       });
     }, 10_000);
   }

@@ -82,7 +82,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // --- 3. Schedule a process restart ---
+    // --- 3. Generate SSH key pair for Git operations ---
+    try {
+      const { SshKeyService } = await import('@ai-engine/agent-runtime');
+      const sshKeyService = SshKeyService.getInstance();
+      const keyPair = await sshKeyService.ensureKeyPair();
+      console.log(`[setup] SSH key pair ready (fingerprint: ${keyPair.fingerprint})`);
+    } catch (keyErr: any) {
+      console.warn('[setup] SSH key generation failed (can be done later):', keyErr.message);
+    }
+
+    // --- 4. Schedule a process restart ---
     // Respond first, then exit. The system service (systemd/launchd) will
     // restart the process, which will read the updated .env via the wrapper
     // script.

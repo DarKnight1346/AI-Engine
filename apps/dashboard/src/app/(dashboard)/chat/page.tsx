@@ -1541,7 +1541,7 @@ export default function ChatPage() {
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionCursorPos, setMentionCursorPos] = useState(0);
-  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
+  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({ open: false, message: '', severity: 'success' });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskInfo[]>([]);
   const [activeReport, setActiveReport] = useState<ReportState | null>(null);
@@ -1552,6 +1552,10 @@ export default function ChatPage() {
   const acknowledgedTasksRef = useRef<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
   const recoverySessionRef = useRef<string | null>(null);
+  const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const hasRunningTasksRef = useRef(false);
+  const sessionIdRef = useRef<string | null>(null);
 
   // ── Report persistence helpers ──
   // Save/restore report & clarification state to sessionStorage so they
@@ -1756,28 +1760,73 @@ export default function ChatPage() {
         }
       }
 
-      // Check if the last message is from the user (AI response might be in-flight)
-      if (loaded.length > 0 && loaded[loaded.length - 1].role === 'user') {
-        const lastUserMsgTime = loaded[loaded.length - 1].timestamp.getTime();
-        const ageMs = Date.now() - lastUserMsgTime;
-        // Only poll if the user message is recent (within 10 minutes)
+      // Check if we need to set up recovery polling:
+      // 1. Last message is from user (AI response hasn't started yet)
+      // 2. Last message is from AI but is empty/very short (streaming in progress)
+      let needsRecovery = false;
+      let referenceTime = 0;
+      
+      if (loaded.length > 0) {
+        const lastMsg = loaded[loaded.length - 1];
+        const lastMsgTime = lastMsg.timestamp.getTime();
+        const ageMs = Date.now() - lastMsgTime;
+        
+        // Only poll if the message is recent (within 10 minutes)
         if (ageMs < 10 * 60 * 1000) {
-          recoverySessionRef.current = sid;
-          setSending(true);
-          // Poll in the background for the AI response
-          (async () => {
-            for (let attempt = 0; attempt < 10; attempt++) {
-              await new Promise((r) => setTimeout(r, 3000));
-              // Stop if the user navigated away from this session
-              if (recoverySessionRef.current !== sid) return;
-              try {
-                const pollRes = await fetch(`/api/chat/messages?sessionId=${sid}`);
-                const pollData = await pollRes.json();
-                const pollMsgs = pollData.messages ?? [];
-                const hasNewAi = pollMsgs.some(
-                  (m: any) => m.role === 'ai' && new Date(m.timestamp).getTime() > lastUserMsgTime
-                );
-                if (hasNewAi) {
+          if (lastMsg.role === 'user') {
+            // User message with no AI response yet
+            needsRecovery = true;
+            referenceTime = lastMsgTime;
+          } else if (lastMsg.role === 'ai') {
+            // Check if AI message appears incomplete (empty or very short with recent timestamp)
+            // Also check if there's a user message right before it (indicating a request-response pair)
+            const lastAiContent = lastMsg.content.trim();
+            const hasRecentUserMsg = loaded.length >= 2 && 
+              loaded[loaded.length - 2].role === 'user' &&
+              (lastMsgTime - loaded[loaded.length - 2].timestamp.getTime()) < 60000; // within 1 min
+            
+            if (hasRecentUserMsg && (lastAiContent.length === 0 || (lastAiContent.length < 50 && ageMs < 60000))) {
+              // Empty or very short AI response that's recent - likely still streaming
+              needsRecovery = true;
+              referenceTime = lastMsgTime;
+            }
+          }
+        }
+      }
+
+      if (needsRecovery) {
+        recoverySessionRef.current = sid;
+        setSending(true);
+        setSnack({
+          open: true,
+          message: 'Recovering agent response...',
+          severity: 'info',
+        });
+        // Poll in the background for updates to the AI response.
+        // We track the content length across consecutive polls so we can
+        // detect when the backend has finished writing (content stabilises).
+        (async () => {
+          let lastSeenLength = loaded[loaded.length - 1]?.content?.length ?? 0;
+          let stableCount = 0; // consecutive polls where content didn't grow
+
+          for (let attempt = 0; attempt < 30; attempt++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            // Stop if the user navigated away from this session
+            if (recoverySessionRef.current !== sid) return;
+            try {
+              const pollRes = await fetch(`/api/chat/messages?sessionId=${sid}`);
+              const pollData = await pollRes.json();
+              const pollMsgs = pollData.messages ?? [];
+
+              // Find the latest AI message in the response
+              const pollLastAi = [...pollMsgs].reverse().find((m: any) => m.role === 'ai');
+
+              if (pollLastAi) {
+                const currentLength = (pollLastAi.content ?? '').length;
+                const hasGrown = currentLength > lastSeenLength;
+
+                if (hasGrown || currentLength > 0) {
+                  // Content has appeared or grown — update the UI
                   if (recoverySessionRef.current !== sid) return;
                   const refreshed = pollMsgs.map((m: any) => ({
                     id: m.id,
@@ -1792,22 +1841,35 @@ export default function ChatPage() {
                       url: a.url,
                       size: a.size ?? 0,
                     })),
+                    reportData: m.reportData ?? undefined,
                   }));
                   setMessages(refreshed);
                   setContextTokens(estimateTokensFromMessages(refreshed));
+                }
+
+                // Track stability: if content hasn't grown for 3 consecutive
+                // polls (~6 seconds) and we have some content, consider it done.
+                if (currentLength > 0 && !hasGrown) {
+                  stableCount++;
+                } else {
+                  stableCount = 0;
+                }
+                lastSeenLength = currentLength;
+
+                if (stableCount >= 3) {
                   setSending(false);
                   recoverySessionRef.current = null;
                   return;
                 }
-              } catch { /* polling error — retry */ }
-            }
-            // Timed out after ~30s — stop gracefully
-            if (recoverySessionRef.current === sid) {
-              setSending(false);
-              recoverySessionRef.current = null;
-            }
-          })();
-        }
+              }
+            } catch { /* polling error — retry */ }
+          }
+          // Timed out after ~60s — stop gracefully
+          if (recoverySessionRef.current === sid) {
+            setSending(false);
+            recoverySessionRef.current = null;
+          }
+        })();
       }
     } catch {
       setMessages([]);
@@ -1826,10 +1888,21 @@ export default function ChatPage() {
         setBackgroundTasks(tasks);
         // Pre-acknowledge tasks that are already completed so we don't
         // re-inject their messages (they're already in the DB)
+        const runningTasks = [];
         for (const task of tasks) {
           if (task.status === 'completed' || task.status === 'failed') {
             acknowledgedTasksRef.current.add(task.id);
+          } else if (task.status === 'running') {
+            runningTasks.push(task);
           }
+        }
+        // Notify user if there are running background tasks
+        if (runningTasks.length > 0) {
+          setSnack({
+            open: true,
+            message: `${runningTasks.length} background task${runningTasks.length > 1 ? 's' : ''} still running...`,
+            severity: 'info',
+          });
         }
       } else {
         setBackgroundTasks([]);
@@ -1847,6 +1920,14 @@ export default function ChatPage() {
     // Abort any in-flight stream or recovery polling
     abortRef.current?.abort();
     abortRef.current = null;
+    if (readerRef.current) {
+      readerRef.current.cancel().catch(() => {});
+      readerRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
     recoverySessionRef.current = null;
     setSending(false);
 
@@ -1863,6 +1944,14 @@ export default function ChatPage() {
   const startNewConversation = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    if (readerRef.current) {
+      readerRef.current.cancel().catch(() => {});
+      readerRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
     recoverySessionRef.current = null;
     setSending(false);
 
@@ -2012,6 +2101,10 @@ export default function ChatPage() {
 
     // Abort any previous stream
     abortRef.current?.abort();
+    if (readerRef.current) {
+      readerRef.current.cancel().catch(() => {});
+      readerRef.current = null;
+    }
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -2045,6 +2138,7 @@ export default function ChatPage() {
 
       const reader = res.body?.getReader();
       if (!reader) throw new Error('No response body');
+      readerRef.current = reader;
 
       const decoder = new TextDecoder();
       let buffer = '';
@@ -2052,246 +2146,256 @@ export default function ChatPage() {
       let receivedDone = false;
       let streamSessionId: string | null = null;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
 
-        for (const line of lines) {
-          const trimmed = line.trim();
+          for (const line of lines) {
+            const trimmed = line.trim();
 
-          if (trimmed.startsWith(':')) continue;
-          if (trimmed.startsWith('event: ')) {
-            currentEventType = trimmed.slice(7).trim();
-            continue;
-          }
-          if (!trimmed) { currentEventType = ''; continue; }
-          if (!trimmed.startsWith('data: ')) continue;
-
-          try {
-            const data = JSON.parse(trimmed.slice(6));
-
-            // Resolve the slot (for multi-agent, events carry a `slot` field)
-            const slot: string = data.slot ?? '__default__';
-
-            switch (currentEventType) {
-              case 'session':
-                if (data.sessionId) {
-                  streamSessionId = data.sessionId;
-                  setSessionId(data.sessionId);
-                  loadSessions();
-                }
-                break;
-
-              case 'agent_start': {
-                // Backend tells us which agent is responding in this slot.
-                // If we have a __default__ placeholder, rebind it.
-                const agentName = data.agentName || 'AI Engine';
-                if (slot === '__default__' && slotMessages.has('__default__')) {
-                  // Rename the default slot
-                  const msgId = slotMessages.get('__default__')!;
-                  slotMessages.delete('__default__');
-                  slotMessages.set(slot, msgId);
-                  slotContent.delete('__default__');
-                  slotContent.set(slot, '');
-                  setMessages((prev) => prev.map((m) =>
-                    m.id === msgId ? { ...m, agentName } : m
-                  ));
-                } else if (!slotMessages.has(slot)) {
-                  // New agent slot (was auto-classified) — create a new placeholder
-                  const msgId = crypto.randomUUID();
-                  slotMessages.set(slot, msgId);
-                  slotContent.set(slot, '');
-                  setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
-                } else {
-                  // Update name on an existing slot
-                  const msgId = slotMessages.get(slot)!;
-                  setMessages((prev) => prev.map((m) =>
-                    m.id === msgId ? { ...m, agentName } : m
-                  ));
-                }
-                break;
-              }
-
-              case 'token': {
-                const msgId = slotMessages.get(slot);
-                if (msgId) {
-                  const prev = slotContent.get(slot) ?? '';
-                  const next = prev + data.text;
-                  slotContent.set(slot, next);
-                  setMessages((msgs) => msgs.map((m) =>
-                    m.id === msgId ? { ...m, content: next } : m
-                  ));
-                }
-                break;
-              }
-
-              case 'background_task': {
-                // A long-running tool was started in the background
-                const newTask: BackgroundTaskInfo = {
-                  id: data.taskId,
-                  sessionId: sessionId ?? '',
-                  toolName: data.toolName,
-                  description: data.toolName === 'xaiGenerateVideo' ? 'Generating video' : `Running ${data.toolName}`,
-                  status: 'running',
-                  startedAt: new Date().toISOString(),
-                };
-                setBackgroundTasks((prev) => [...prev, newTask]);
-                break;
-              }
-
-              case 'tool':
-              case 'status':
-                break;
-
-              // ── Orchestration / sub-agent events ──
-
-              case 'clarification_request': {
-                const questions = data.questions ?? [];
-                setClarification({
-                  questions,
-                  answers: {},
-                  submitted: false,
-                });
-                break;
-              }
-
-              case 'report_outline': {
-                const sections: ReportSectionState[] = (data.sections ?? []).map((s: any) => ({
-                  id: s.id,
-                  title: s.title,
-                  status: 'pending' as const,
-                  tier: s.tier,
-                }));
-                setActiveReport({
-                  title: data.title ?? 'Report',
-                  sections,
-                  completed: 0,
-                  total: sections.length,
-                });
-                break;
-              }
-
-              case 'report_section_stream': {
-                // Incremental token from a sub-agent — append to the section's content
-                setActiveReport((prev) => {
-                  if (!prev) return prev;
-                  const sections = prev.sections.map((s) =>
-                    s.id === data.sectionId
-                      ? { ...s, content: (s.content ?? '') + (data.text ?? '') }
-                      : s
-                  );
-                  return { ...prev, sections };
-                });
-                break;
-              }
-
-              case 'report_section_update': {
-                setActiveReport((prev) => {
-                  if (!prev) return prev;
-                  const sections = prev.sections.map((s) =>
-                    s.id === data.sectionId
-                      ? { ...s, status: data.status as ReportSectionState['status'], content: data.content ?? s.content, tier: data.tier ?? s.tier }
-                      : s
-                  );
-                  const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
-                  const updated = { ...prev, sections, completed };
-                  // Persist when sections complete so report survives navigation
-                  if (data.status === 'complete' || data.status === 'failed') {
-                    try { if (streamSessionId) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(updated)); } catch {}
-                  }
-                  return updated;
-                });
-                break;
-              }
-
-              case 'report_section_added': {
-                setActiveReport((prev) => {
-                  if (!prev) return prev;
-                  const newSection: ReportSectionState = {
-                    id: data.section.id,
-                    title: data.section.title,
-                    status: 'complete',
-                    content: data.section.content,
-                  };
-                  return {
-                    ...prev,
-                    sections: [...prev.sections, newSection],
-                    total: prev.total + 1,
-                    completed: prev.completed + 1,
-                  };
-                });
-                break;
-              }
-
-              case 'subtask_complete': {
-                // Already handled by report_section_update, but we can update the count
-                setActiveReport((prev) => {
-                  if (!prev) return prev;
-                  return { ...prev, completed: data.completed ?? prev.completed };
-                });
-                break;
-              }
-
-              case 'done': {
-                receivedDone = true;
-                const msgId = slotMessages.get(slot);
-                if (msgId) {
-                  // Attach report data to the message so it persists with the message
-                  setActiveReport((curReport) => {
-                    setMessages((msgs) => msgs.map((m) =>
-                      m.id === msgId
-                        ? { ...m, content: data.content, agentName: data.agentName || m.agentName, reportData: curReport ?? undefined }
-                        : m
-                    ));
-                    // Persist to sessionStorage for quick restore
-                    if (curReport && streamSessionId) {
-                      try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(curReport)); } catch {}
-                    }
-                    // Also save report to DB by updating the message's metadata
-                    if (curReport && streamSessionId) {
-                      fetch('/api/chat/messages/metadata', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ sessionId: streamSessionId, reportData: curReport }),
-                      }).catch(() => { /* fire-and-forget */ });
-                    }
-                    return curReport;
-                  });
-                } else {
-                  // Persist report state
-                  setActiveReport((cur) => {
-                    if (cur && streamSessionId) {
-                      try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(cur)); } catch {}
-                    }
-                    return cur;
-                  });
-                }
-                if (data.usage) {
-                  const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
-                  if (totalUsed > 0) setContextTokens((prev) => Math.max(prev, totalUsed));
-                }
-                break;
-              }
-
-              case 'error': {
-                receivedDone = true; // Error is also a terminal event
-                const msgId = slotMessages.get(slot);
-                if (msgId) {
-                  setMessages((msgs) => msgs.map((m) =>
-                    m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
-                  ));
-                }
-                break;
-              }
+            if (trimmed.startsWith(':')) continue;
+            if (trimmed.startsWith('event: ')) {
+              currentEventType = trimmed.slice(7).trim();
+              continue;
             }
-          } catch {
-            // Skip unparseable lines
+            if (!trimmed) { currentEventType = ''; continue; }
+            if (!trimmed.startsWith('data: ')) continue;
+
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+
+              // Resolve the slot (for multi-agent, events carry a `slot` field)
+              const slot: string = data.slot ?? '__default__';
+
+              switch (currentEventType) {
+                case 'session':
+                  if (data.sessionId) {
+                    streamSessionId = data.sessionId;
+                    setSessionId(data.sessionId);
+                    loadSessions();
+                  }
+                  break;
+
+                case 'agent_start': {
+                  // Backend tells us which agent is responding in this slot.
+                  // If we have a __default__ placeholder, rebind it.
+                  const agentName = data.agentName || 'AI Engine';
+                  if (slot === '__default__' && slotMessages.has('__default__')) {
+                    // Rename the default slot
+                    const msgId = slotMessages.get('__default__')!;
+                    slotMessages.delete('__default__');
+                    slotMessages.set(slot, msgId);
+                    slotContent.delete('__default__');
+                    slotContent.set(slot, '');
+                    setMessages((prev) => prev.map((m) =>
+                      m.id === msgId ? { ...m, agentName } : m
+                    ));
+                  } else if (!slotMessages.has(slot)) {
+                    // New agent slot (was auto-classified) — create a new placeholder
+                    const msgId = crypto.randomUUID();
+                    slotMessages.set(slot, msgId);
+                    slotContent.set(slot, '');
+                    setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
+                  } else {
+                    // Update name on an existing slot
+                    const msgId = slotMessages.get(slot)!;
+                    setMessages((prev) => prev.map((m) =>
+                      m.id === msgId ? { ...m, agentName } : m
+                    ));
+                  }
+                  break;
+                }
+
+                case 'token': {
+                  const msgId = slotMessages.get(slot);
+                  if (msgId) {
+                    const prev = slotContent.get(slot) ?? '';
+                    const next = prev + data.text;
+                    slotContent.set(slot, next);
+                    setMessages((msgs) => msgs.map((m) =>
+                      m.id === msgId ? { ...m, content: next } : m
+                    ));
+                  }
+                  break;
+                }
+
+                case 'background_task': {
+                  // A long-running tool was started in the background
+                  const newTask: BackgroundTaskInfo = {
+                    id: data.taskId,
+                    sessionId: sessionId ?? '',
+                    toolName: data.toolName,
+                    description: data.toolName === 'xaiGenerateVideo' ? 'Generating video' : `Running ${data.toolName}`,
+                    status: 'running',
+                    startedAt: new Date().toISOString(),
+                  };
+                  setBackgroundTasks((prev) => [...prev, newTask]);
+                  break;
+                }
+
+                case 'tool':
+                case 'status':
+                  break;
+
+                // ── Orchestration / sub-agent events ──
+
+                case 'clarification_request': {
+                  const questions = data.questions ?? [];
+                  setClarification({
+                    questions,
+                    answers: {},
+                    submitted: false,
+                  });
+                  break;
+                }
+
+                case 'report_outline': {
+                  const sections: ReportSectionState[] = (data.sections ?? []).map((s: any) => ({
+                    id: s.id,
+                    title: s.title,
+                    status: 'pending' as const,
+                    tier: s.tier,
+                  }));
+                  setActiveReport({
+                    title: data.title ?? 'Report',
+                    sections,
+                    completed: 0,
+                    total: sections.length,
+                  });
+                  break;
+                }
+
+                case 'report_section_stream': {
+                  // Incremental token from a sub-agent — append to the section's content
+                  setActiveReport((prev) => {
+                    if (!prev) return prev;
+                    const sections = prev.sections.map((s) =>
+                      s.id === data.sectionId
+                        ? { ...s, content: (s.content ?? '') + (data.text ?? '') }
+                        : s
+                    );
+                    return { ...prev, sections };
+                  });
+                  break;
+                }
+
+                case 'report_section_update': {
+                  setActiveReport((prev) => {
+                    if (!prev) return prev;
+                    const sections = prev.sections.map((s) =>
+                      s.id === data.sectionId
+                        ? { ...s, status: data.status as ReportSectionState['status'], content: data.content ?? s.content, tier: data.tier ?? s.tier }
+                        : s
+                    );
+                    const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
+                    const updated = { ...prev, sections, completed };
+                    // Persist when sections complete so report survives navigation
+                    if (data.status === 'complete' || data.status === 'failed') {
+                      try { if (streamSessionId) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(updated)); } catch {}
+                    }
+                    return updated;
+                  });
+                  break;
+                }
+
+                case 'report_section_added': {
+                  setActiveReport((prev) => {
+                    if (!prev) return prev;
+                    const newSection: ReportSectionState = {
+                      id: data.section.id,
+                      title: data.section.title,
+                      status: 'complete',
+                      content: data.section.content,
+                    };
+                    return {
+                      ...prev,
+                      sections: [...prev.sections, newSection],
+                      total: prev.total + 1,
+                      completed: prev.completed + 1,
+                    };
+                  });
+                  break;
+                }
+
+                case 'subtask_complete': {
+                  // Already handled by report_section_update, but we can update the count
+                  setActiveReport((prev) => {
+                    if (!prev) return prev;
+                    return { ...prev, completed: data.completed ?? prev.completed };
+                  });
+                  break;
+                }
+
+                case 'done': {
+                  receivedDone = true;
+                  const msgId = slotMessages.get(slot);
+                  if (msgId) {
+                    // Attach report data to the message so it persists with the message
+                    setActiveReport((curReport) => {
+                      setMessages((msgs) => msgs.map((m) =>
+                        m.id === msgId
+                          ? { ...m, content: data.content, agentName: data.agentName || m.agentName, reportData: curReport ?? undefined }
+                          : m
+                      ));
+                      // Persist to sessionStorage for quick restore
+                      if (curReport && streamSessionId) {
+                        try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(curReport)); } catch {}
+                      }
+                      // Also save report to DB by updating the message's metadata
+                      if (curReport && streamSessionId) {
+                        fetch('/api/chat/messages/metadata', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ sessionId: streamSessionId, reportData: curReport }),
+                        }).catch(() => { /* fire-and-forget */ });
+                      }
+                      return curReport;
+                    });
+                  } else {
+                    // Persist report state
+                    setActiveReport((cur) => {
+                      if (cur && streamSessionId) {
+                        try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(cur)); } catch {}
+                      }
+                      return cur;
+                    });
+                  }
+                  if (data.usage) {
+                    const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
+                    if (totalUsed > 0) setContextTokens((prev) => Math.max(prev, totalUsed));
+                  }
+                  break;
+                }
+
+                case 'error': {
+                  receivedDone = true; // Error is also a terminal event
+                  const msgId = slotMessages.get(slot);
+                  if (msgId) {
+                    setMessages((msgs) => msgs.map((m) =>
+                      m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
+                    ));
+                  }
+                  break;
+                }
+              }
+            } catch {
+              // Skip unparseable lines
+            }
           }
         }
+      } finally {
+        // Always clean up the reader
+        try {
+          reader.cancel();
+        } catch {
+          // Reader already closed
+        }
+        readerRef.current = null;
       }
 
       // ── Stream ended — check if we got a proper termination ──
@@ -2410,7 +2514,17 @@ export default function ChatPage() {
 
   // Clean up streaming on unmount
   useEffect(() => {
-    return () => { abortRef.current?.abort(); };
+    return () => { 
+      abortRef.current?.abort(); 
+      if (readerRef.current) {
+        readerRef.current.cancel().catch(() => {});
+        readerRef.current = null;
+      }
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
   }, []);
 
   // ── Keyboard shortcut ──
@@ -2426,15 +2540,33 @@ export default function ChatPage() {
   }, [startNewConversation]);
 
   // ── Background task polling ──
-  // When there are running tasks, poll /api/chat/tasks every 3 seconds.
-  // On completion, inject the result message and acknowledge the task.
-  useEffect(() => {
-    const hasRunning = backgroundTasks.some((t) => t.status === 'running');
-    if (!hasRunning || !sessionId) return;
+  // Keep refs in sync so the interval callback can read current values
+  // without needing state in the dependency array.
+  hasRunningTasksRef.current = backgroundTasks.some((t) => t.status === 'running');
+  sessionIdRef.current = sessionId;
 
-    const interval = setInterval(async () => {
+  // Idempotent function: starts a polling interval if one isn't already
+  // running. The interval reads from refs so it always has fresh values
+  // and self-terminates when there are no more running tasks.
+  const ensureTaskPolling = useCallback(() => {
+    if (pollingIntervalRef.current) return; // already polling
+    if (!hasRunningTasksRef.current) return; // nothing to poll
+    if (!sessionIdRef.current) return;       // no session
+
+    pollingIntervalRef.current = setInterval(async () => {
+      const sid = sessionIdRef.current;
+
+      // Self-terminate when there's nothing left to poll
+      if (!hasRunningTasksRef.current || !sid) {
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
+        }
+        return;
+      }
+
       try {
-        const res = await fetch(`/api/chat/tasks?sessionId=${sessionId}`);
+        const res = await fetch(`/api/chat/tasks?sessionId=${sid}`);
         if (!res.ok) return;
         const data = await res.json();
         const tasks: BackgroundTaskInfo[] = data.tasks ?? [];
@@ -2448,7 +2580,6 @@ export default function ChatPage() {
           ) {
             acknowledgedTasksRef.current.add(task.id);
 
-            // Inject the result as a new AI message in the chat
             const newMsg: Message = {
               id: task.messageId ?? crypto.randomUUID(),
               role: 'ai',
@@ -2465,7 +2596,6 @@ export default function ChatPage() {
               severity: task.status === 'completed' ? 'success' : 'error',
             });
 
-            // Acknowledge the task to clean it up on the server
             fetch('/api/chat/tasks', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2477,9 +2607,14 @@ export default function ChatPage() {
         // Polling errors are non-fatal
       }
     }, 3000);
+  }, []);
 
-    return () => clearInterval(interval);
-  }, [backgroundTasks, sessionId]);
+  // Whenever backgroundTasks or sessionId changes, try to ensure polling
+  // is active. ensureTaskPolling is idempotent — if an interval already
+  // exists it returns immediately, so this effect is cheap.
+  useEffect(() => {
+    ensureTaskPolling();
+  }, [backgroundTasks, sessionId, ensureTaskPolling]);
 
   /* ─── Render ────────────────────────────────────────────────────────── */
 

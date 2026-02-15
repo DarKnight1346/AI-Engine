@@ -20,6 +20,8 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import DeleteIcon from '@mui/icons-material/Delete';
 import SaveIcon from '@mui/icons-material/Save';
+import VpnKeyIcon from '@mui/icons-material/VpnKey';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import ClaudeMaxSetup from '../../../components/setup/ClaudeMaxSetup';
 
 // ---------------------------------------------------------------------------
@@ -142,6 +144,12 @@ export default function SettingsPage() {
   const [configureMessage, setConfigureMessage] = useState('');
   const [copied, setCopied] = useState(false);
 
+  // ── SSH key state ──
+  const [sshKeyInfo, setSshKeyInfo] = useState<{ publicKey: string; fingerprint: string; algorithm: string; createdAt: string; exists: boolean } | null>(null);
+  const [sshKeyLoading, setSshKeyLoading] = useState(true);
+  const [generatingKey, setGeneratingKey] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
+
   const reload = useCallback(() => {
     fetch('/api/settings')
       .then((res) => res.json())
@@ -154,8 +162,18 @@ export default function SettingsPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  const loadSshKey = useCallback(() => {
+    setSshKeyLoading(true);
+    fetch('/api/keys')
+      .then((r) => r.json())
+      .then((d) => setSshKeyInfo(d))
+      .catch(() => setSshKeyInfo(null))
+      .finally(() => setSshKeyLoading(false));
+  }, []);
+
   useEffect(() => {
     reload();
+    loadSshKey();
     const loadTunnel = () => {
       fetch('/api/tunnel/status')
         .then((r) => r.json())
@@ -166,7 +184,7 @@ export default function SettingsPage() {
     loadTunnel();
     const tunnelInterval = setInterval(loadTunnel, 5000);
     return () => clearInterval(tunnelInterval);
-  }, [reload]);
+  }, [reload, loadSshKey]);
 
   // Initialize edit states when data loads
   useEffect(() => {
@@ -426,6 +444,43 @@ export default function SettingsPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // ── SSH Key helpers ──
+  const handleGenerateKey = useCallback(async (overwrite = false) => {
+    setGeneratingKey(true);
+    try {
+      const endpoint = sshKeyInfo?.exists ? '/api/keys' : '/api/keys';
+      const method = sshKeyInfo?.exists ? 'POST' : 'PUT';
+      const body = sshKeyInfo?.exists ? JSON.stringify({ overwrite }) : undefined;
+      const res = await fetch(endpoint, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body,
+      });
+      const result = await res.json();
+      if (result.error && !result.exists) {
+        setSnack({ open: true, message: result.error, severity: 'error' });
+      } else if (result.exists && !overwrite) {
+        // Key exists, ask to overwrite
+        if (confirm('SSH key pair already exists. Regenerating will invalidate all deploy keys on GitHub/GitLab. Continue?')) {
+          await handleGenerateKey(true);
+        }
+      } else {
+        setSnack({ open: true, message: 'SSH key pair generated', severity: 'success' });
+        loadSshKey();
+      }
+    } catch (err: any) {
+      setSnack({ open: true, message: err.message, severity: 'error' });
+    } finally {
+      setGeneratingKey(false);
+    }
+  }, [sshKeyInfo, loadSshKey]);
+
+  const copySshKey = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setKeyCopied(true);
+    setTimeout(() => setKeyCopied(false), 2000);
+  };
+
   // ── Update helpers ──
   const checkForUpdates = useCallback(async () => {
     setCheckStatus('checking');
@@ -504,6 +559,7 @@ export default function SettingsPage() {
         <Tab label="Updates" />
         <Tab label="Account" />
         <Tab label="Security" />
+        <Tab label="Git & SSH" />
         <Tab label="About" />
       </Tabs>
 
@@ -1031,8 +1087,152 @@ export default function SettingsPage() {
         </Paper>
       )}
 
-      {/* ── Tab 6: About ── */}
+      {/* ── Tab 6: Git & SSH ── */}
       {tab === 6 && (
+        <Stack spacing={2}>
+          <Paper sx={{ p: 3 }}>
+            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+              <VpnKeyIcon color="primary" />
+              <Typography variant="h3">SSH Key Pair</Typography>
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              This SSH key pair is used for Git authentication across the dashboard and all worker nodes.
+              Add the public key below as a <strong>deploy key</strong> on your GitHub or GitLab repositories
+              to allow agents to clone, push, and merge code.
+            </Typography>
+
+            {sshKeyLoading ? (
+              <Stack spacing={1}><Skeleton width={300} /><Skeleton width={500} height={80} /></Stack>
+            ) : sshKeyInfo?.exists ? (
+              <Stack spacing={2}>
+                <Box>
+                  <Typography variant="subtitle2" gutterBottom>Public Key</Typography>
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      p: 2,
+                      bgcolor: 'action.hover',
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      wordBreak: 'break-all',
+                      position: 'relative',
+                    }}
+                  >
+                    <Typography
+                      variant="body2"
+                      sx={{ fontFamily: 'monospace', fontSize: 12, pr: 5, wordBreak: 'break-all' }}
+                    >
+                      {sshKeyInfo.publicKey}
+                    </Typography>
+                    <Tooltip title={keyCopied ? 'Copied!' : 'Copy public key'}>
+                      <IconButton
+                        size="small"
+                        onClick={() => copySshKey(sshKeyInfo.publicKey)}
+                        sx={{ position: 'absolute', top: 8, right: 8 }}
+                      >
+                        <ContentCopyIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Paper>
+                </Box>
+
+                <Stack direction="row" spacing={2} alignItems="center">
+                  <Chip label={`Algorithm: ${sshKeyInfo.algorithm.toUpperCase()}`} size="small" variant="outlined" />
+                  <Chip label={`Fingerprint: ${sshKeyInfo.fingerprint}`} size="small" variant="outlined" />
+                  <Chip
+                    label={`Created: ${new Date(sshKeyInfo.createdAt).toLocaleDateString()}`}
+                    size="small"
+                    variant="outlined"
+                  />
+                </Stack>
+
+                <Alert severity="info" variant="outlined" sx={{ fontSize: 13 }}>
+                  <strong>How to use this key:</strong><br />
+                  1. Copy the public key above<br />
+                  2. Go to your Git hosting provider (GitHub, GitLab, Bitbucket)<br />
+                  3. Add it as a <strong>Deploy Key</strong> with write access<br />
+                  4. All worker nodes automatically receive this key when they connect
+                </Alert>
+
+                <Divider />
+
+                <Button
+                  variant="outlined"
+                  color="warning"
+                  startIcon={generatingKey ? <CircularProgress size={16} /> : <RefreshIcon />}
+                  onClick={() => handleGenerateKey(false)}
+                  disabled={generatingKey}
+                  sx={{ alignSelf: 'flex-start' }}
+                >
+                  {generatingKey ? 'Generating...' : 'Regenerate Key Pair'}
+                </Button>
+                <Typography variant="caption" color="text.secondary">
+                  Regenerating will invalidate all existing deploy keys. You will need to re-add the new public key to your Git hosting.
+                </Typography>
+              </Stack>
+            ) : (
+              <Stack spacing={2}>
+                <Alert severity="warning">
+                  No SSH key pair has been generated yet. Generate one to enable Git operations for project builds.
+                </Alert>
+                <Button
+                  variant="contained"
+                  startIcon={generatingKey ? <CircularProgress size={16} /> : <VpnKeyIcon />}
+                  onClick={() => handleGenerateKey(false)}
+                  disabled={generatingKey}
+                  sx={{ alignSelf: 'flex-start' }}
+                >
+                  {generatingKey ? 'Generating...' : 'Generate SSH Key Pair'}
+                </Button>
+              </Stack>
+            )}
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>Worker Key Distribution</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              The SSH key pair is automatically distributed to worker nodes when they connect to the dashboard.
+              This ensures all workers can authenticate with Git without individual configuration.
+            </Typography>
+            <Stack spacing={1}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CheckCircleIcon color="success" fontSize="small" />
+                <Typography variant="body2">Keys are sent over the encrypted WebSocket connection</Typography>
+              </Stack>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CheckCircleIcon color="success" fontSize="small" />
+                <Typography variant="body2">Workers store keys locally for Git operations</Typography>
+              </Stack>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CheckCircleIcon color="success" fontSize="small" />
+                <Typography variant="body2">Docker containers receive keys as read-only volume mounts</Typography>
+              </Stack>
+            </Stack>
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>Project Git Repositories</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              When a project transitions from planning to building, a Git repository is automatically created.
+              Each task runs in its own Docker container with a dedicated branch. Changes are merged back to main on completion.
+            </Typography>
+            <Stack spacing={1}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Typography variant="body2"><strong>Repo location:</strong> <code>~/.ai-engine/projects/&lt;project-id&gt;/repo.git</code></Typography>
+              </Stack>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Typography variant="body2"><strong>Branch strategy:</strong> One branch per task, merged to main on completion</Typography>
+              </Stack>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Typography variant="body2"><strong>Isolation:</strong> Each task runs in a Docker container to prevent dependency conflicts</Typography>
+              </Stack>
+            </Stack>
+          </Paper>
+        </Stack>
+      )}
+
+      {/* ── Tab 7: About ── */}
+      {tab === 7 && (
         <Paper sx={{ p: 3 }}>
           {loading ? (
             <Stack spacing={1}><Skeleton width={200} /><Skeleton width={200} /><Skeleton width={200} /></Stack>

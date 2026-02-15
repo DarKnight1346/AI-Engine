@@ -120,13 +120,16 @@ export interface WorkerConfig {
 /** Messages a worker sends to the dashboard. */
 export type WorkerWsMessage =
   | { type: 'auth'; token: string }
-  | { type: 'heartbeat'; load: number; activeTasks: number; capabilities: NodeCapabilities }
+  | { type: 'heartbeat'; load: number; activeTasks: number; capabilities: NodeCapabilities; dockerAvailable?: boolean }
   | { type: 'task:complete'; taskId: string; output: string; tokensUsed: number; durationMs: number }
   | { type: 'task:failed'; taskId: string; error: string }
   | { type: 'tool:result'; callId: string; success: boolean; output: string }
   | { type: 'agent:call'; callId: string; fromAgentId: string; targetAgentId: string; input: string }
   | { type: 'agent:response'; callId: string; output: string; error?: string }
-  | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; taskId?: string };
+  | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; taskId?: string }
+  | { type: 'keys:received'; fingerprint: string }
+  | { type: 'docker:status'; containerId: string; taskId: string; status: DockerContainerStatus; output?: string }
+  | { type: 'docker:task:complete'; taskId: string; result: DockerTaskResult };
 
 /** Messages the dashboard sends to a worker. */
 export type DashboardWsMessage =
@@ -138,7 +141,10 @@ export type DashboardWsMessage =
   | { type: 'agent:call'; callId: string; fromAgentId: string; input: string; agentConfig: Record<string, unknown> }
   | { type: 'agent:response'; callId: string; output: string; error?: string }
   | { type: 'config:update'; config: Record<string, unknown> }
-  | { type: 'update:available'; version: string; bundleUrl: string };
+  | { type: 'update:available'; version: string; bundleUrl: string }
+  | { type: 'keys:sync'; publicKey: string; privateKey: string; fingerprint: string }
+  | { type: 'docker:task:assign'; taskId: string; projectId: string; agentId: string; containerConfig: DockerContainerConfig; taskPrompt: string; repoUrl: string }
+  | { type: 'docker:task:cancel'; taskId: string; containerId: string };
 
 // ============================================================
 // Config
@@ -526,6 +532,141 @@ export interface TaskGraphNode {
 }
 
 // ============================================================
+// Projects (Swarm Agent Execution)
+// ============================================================
+export type ProjectStatus = 'planning' | 'building' | 'qa' | 'completed' | 'failed' | 'paused';
+export type ProjectTaskStatus = 'pending' | 'locked' | 'in_progress' | 'completed' | 'failed' | 'blocked';
+export type ProjectTaskType = 'feature' | 'bugfix' | 'test' | 'qa' | 'documentation';
+export type ProjectAgentStatus = 'idle' | 'working' | 'waiting' | 'stopped';
+export type ProjectAgentRole = 'general' | 'qa' | 'documentation' | 'code_quality' | 'architecture';
+export type ProjectIterationPhase = 'build' | 'qa' | 'revision';
+export type ProjectIterationStatus = 'in_progress' | 'completed' | 'failed';
+export type ProjectLogLevel = 'info' | 'warn' | 'error' | 'success';
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  prd: string | null;
+  status: ProjectStatus;
+  config: ProjectConfig;
+  planningSessionId: string | null;
+  teamId: string | null;
+  createdByUserId: string;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ProjectConfig {
+  planningModel?: string; // Model for PRD generation
+  executionModel?: string; // Model for task execution
+  maxAgents?: number; // Maximum parallel agents
+  autoQA?: boolean;
+  testingStrategy?: 'unit' | 'integration' | 'e2e' | 'all';
+  /** Git repository configuration for this project */
+  git?: {
+    repoPath: string; // Local bare repo path
+    remoteUrl?: string; // Optional remote (GitHub/GitLab) URL
+    defaultBranch: string; // Default branch (e.g., 'main')
+  };
+  /** Docker container configuration for task execution */
+  docker?: {
+    image: string; // Docker image for workers
+    memoryLimit?: string; // e.g., '4g'
+    cpuLimit?: string; // e.g., '2.0'
+  };
+  [key: string]: unknown;
+}
+
+export interface ProjectTask {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  taskType: ProjectTaskType;
+  status: ProjectTaskStatus;
+  priority: number; // 1-10
+  dependencies: string[]; // Array of task IDs
+  assignedAgentId: string | null;
+  lockedBy: string | null;
+  lockedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  result: string | null;
+  errorMessage: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ProjectAgent {
+  id: string;
+  projectId: string;
+  agentId: string;
+  nodeId: string | null;
+  role: ProjectAgentRole;
+  status: ProjectAgentStatus;
+  currentTask: string | null;
+  contextId: string | null;
+  statsJson: ProjectAgentStats;
+  startedAt: Date;
+  lastActiveAt: Date;
+}
+
+export interface ProjectAgentStats {
+  tasksCompleted: number;
+  tasksFailed: number;
+  tokensUsed: { input: number; output: number };
+  averageTaskDuration: number;
+}
+
+export interface ProjectIteration {
+  id: string;
+  projectId: string;
+  iteration: number;
+  phase: ProjectIterationPhase;
+  status: ProjectIterationStatus;
+  summary: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+}
+
+export interface ProjectLog {
+  id: string;
+  projectId: string;
+  agentId: string | null;
+  taskId: string | null;
+  level: ProjectLogLevel;
+  message: string;
+  metadata: Record<string, unknown> | null;
+  timestamp: Date;
+}
+
+export interface ProjectConversation {
+  id: string;
+  projectId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
+}
+
+export type ProjectAttachmentType = 'image' | 'pdf' | 'document' | 'other';
+
+export interface ProjectAttachment {
+  id: string;
+  projectId: string;
+  filename: string;
+  mimeType: string;
+  fileSize: number;
+  storageUrl: string;
+  attachmentType: ProjectAttachmentType;
+  analysis: Record<string, unknown> | null;
+  uploadedAt: Date;
+}
+
+// ============================================================
 // File Sync
 // ============================================================
 export interface NodeFile {
@@ -659,6 +800,93 @@ export interface WebSearchOptions {
   location?: string;
   /** Time filter: 'qdr:h' (hour), 'qdr:d' (day), 'qdr:w' (week), 'qdr:m' (month), 'qdr:y' (year) */
   tbs?: string;
+}
+
+// ============================================================
+// SSH Keys & Git
+// ============================================================
+export interface SshKeyPair {
+  publicKey: string;
+  privateKey: string;
+  fingerprint: string;
+  algorithm: 'ed25519' | 'rsa';
+  createdAt: Date;
+}
+
+export interface SshKeyInfo {
+  publicKey: string;
+  fingerprint: string;
+  algorithm: string;
+  createdAt: string;
+  exists: boolean;
+}
+
+export interface GitRepoConfig {
+  /** Local bare repo path on the dashboard host */
+  localPath: string;
+  /** Remote URL if pushed to GitHub/GitLab (optional) */
+  remoteUrl: string | null;
+  /** Default branch name */
+  defaultBranch: string;
+  /** SSH key fingerprint used for authentication */
+  sshKeyFingerprint: string;
+}
+
+export interface ProjectGitInfo {
+  projectId: string;
+  repoPath: string;
+  remoteUrl: string | null;
+  defaultBranch: string;
+  branches: string[];
+  lastCommit: string | null;
+  createdAt: string;
+}
+
+// ============================================================
+// Docker Task Execution
+// ============================================================
+export type DockerContainerStatus = 'creating' | 'running' | 'stopped' | 'removing' | 'removed' | 'failed';
+
+export interface DockerContainerConfig {
+  /** Docker image to use (e.g., 'ai-engine-worker:latest') */
+  image: string;
+  /** Project repo path to mount as volume */
+  repoPath: string;
+  /** Working directory inside the container */
+  workDir: string;
+  /** Git branch name for this task */
+  branchName: string;
+  /** Environment variables to inject */
+  envVars: Record<string, string>;
+  /** Memory limit (e.g., '2g') */
+  memoryLimit?: string;
+  /** CPU limit (e.g., '2.0') */
+  cpuLimit?: string;
+  /** Additional volume mounts */
+  extraMounts?: Array<{ hostPath: string; containerPath: string; readOnly?: boolean }>;
+}
+
+export interface DockerContainerInfo {
+  containerId: string;
+  containerName: string;
+  projectId: string;
+  taskId: string;
+  status: DockerContainerStatus;
+  branchName: string;
+  createdAt: string;
+  startedAt: string | null;
+  stoppedAt: string | null;
+}
+
+export interface DockerTaskResult {
+  containerId: string;
+  taskId: string;
+  branchName: string;
+  exitCode: number;
+  merged: boolean;
+  output: string;
+  filesChanged: number;
+  commitsCreated: number;
 }
 
 // ============================================================

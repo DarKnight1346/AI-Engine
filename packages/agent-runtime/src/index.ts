@@ -20,3 +20,16 @@ export type { MetaToolOptions, ClarificationQuestion } from './tools/meta-tools.
 // Sub-agent / orchestration exports
 export { executeDag, runSubAgent, Blackboard, Semaphore, autoSelectTier, topologicalSort } from './sub-agent.js';
 export type { SubAgentTask, SubAgentResult, SubAgentOptions, DagProgressCallback } from './sub-agent.js';
+
+// Project orchestration for swarm agents
+export { ProjectOrchestrator } from './project-orchestrator.js';
+
+// Planning mode tools
+export { createPlanningTools, getPlanningModeSystemPrompt } from './planning-tools.js';
+
+// Services
+export { SshKeyService } from './services/ssh-key-service.js';
+export { GitService } from './services/git-service.js';
+// DockerService is used by WORKERS only (containers run on worker machines, not the dashboard).
+// Workers import it directly: import { DockerService } from '@ai-engine/agent-runtime';
+export { DockerService } from './services/docker-service.js';

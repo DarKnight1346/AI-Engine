@@ -1,0 +1,34 @@
+---
+description: Never create markdown files unless explicitly requested
+alwaysApply: true
+---
+
+# No Markdown Files
+
+**CRITICAL: Do not create markdown files (.md) in this project unless the user explicitly asks for them.**
+
+## Rules
+
+1. **Never create README.md, CHANGELOG.md, or any .md files proactively**
+2. **Never create documentation files (.md) as part of completing a task**
+3. **Only create .md files if the user explicitly says "create a markdown file" or "create README.md"**
+4. **Never attempt to create a .txt file instead of a .md file. We should never use documentation files**
+
+## Examples
+
+❌ **BAD - Do NOT do this:**
+```
+Creating README.md for your new project...
+Creating CHANGELOG.md to track changes...
+Adding documentation in docs/api.md...
+```
+
+✅ **GOOD - Only create when explicitly requested:**
+```
+User: "Create a README.md for this project"
+Assistant: *Creates README.md*
+```
+
+## Rationale
+
+This project prefers to avoid markdown file pollution. Documentation should be in code comments, JSDoc, or other formats unless specifically requested.

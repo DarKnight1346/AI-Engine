@@ -2,6 +2,7 @@ generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
   binaryTargets   = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+  output          = "../../../node_modules/.prisma/client"
 }
 
 datasource db {
@@ -479,6 +480,143 @@ model PlanningTaskGraph {
   session PlanningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@map("planning_task_graphs")
+}
+
+// ============================================================
+// Projects (Swarm Agent Execution)
+// ============================================================
+model Project {
+  id               String   @id @default(uuid())
+  name             String
+  description      String?
+  prd              String?  // Product Requirements Document
+  status           String   @default("planning") // planning | building | qa | completed | failed | paused
+  config           Json     @default("{}") // Project configuration (models, settings, etc.)
+  planningSessionId String? @map("planning_session_id")
+  teamId           String?  @map("team_id")
+  createdByUserId  String   @map("created_by_user_id")
+  startedAt        DateTime? @map("started_at")
+  completedAt      DateTime? @map("completed_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
+
+  tasks         ProjectTask[]
+  agents        ProjectAgent[]
+  iterations    ProjectIteration[]
+  logs          ProjectLog[]
+  conversations ProjectConversation[]
+  attachments   ProjectAttachment[]
+
+  @@index([status, createdAt])
+  @@map("projects")
+}
+
+model ProjectConversation {
+  id        String   @id @default(uuid())
+  projectId String   @map("project_id")
+  role      String   // user | assistant
+  content   String   @db.Text
+  metadata  Json?    // Store attachments references, analysis results, etc.
+  createdAt DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@map("project_conversations")
+}
+
+model ProjectAttachment {
+  id          String   @id @default(uuid())
+  projectId   String   @map("project_id")
+  filename    String
+  mimeType    String   @map("mime_type")
+  fileSize    BigInt   @map("file_size")
+  storageUrl  String   @map("storage_url") // S3/local file path
+  attachmentType String @map("attachment_type") // image | pdf | document | other
+  analysis    Json?    // Store vision/PDF analysis results
+  uploadedAt  DateTime @default(now()) @map("uploaded_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, uploadedAt])
+  @@map("project_attachments")
+}
+
+model ProjectTask {
+  id              String   @id @default(uuid())
+  projectId       String   @map("project_id")
+  title           String
+  description     String
+  taskType        String   @map("task_type") // feature | bugfix | test | qa | documentation
+  status          String   @default("pending") // pending | locked | in_progress | completed | failed | blocked
+  priority        Int      @default(5) // 1-10
+  dependencies    Json     @default("[]") // Array of task IDs this depends on
+  assignedAgentId String?  @map("assigned_agent_id")
+  lockedBy        String?  @map("locked_by") // Agent ID that has locked this task
+  lockedAt        DateTime? @map("locked_at")
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  result          String?  // Result/output from task completion
+  errorMessage    String?  @map("error_message")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@index([lockedBy, lockedAt])
+  @@map("project_tasks")
+}
+
+model ProjectAgent {
+  id          String   @id @default(uuid())
+  projectId   String   @map("project_id")
+  agentId     String   @map("agent_id")
+  nodeId      String?  @map("node_id")
+  role        String   @default("general") @map("role") // general | qa | documentation | code_quality | architecture
+  status      String   @default("idle") // idle | working | waiting | stopped
+  currentTask String?  @map("current_task") // Current task ID
+  contextId   String?  @map("context_id") // Unique context window ID for this agent
+  statsJson   Json     @default("{}") @map("stats_json") // Agent stats (tokens, tasks completed, etc.)
+  startedAt   DateTime @default(now()) @map("started_at")
+  lastActiveAt DateTime @default(now()) @map("last_active_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+  @@map("project_agents")
+}
+
+model ProjectIteration {
+  id          String   @id @default(uuid())
+  projectId   String   @map("project_id")
+  iteration   Int      // Iteration number (1, 2, 3...)
+  phase       String   // build | qa | revision
+  status      String   @default("in_progress") // in_progress | completed | failed
+  summary     String?  // Summary of what was accomplished
+  startedAt   DateTime @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, iteration])
+  @@map("project_iterations")
+}
+
+model ProjectLog {
+  id          String   @id @default(uuid())
+  projectId   String   @map("project_id")
+  agentId     String?  @map("agent_id")
+  taskId      String?  @map("task_id")
+  level       String   // info | warn | error | success
+  message     String
+  metadata    Json?    // Additional structured data
+  timestamp   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, timestamp])
+  @@map("project_logs")
 }
 
 // ============================================================

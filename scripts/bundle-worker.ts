@@ -8,6 +8,7 @@
 //   - apps/worker/dist/            (compiled worker code)
 //   - packages/<name>/dist/        (compiled workspace packages)
 //   - packages/<name>/package.json (for workspace resolution, trimmed of non-bundled deps)
+//   - packages/db/                 (stub — satisfies imports without needing Prisma)
 //   - package.json                 (root — external dependencies only)
 //   - pnpm-workspace.yaml          (generated — lists only bundled packages)
 //   - start-worker.sh              (entry point)
@@ -43,10 +44,11 @@ function main() {
     'memory',         // context builder, embeddings
     'agent-runtime',  // agent execution loop, tool registry
     'browser',        // Puppeteer pool (optional, macOS only)
+    'web-search',     // search services (imported by agent-runtime/chat-executor)
   ];
 
   // Build a set of workspace package names included in the bundle so we can
-  // strip references to packages that are NOT shipped (e.g. @ai-engine/db).
+  // strip references to packages that are NOT shipped (e.g. @ai-engine/cluster).
   const bundledPkgNames = new Set<string>();
   for (const pkg of packages) {
     const pjPath = join(ROOT, 'packages', pkg, 'package.json');
@@ -62,6 +64,10 @@ function main() {
     bundledPkgNames.add(wpj.name as string);
   }
 
+  // Pre-register @ai-engine/db so its workspace:* references are preserved in
+  // the bundled package.json files. A lightweight stub is generated later (see below).
+  bundledPkgNames.add('@ai-engine/db');
+
   for (const pkg of packages) {
     const srcDir = join(ROOT, 'packages', pkg);
     const destDir = join(BUNDLE_DIR, 'packages', pkg);
@@ -74,8 +80,8 @@ function main() {
     }
 
     // Copy package.json — strip workspace dependencies that aren't in the bundle.
-    // For example, agent-runtime depends on @ai-engine/db which isn't shipped
-    // to workers. Leaving it in causes ERR_PNPM_WORKSPACE_PKG_NOT_FOUND.
+    // For example, agent-runtime depends on @ai-engine/workflow-engine which isn't
+    // shipped to workers. Leaving it in causes ERR_PNPM_WORKSPACE_PKG_NOT_FOUND.
     const pkgJsonSrc = join(srcDir, 'package.json');
     if (existsSync(pkgJsonSrc)) {
       const pj = JSON.parse(readFileSync(pkgJsonSrc, 'utf8'));
@@ -92,6 +98,43 @@ function main() {
 
     // Workers don't need Prisma/DB — skip prisma directory
   }
+
+  // --- Generate stub @ai-engine/db package ---
+  // Many bundled packages (memory, agent-runtime) import from @ai-engine/db at
+  // the top level via barrel exports. Workers never call getDb(), but Node.js
+  // ESM evaluates all re-exported modules at load time, so the import must
+  // resolve. Including the real db package would pull in @prisma/client and
+  // require `prisma generate` — too heavyweight for workers.
+  //
+  // Instead, generate a lightweight stub that satisfies the import but throws
+  // if any DB function is actually called.
+  const dbStubDir = join(BUNDLE_DIR, 'packages', 'db');
+  mkdirSync(join(dbStubDir, 'dist'), { recursive: true });
+
+  const dbStubJs = `// Stub @ai-engine/db for worker bundles — workers don't access the database.
+// This exists only so barrel-export imports resolve without crashing.
+export function getDb() {
+  throw new Error('@ai-engine/db is not available on workers. Database access is only available on the dashboard server.');
+}
+export async function disconnectDb() {}
+export class PrismaClient {
+  constructor() {
+    throw new Error('@ai-engine/db is not available on workers.');
+  }
+}
+`;
+  writeFileSync(join(dbStubDir, 'dist', 'index.js'), dbStubJs);
+
+  const dbStubPkg = {
+    name: '@ai-engine/db',
+    version: '0.1.0',
+    private: true,
+    type: 'module',
+    main: 'dist/index.js',
+  };
+  writeFileSync(join(dbStubDir, 'package.json'), JSON.stringify(dbStubPkg, null, 2));
+
+  console.log('  Generated stub @ai-engine/db (workers don\'t need database access)');
 
   // --- Copy worker app ---
   const workerSrc = join(ROOT, 'apps', 'worker');
@@ -130,6 +173,7 @@ function main() {
     'packages:',
     '  - "apps/worker"',
     ...packages.map(p => `  - "packages/${p}"`),
+    '  - "packages/db"',  // stub — satisfies workspace:* resolution
     '',
   ].join('\n');
   writeFileSync(join(BUNDLE_DIR, 'pnpm-workspace.yaml'), bundleWorkspaceYaml);

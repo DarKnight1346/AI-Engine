@@ -10,6 +10,7 @@ export { MemoryExtractor } from './memory-extractor.js';
 export type { ExtractionResult } from './memory-extractor.js';
 export { SessionSummarizer } from './session-summarizer.js';
 export type { SessionSummaryResult } from './session-summarizer.js';
+export { ProjectMemoryService } from './project-memory-service.js';
 export {
   computeEffectiveStrength,
   computeRecencyScore,
