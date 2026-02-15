@@ -275,7 +275,7 @@ export async function DELETE(request: NextRequest) {
     // If force or no references, clean up refs in parent wireframes and delete
     if (referencingWireframes.length > 0) {
       for (const parent of referencingWireframes) {
-        const elements = (Array.isArray(parent.elements) ? parent.elements : []) as WireframeElement[];
+        const elements = (Array.isArray(parent.elements) ? parent.elements : []) as unknown as WireframeElement[];
         const cleaned = elements.filter(
           (el) => !(el.type === 'wireframeRef' && el.wireframeRefId === id),
         );
