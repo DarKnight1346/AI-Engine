@@ -31,6 +31,8 @@ export interface DashboardClientOptions {
   onDockerCleanup?: (msg: any) => void;
   /** Execute a tool inside a Docker container (routed from dashboard agent) */
   onDockerToolExecute?: (msg: any) => void;
+  /** Clean up all Docker containers for a chat/agent session */
+  onDockerSessionRelease?: (msg: any) => void;
 }
 
 export class DashboardClient {
@@ -276,6 +278,10 @@ export class DashboardClient {
 
       case 'browser:session:release':
         this.opts.onBrowserSessionRelease?.(msg as any);
+        break;
+
+      case 'docker:session:release':
+        this.opts.onDockerSessionRelease?.(msg);
         break;
 
       case 'docker:task:assign':

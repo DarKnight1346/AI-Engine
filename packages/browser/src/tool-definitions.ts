@@ -29,7 +29,7 @@ export function createBrowserToolDefinitions(bt: BrowserTools): ToolDef[] {
  *
  * Usage in the worker:
  * ```ts
- * const { tools, acquire, release } = createPerTaskBrowserTools(pool, taskId);
+ * const { tools, acquire, release } = await createPerTaskBrowserTools(pool, taskId);
  * agentRunner.getToolRegistry().registerAll(tools);
  * try {
  *   await acquire();
@@ -39,19 +39,19 @@ export function createBrowserToolDefinitions(bt: BrowserTools): ToolDef[] {
  * }
  * ```
  */
-export function createPerTaskBrowserTools(
+export async function createPerTaskBrowserTools(
   pool: BrowserPool,
   taskId: string,
   options?: { persistentName?: string; timeoutMs?: number },
-): {
+): Promise<{
   tools: ToolDef[];
   acquire: () => Promise<void>;
   release: () => Promise<void>;
   browserTools: BrowserTools;
-} {
+}> {
   // Lazy-import to avoid circular deps at module level (BrowserTools is in the
   // same package, so this is fine)
-  const { BrowserTools } = require('./browser-tools.js');
+  const { BrowserTools } = await import('./browser-tools.js');
   const bt = new BrowserTools(pool) as InstanceType<typeof BrowserTools>;
 
   // Wrap every tool so it auto-acquires on first use (lazy checkout)

@@ -149,7 +149,8 @@ export type DashboardWsMessage =
   | { type: 'docker:task:finalize'; taskId: string; commitMessage: string }
   | { type: 'docker:task:cancel'; taskId: string; containerId: string }
   | { type: 'docker:cleanup'; projectId: string }
-  | { type: 'docker:tool:execute'; callId: string; taskId: string; toolName: string; input: Record<string, unknown> };
+  | { type: 'docker:tool:execute'; callId: string; taskId: string; toolName: string; input: Record<string, unknown> }
+  | { type: 'docker:session:release'; dockerSessionId: string };
 
 // ============================================================
 // Config

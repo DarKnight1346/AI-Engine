@@ -516,6 +516,24 @@ export class WorkerHub {
   }
 
   /**
+   * Release a Docker session — broadcast to ALL workers to clean up any
+   * containers created during this session.  Unlike browser sessions (which
+   * have affinity to a single worker), Docker containers may have been
+   * created on any worker, so we broadcast the cleanup to all of them.
+   */
+  releaseDockerSession(dockerSessionId: string): void {
+    if (!dockerSessionId) return;
+    for (const worker of this.workers.values()) {
+      if (worker.authenticated && worker.dockerAvailable && worker.ws.readyState === 1) {
+        this.send(worker.ws, {
+          type: 'docker:session:release',
+          dockerSessionId,
+        });
+      }
+    }
+  }
+
+  /**
    * Release a browser session on the worker that owns it.
    * Sends a message to the worker to close the browser tab and free the slot.
    * Also clears the session affinity mapping.

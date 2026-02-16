@@ -262,7 +262,7 @@ export class ClientHub {
         break;
       case 'tool_call_end':
         eventType = 'tool';
-        data = { slot, phase: 'end', name: event.name, id: event.id, success: event.success, output: event.output?.slice(0, 500) };
+        data = { slot, phase: 'end', name: event.name, id: event.id, success: event.success, output: event.output?.slice(0, 10_000) };
         break;
       case 'background_task_start':
         eventType = 'background_task';

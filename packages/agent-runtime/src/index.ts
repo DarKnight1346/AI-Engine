@@ -32,6 +32,12 @@ export type { PlanningDbClient } from './planning-tools.js';
 // Docker tools (build/SWARM mode only)
 export { createDockerTools } from './tools/docker-tools.js';
 
+// Docker chat tools (ad-hoc Docker usage in chat/agent mode)
+export { createDockerChatTools, cleanupDockerSession, getDockerSessions } from './tools/docker-chat-tools.js';
+
+// Worker-side tool implementations (shell, filesystem — registered on workers)
+export { getWorkerTools, createExecShellTool, createReadFileTool, createWriteFileTool, createListFilesTool } from './tools/worker-tools.js';
+
 // Schedule tools (agent-accessible scheduling)
 export { createScheduleTools, getScheduleToolManifest } from './tools/schedule-tools.js';
 export type { ScheduleToolsDeps } from './tools/schedule-tools.js';

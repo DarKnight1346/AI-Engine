@@ -112,7 +112,9 @@ export function getMetaToolDefinitions(options?: { includeOrchestration?: boolea
         'Search for available tools and skills by describing what you need. ' +
         'Returns a list of matching tools with names and descriptions. ' +
         'Use this BEFORE execute_tool to find the right tool for a task. ' +
-        'Example queries: "web search", "file operations", "browser automation", "financial analysis".',
+        'Example queries: "shell command execution", "web search", "file operations", "browser automation", ' +
+        '"Docker containers", "system administration". ' +
+        'TIP: Search for the CAPABILITY you need (e.g., "shell command" to run system commands like docker, git, curl).',
       inputSchema: {
         type: 'object',
         properties: {

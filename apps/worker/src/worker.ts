@@ -5,7 +5,7 @@ import { join } from 'path';
 import { execFile as execFileCb, exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import { DashboardClient } from './dashboard-client.js';
-import { EnvironmentTools } from '@ai-engine/agent-runtime';
+import { EnvironmentTools, getWorkerTools, createDockerChatTools, cleanupDockerSession, getDockerSessions } from '@ai-engine/agent-runtime';
 import type { Tool, ToolContext } from '@ai-engine/agent-runtime';
 import type { NodeCapabilities, WorkerConfig, DashboardWsMessage } from '@ai-engine/shared';
 
@@ -73,15 +73,28 @@ export class Worker {
     console.log(`[worker] Server: ${config.serverUrl}`);
     console.log(`[worker] OS: ${capabilities.os}, Browser: ${capabilities.browserCapable}`);
 
-    // Register built-in environment tools (shell, filesystem, etc.)
+    // Register built-in environment tools (datetime, system info, etc.)
     for (const tool of EnvironmentTools.getAll()) {
       this.tools.set(tool.name, tool);
     }
-    console.log(`[worker] Registered ${this.tools.size} environment tools`);
+
+    // Register worker-specific tools (shell, filesystem)
+    for (const tool of getWorkerTools()) {
+      this.tools.set(tool.name, tool);
+    }
 
     // Check Docker availability
     this.dockerAvailable = await this.detectDocker();
     console.log(`[worker] Docker: ${this.dockerAvailable ? 'available' : 'not available'}`);
+
+    // Register Docker chat tools if Docker is available
+    if (this.dockerAvailable) {
+      for (const tool of createDockerChatTools()) {
+        this.tools.set(tool.name, tool);
+      }
+    }
+
+    console.log(`[worker] Registered ${this.tools.size} tools`);
 
     // Initialise browser pool if capable.
     // Linux workers run headless; macOS workers can run headed or headless.
@@ -115,6 +128,7 @@ export class Worker {
       },
       onKeysSync: (msg) => this.handleKeysSync(msg),
       onBrowserSessionRelease: (msg) => this.handleBrowserSessionRelease(msg),
+      onDockerSessionRelease: (msg) => this.handleDockerSessionRelease(msg),
       onDockerTaskAssign: (msg) => this.handleDockerTaskAssign(msg),
       onDockerTaskFinalize: (msg) => this.handleDockerTaskFinalize(msg),
       onDockerTaskCancel: (msg) => this.handleDockerTaskCancel(msg),
@@ -132,7 +146,7 @@ export class Worker {
     console.log('[worker] Shutting down...');
     this.running = false;
 
-    // Clean up all active Docker containers
+    // Clean up all active Docker containers (project/SWARM mode)
     for (const [taskId, container] of this.activeContainers) {
       try {
         await exec(`docker rm -f ${container.containerName}`);
@@ -140,6 +154,15 @@ export class Worker {
       } catch { /* ignore */ }
     }
     this.activeContainers.clear();
+
+    // Clean up all Docker chat session containers
+    const dockerSessions = getDockerSessions();
+    for (const [sessionId] of dockerSessions) {
+      try {
+        await cleanupDockerSession(sessionId);
+        console.log(`[worker] Cleaned up Docker chat session ${sessionId} during shutdown`);
+      } catch { /* ignore */ }
+    }
 
     // Release all active browser sessions before shutting down the pool
     for (const [sessionId, session] of this.activeBrowserSessions) {
@@ -238,7 +261,7 @@ export class Worker {
     // Create a new session
     try {
       const { createPerTaskBrowserTools } = await import('@ai-engine/browser');
-      const { tools, release } = createPerTaskBrowserTools(this.browserPool, browserSessionId);
+      const { tools, release } = await createPerTaskBrowserTools(this.browserPool, browserSessionId);
 
       const toolMap = new Map<string, Tool>();
       for (const t of tools) {
@@ -284,6 +307,20 @@ export class Worker {
   ): Promise<void> {
     console.log(`[worker] Dashboard requested release of browser session ${msg.browserSessionId}`);
     await this.releaseBrowserSession(msg.browserSessionId);
+  }
+
+  /**
+   * Handle a Docker session release request from the dashboard.
+   * Cleans up all containers created during a chat/agent session.
+   */
+  private async handleDockerSessionRelease(
+    msg: { type: 'docker:session:release'; dockerSessionId: string },
+  ): Promise<void> {
+    console.log(`[worker] Dashboard requested cleanup of Docker session ${msg.dockerSessionId}`);
+    const cleaned = await cleanupDockerSession(msg.dockerSessionId);
+    if (cleaned > 0) {
+      console.log(`[worker] Cleaned up ${cleaned} Docker container(s) for session ${msg.dockerSessionId}`);
+    }
   }
 
   // -----------------------------------------------------------------------

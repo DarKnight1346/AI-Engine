@@ -322,12 +322,17 @@ export class ChatExecutor {
   }
 
   /**
-   * Release resources held by this executor (browser sessions, etc.).
-   * MUST be called when the chat session / agent execution finishes to
-   * ensure browser tabs are closed and pool slots are freed.
+   * Release resources held by this executor (browser sessions, Docker
+   * containers, etc.).  MUST be called when the chat session / agent
+   * execution finishes to ensure browser tabs are closed, Docker containers
+   * are stopped, and pool slots are freed.
    */
   public cleanup(): void {
     this.toolExecutor.releaseBrowserSession(this.browserSessionId);
+    // Docker containers created during this session are also cleaned up.
+    // We reuse the browserSessionId as the Docker session ID since both
+    // need session affinity to the same executor lifecycle.
+    this.toolExecutor.releaseDockerSession(this.browserSessionId);
   }
 
   /** Get the browser session ID tied to this executor. */
@@ -1091,7 +1096,7 @@ export class ChatExecutor {
     const workerTools: ToolManifestEntry[] = [
       {
         name: 'browser_navigate',
-        description: 'Navigate a browser to a URL for interactive web automation.',
+        description: 'Navigate a browser to a URL for interactive web automation, scraping, or testing. Opens a real browser on the worker.',
         category: 'browser',
         inputSchema: { type: 'object', properties: { url: { type: 'string' }, ...workerIdProperty }, required: ['url'] },
         executionTarget: 'worker',
@@ -1099,7 +1104,7 @@ export class ChatExecutor {
       },
       {
         name: 'browser_screenshot',
-        description: 'Take a screenshot of the current browser page.',
+        description: 'Take a screenshot of the current browser page. Captures the visible viewport as an image.',
         category: 'browser',
         inputSchema: { type: 'object', properties: { ...workerIdProperty } },
         executionTarget: 'worker',
@@ -1107,7 +1112,7 @@ export class ChatExecutor {
       },
       {
         name: 'browser_click',
-        description: 'Click an element on the page by CSS selector or text.',
+        description: 'Click an element on the page by CSS selector or text content.',
         category: 'browser',
         inputSchema: { type: 'object', properties: { selector: { type: 'string' }, ...workerIdProperty }, required: ['selector'] },
         executionTarget: 'worker',
@@ -1116,8 +1121,10 @@ export class ChatExecutor {
       {
         name: 'execShell',
         description:
-          'Execute a shell command on a worker node. Optionally specify workerId to target a specific worker, ' +
-          'or omit to auto-select the best available worker. Use listWorkers to see available workers.',
+          'Execute a shell command on a worker node. Use for ANY system command: Docker (docker ps, docker run, docker compose), ' +
+          'process management (ps, top, kill), package managers (apt, npm, pip), git, curl, file operations (ls, cat, grep, find), ' +
+          'system info (df, free, uname), networking (ping, netstat, ss), and any other CLI tool. ' +
+          'Optionally specify workerId to target a specific worker, or omit to auto-select the best available worker.',
         category: 'system',
         inputSchema: {
           type: 'object',
@@ -1130,7 +1137,8 @@ export class ChatExecutor {
       {
         name: 'readFile',
         description:
-          'Read the contents of a file from a worker node filesystem. Optionally specify workerId to target a specific worker.',
+          'Read the contents of a file from a worker node filesystem. Use for reading config files, logs, source code, ' +
+          'data files, JSON, YAML, text files, etc. Optionally specify workerId to target a specific worker.',
         category: 'filesystem',
         inputSchema: {
           type: 'object',
@@ -1143,7 +1151,8 @@ export class ChatExecutor {
       {
         name: 'writeFile',
         description:
-          'Write content to a file on a worker node filesystem. Optionally specify workerId to target a specific worker.',
+          'Write content to a file on a worker node filesystem. Use for creating or updating config files, scripts, ' +
+          'source code, data files, etc. Optionally specify workerId to target a specific worker.',
         category: 'filesystem',
         inputSchema: {
           type: 'object',
@@ -1160,12 +1169,181 @@ export class ChatExecutor {
       {
         name: 'listFiles',
         description:
-          'List files and directories at a given path on a worker node. Optionally specify workerId to target a specific worker.',
+          'List files and directories at a given path on a worker node. Browse the filesystem, see directory contents, ' +
+          'find files. Optionally specify workerId to target a specific worker.',
         category: 'filesystem',
         inputSchema: {
           type: 'object',
           properties: { path: { type: 'string', description: 'Directory path to list.' }, ...workerIdProperty },
           required: ['path'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+    ];
+
+    // ── Docker tools (chat/agent mode — full Docker management) ──
+    // Global tools work on ANY container/image. dockerRun creates managed
+    // containers (auto-cleaned) by default, or persistent ones with the flag.
+    const dockerChatTools: ToolManifestEntry[] = [
+      {
+        name: 'dockerRun',
+        description:
+          'Create and start a new Docker container on a worker node. Use for running isolated environments, ' +
+          'services, databases, build tasks, or any containerised workload. By default containers are ' +
+          'auto-cleaned when the chat ends. Set persistent=true to keep them running beyond the session. ' +
+          'Supports any Docker image (ubuntu, node, python, postgres, redis, nginx, etc.).',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            image: { type: 'string', description: 'Docker image (e.g., "ubuntu:22.04", "node:20", "postgres:16").' },
+            name: { type: 'string', description: 'Optional container name.' },
+            command: { type: 'string', description: 'Command to run. Use "sleep infinity" to keep alive for interactive use.' },
+            ports: { type: 'string', description: 'Port mapping (e.g., "8080:80"). Comma-separated for multiple.' },
+            volumes: { type: 'string', description: 'Volume mount (e.g., "/host:/container"). Comma-separated for multiple.' },
+            env: { type: 'object', description: 'Environment variables as key-value pairs.' },
+            workdir: { type: 'string', description: 'Working directory inside container.' },
+            persistent: { type: 'boolean', description: 'If true, container survives session end. Default: false.' },
+            extraArgs: { type: 'string', description: 'Extra docker run arguments (e.g., "--network host --privileged").' },
+            ...workerIdProperty,
+          },
+          required: ['image'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerExecChat',
+        description:
+          'Execute a command inside a running Docker container. Works on ANY container (managed or external). ' +
+          'Use the containerId or name from dockerRun or dockerPs.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            containerId: { type: 'string', description: 'Container ID or name.' },
+            command: { type: 'string', description: 'Shell command to execute.' },
+            workdir: { type: 'string', description: 'Working directory inside container.' },
+            ...workerIdProperty,
+          },
+          required: ['containerId', 'command'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerStop',
+        description: 'Stop a running Docker container gracefully. Works on any container.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            containerId: { type: 'string', description: 'Container ID or name.' },
+            timeout: { type: 'number', description: 'Seconds to wait before killing. Default: 10.' },
+            ...workerIdProperty,
+          },
+          required: ['containerId'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerRemove',
+        description: 'Remove a Docker container. Works on any container. Use force=true for running containers.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            containerId: { type: 'string', description: 'Container ID or name.' },
+            force: { type: 'boolean', description: 'Force removal. Default: false.' },
+            ...workerIdProperty,
+          },
+          required: ['containerId'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerLogs',
+        description: 'Get logs from any Docker container. Supports tail and since filters.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            containerId: { type: 'string', description: 'Container ID or name.' },
+            tail: { type: 'number', description: 'Lines from end. Default: 100.' },
+            since: { type: 'string', description: 'Show logs since (e.g., "10m", "1h").' },
+            ...workerIdProperty,
+          },
+          required: ['containerId'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerPs',
+        description:
+          'List ALL Docker containers on a worker (not just session-managed). ' +
+          'Shows running containers by default. Use all=true to include stopped.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            all: { type: 'boolean', description: 'Include stopped containers.' },
+            filter: { type: 'string', description: 'Docker filter (e.g., "name=my-app", "status=exited").' },
+            ...workerIdProperty,
+          },
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerImages',
+        description:
+          'List Docker images on a worker. Shows all locally available images, their sizes, and tags. ' +
+          'Useful for checking what images are cached before running containers.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            filter: { type: 'string', description: 'Filter by image name (e.g., "node", "ubuntu").' },
+            all: { type: 'boolean', description: 'Show all images (including intermediates).' },
+            ...workerIdProperty,
+          },
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerPull',
+        description: 'Pull a Docker image from a registry (Docker Hub by default). Use before dockerRun if the image is not cached.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            image: { type: 'string', description: 'Image to pull (e.g., "ubuntu:22.04", "postgres:16").' },
+            ...workerIdProperty,
+          },
+          required: ['image'],
+        },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
+      {
+        name: 'dockerSystemPrune',
+        description:
+          'Clean up unused Docker resources: stopped containers, unused networks, dangling images, build cache. ' +
+          'Use for Docker maintenance and disk space recovery. Use all=true to remove all unused images, ' +
+          'volumes=true to also remove unused volumes.',
+        category: 'docker',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            all: { type: 'boolean', description: 'Remove all unused images (not just dangling).' },
+            volumes: { type: 'boolean', description: 'Also prune unused volumes.' },
+            ...workerIdProperty,
+          },
         },
         executionTarget: 'worker',
         source: 'tool',
@@ -1184,7 +1362,7 @@ export class ChatExecutor {
     // ── CAPTCHA solving tools ──
     const captchaManifest = getCaptchaToolManifest();
 
-    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dataForSeoTools, ...imageGenTools, ...scheduleManifest, ...captchaManifest]);
+    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dockerChatTools, ...dataForSeoTools, ...imageGenTools, ...scheduleManifest, ...captchaManifest]);
   }
 
   /**

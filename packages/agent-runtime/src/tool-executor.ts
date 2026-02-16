@@ -68,6 +68,10 @@ const WORKER_TOOLS = new Set([
   'readFile', 'writeFile', 'listFiles',
   // Shell
   'execShell',
+  // Docker (chat/agent mode — container + image management)
+  'dockerRun', 'dockerExecChat', 'dockerStop', 'dockerRemove',
+  'dockerLogs', 'dockerPs', 'dockerImages', 'dockerPull',
+  'dockerSystemPrune',
 ]);
 
 export type ToolExecutionRoute = 'dashboard' | 'worker' | 'unknown';
@@ -133,6 +137,12 @@ export interface WorkerToolDispatcher {
    * Called when an agent finishes execution to free the browser tab.
    */
   releaseBrowserSession(browserSessionId: string): void;
+
+  /**
+   * Release a Docker session — clean up all containers created during
+   * a chat/agent session. Called when the ChatExecutor finishes.
+   */
+  releaseDockerSession(dockerSessionId: string): void;
 
   /**
    * Get a list of all connected and authenticated workers.
@@ -249,11 +259,14 @@ export class ToolExecutor {
       // Session ID ensures all browser calls from the same agent use the
       // same browser tab on the same worker (session affinity).
       const isBrowserTool = toolName.startsWith('browser_');
+      const isDockerTool = toolName.startsWith('docker') && !toolName.startsWith('docker_');
       const requiredCaps = isBrowserTool
         ? { browserCapable: true }
         : undefined;
 
-      const browserSessionId = isBrowserTool
+      // Pass session ID for browser tools (tab affinity) and Docker tools
+      // (container cleanup tracking).  Both use the same session lifecycle.
+      const sessionId = (isBrowserTool || isDockerTool)
         ? context.browserSessionId ?? context.workItemId ?? context.agentId
         : undefined;
 
@@ -262,7 +275,7 @@ export class ToolExecutor {
         cleanInput,
         requiredCaps,
         undefined,
-        browserSessionId,
+        sessionId,
       );
     }
 
@@ -279,5 +292,13 @@ export class ToolExecutor {
    */
   releaseBrowserSession(browserSessionId: string): void {
     this.workerDispatcher?.releaseBrowserSession(browserSessionId);
+  }
+
+  /**
+   * Release a Docker session — clean up all containers created during
+   * a chat/agent session. Should be called when the agent finishes.
+   */
+  releaseDockerSession(dockerSessionId: string): void {
+    this.workerDispatcher?.releaseDockerSession(dockerSessionId);
   }
 }

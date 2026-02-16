@@ -226,7 +226,7 @@ export async function POST(request: NextRequest) {
                 case 'tool_call_end':
                   send('tool', {
                     slot, phase: 'end', name: event.name, id: event.id,
-                    success: event.success, output: event.output.slice(0, 500),
+                    success: event.success, output: event.output.slice(0, 10_000),
                   });
                   break;
                 case 'background_task_start':
