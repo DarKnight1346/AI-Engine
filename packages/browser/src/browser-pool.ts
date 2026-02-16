@@ -20,6 +20,8 @@ export interface BrowserSession {
   ownedByTaskId: string | null;
   lastActivityAt: Date;
   createdAt: Date;
+  /** Whether this session was created from a headless browser instance. */
+  headless: boolean;
 }
 
 type WaitingResolver = {
@@ -40,7 +42,12 @@ type WaitingResolver = {
  * - An idle-timeout reaper forcefully reclaims sessions that were never checked in
  */
 export class BrowserPool {
-  private browser: Browser | null = null;
+  /**
+   * Two browser instances: one per headless mode.
+   * The default (matching `options.headless`) is launched eagerly in `initialize()`.
+   * The alternate mode is launched lazily on the first checkout that requests it.
+   */
+  private browsers: Map<boolean, Browser> = new Map();
   private activeSessions: Map<string, BrowserSession> = new Map();
   private persistentSessions: Map<string, BrowserSession> = new Map();
   private waitQueue: WaitingResolver[] = [];
@@ -57,14 +64,38 @@ export class BrowserPool {
     };
   }
 
+  /** The default headless mode this pool was constructed with. */
+  get defaultHeadless(): boolean {
+    return this.options.headless;
+  }
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
 
   async initialize(): Promise<void> {
-    if (this.browser) return;
-    this.browser = await puppeteer.launch({
-      headless: this.options.headless,
+    if (this.browsers.has(this.options.headless)) return;
+    await this.ensureBrowser(this.options.headless);
+
+    // Start idle-session reaper
+    if (!this.reaperInterval) {
+      this.reaperInterval = setInterval(() => this.reapIdleSessions(), 30_000);
+    }
+
+    console.log(`[browser-pool] Initialized (max ${this.options.maxConcurrent} concurrent sessions)`);
+  }
+
+  /**
+   * Launch a Puppeteer browser for the given headless mode if one doesn't
+   * already exist.  Called eagerly for the default mode in `initialize()` and
+   * lazily for the alternate mode on first checkout that requests it.
+   */
+  private async ensureBrowser(headless: boolean): Promise<Browser> {
+    const existing = this.browsers.get(headless);
+    if (existing) return existing;
+
+    const browser = await puppeteer.launch({
+      headless,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -72,11 +103,9 @@ export class BrowserPool {
         '--disable-gpu',
       ],
     });
-
-    // Start idle-session reaper
-    this.reaperInterval = setInterval(() => this.reapIdleSessions(), 30_000);
-
-    console.log(`[browser-pool] Initialized (max ${this.options.maxConcurrent} concurrent sessions)`);
+    this.browsers.set(headless, browser);
+    console.log(`[browser-pool] Launched browser (headless: ${headless})`);
+    return browser;
   }
 
   async shutdown(): Promise<void> {
@@ -106,10 +135,12 @@ export class BrowserPool {
 
     this._activeCount = 0;
 
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
+    // Close all browser instances (default + alternate)
+    for (const [mode, browser] of this.browsers) {
+      await browser.close().catch(() => {});
+      console.log(`[browser-pool] Closed browser (headless: ${mode})`);
     }
+    this.browsers.clear();
     console.log('[browser-pool] Shut down');
   }
 
@@ -127,8 +158,13 @@ export class BrowserPool {
    *
    * The caller MUST call `checkin(sessionId)` when done.
    */
-  async checkout(taskId: string, options?: { persistentName?: string; timeoutMs?: number }): Promise<BrowserSession> {
-    if (!this.browser) await this.initialize();
+  async checkout(
+    taskId: string,
+    options?: { persistentName?: string; timeoutMs?: number; headless?: boolean },
+  ): Promise<BrowserSession> {
+    if (this.browsers.size === 0) await this.initialize();
+
+    const headless = options?.headless ?? this.options.headless;
 
     // Check for an existing persistent session by name
     if (options?.persistentName) {
@@ -146,7 +182,7 @@ export class BrowserPool {
 
     // If under the limit, create immediately
     if (this._activeCount < this.options.maxConcurrent) {
-      return this.createSession(taskId, options?.persistentName ?? null);
+      return this.createSession(taskId, options?.persistentName ?? null, headless);
     }
 
     // Otherwise, queue and wait
@@ -242,8 +278,10 @@ export class BrowserPool {
   // Internals
   // ---------------------------------------------------------------------------
 
-  private async createSession(taskId: string, persistentName: string | null): Promise<BrowserSession> {
-    const context = await this.browser!.createBrowserContext();
+  private async createSession(taskId: string, persistentName: string | null, headless?: boolean): Promise<BrowserSession> {
+    const mode = headless ?? this.options.headless;
+    const browser = await this.ensureBrowser(mode);
+    const context = await browser.createBrowserContext();
     const page = await context.newPage();
     page.setDefaultTimeout(this.options.defaultTimeoutMs);
     await page.setViewport({ width: 1920, height: 1080 });
@@ -257,12 +295,13 @@ export class BrowserPool {
       ownedByTaskId: taskId,
       lastActivityAt: new Date(),
       createdAt: new Date(),
+      headless: mode,
     };
 
     this.activeSessions.set(session.id, session);
     this._activeCount++;
 
-    console.log(`[browser-pool] Task ${taskId} created session ${session.id}${persistentName ? ` (persistent: "${persistentName}")` : ''} (active: ${this._activeCount}/${this.options.maxConcurrent})`);
+    console.log(`[browser-pool] Task ${taskId} created session ${session.id} (headless: ${mode}${persistentName ? `, persistent: "${persistentName}"` : ''}) (active: ${this._activeCount}/${this.options.maxConcurrent})`);
     return session;
   }
 

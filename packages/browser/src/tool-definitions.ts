@@ -56,9 +56,9 @@ export async function createPerTaskBrowserTools(
 
   // Wrap every tool so it auto-acquires on first use (lazy checkout)
   let acquired = false;
-  const ensureAcquired = async () => {
+  const ensureAcquired = async (headless?: boolean) => {
     if (!acquired) {
-      await bt.acquire(taskId, options);
+      await bt.acquire(taskId, { ...options, headless });
       acquired = true;
     }
   };
@@ -73,7 +73,20 @@ export async function createPerTaskBrowserTools(
   const tools: ToolDef[] = rawDefs.map((def) => ({
     ...def,
     execute: async (input: Record<string, unknown>) => {
-      await ensureAcquired();
+      // browser_navigate may request a specific headless mode.
+      // If the session is already acquired with a different mode, release and
+      // re-acquire with the requested mode.
+      if (def.name === 'browser_navigate') {
+        const requestedHeadless = input.headless as boolean | undefined;
+        if (acquired && requestedHeadless !== undefined && bt.currentHeadless !== requestedHeadless) {
+          await bt.release().catch(() => {});
+          acquired = false;
+        }
+        await ensureAcquired(requestedHeadless);
+      } else {
+        await ensureAcquired();
+      }
+
       try {
         return await def.execute(input);
       } catch (err: any) {
@@ -112,11 +125,28 @@ function buildToolDefs(bt: BrowserTools): ToolDef[] {
       description:
         'Navigate to a URL in the browser. Browser tabs persist across messages but are ' +
         'automatically closed after 5 minutes of inactivity. If you receive a "session expired" ' +
-        'error, call this tool again to open a fresh tab at the desired URL.',
-      inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        'error, call this tool again to open a fresh tab at the desired URL.\n\n' +
+        'By default the browser runs in headless mode (no visible window). Set `headless` to ' +
+        '`false` to open a visible browser window — useful when you need to interact with pages ' +
+        'that detect headless mode or when the user wants to watch the automation live. Changing ' +
+        'the headless mode mid-session will close the current tab and open a new one.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          headless: {
+            type: 'boolean',
+            description:
+              'Whether to run the browser in headless mode (no visible window). ' +
+              'Defaults to true. Set to false for a visible browser window.',
+          },
+        },
+        required: ['url'],
+      },
       execute: async (input) => {
         const url = await bt.navigate(input.url as string);
-        return { success: true, output: `Navigated to ${url}` };
+        const mode = bt.currentHeadless ? 'headless' : 'headed';
+        return { success: true, output: `Navigated to ${url} (${mode})` };
       },
     },
     {

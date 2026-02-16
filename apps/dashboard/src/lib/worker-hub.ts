@@ -480,7 +480,7 @@ export class WorkerHub {
     if (!worker) {
       return {
         success: false,
-        output: `No available worker to execute "${toolName}". Connect a worker node with the required capabilities.`,
+        output: `No available worker to execute "${toolName}". Connect a worker node.`,
       };
     }
 

@@ -1253,9 +1253,26 @@ export class ChatExecutor {
       },
       {
         name: 'browser_navigate',
-        description: 'Navigate a browser to a URL for interactive web automation, scraping, or testing. Opens a real browser on the worker.',
+        description:
+          'Navigate a browser to a URL for interactive web automation, scraping, or testing. ' +
+          'Opens a real browser on the worker. By default the browser runs in headless mode ' +
+          '(no visible window). Set headless to false for a visible browser window — useful when ' +
+          'pages detect headless mode or the user wants to watch the automation live.',
         category: 'browser',
-        inputSchema: { type: 'object', properties: { url: { type: 'string' }, ...workerIdProperty }, required: ['url'] },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            headless: {
+              type: 'boolean',
+              description:
+                'Whether to run the browser in headless mode (no visible window). ' +
+                'Defaults to true. Set to false for a visible browser window.',
+            },
+            ...workerIdProperty,
+          },
+          required: ['url'],
+        },
         executionTarget: 'worker',
         source: 'tool',
       },

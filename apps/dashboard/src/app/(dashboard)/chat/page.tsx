@@ -1622,6 +1622,9 @@ export default function ChatPage() {
 
       // For events that belong to a background stream (not the active chat),
       // accumulate them in the per-session cache so they're restored on switch.
+      // PERF: High-frequency events (token, report_section_stream) only do O(1)
+      // Map.set(). The messages array is rebuilt lazily in switchSession when the
+      // user actually navigates back, avoiding per-token array allocations.
       if (!isCurrentSession) {
         const stream = activeStreamsRef.current.get(eventSessionId!);
         if (!stream) return; // Unknown session — drop
@@ -1629,6 +1632,20 @@ export default function ChatPage() {
         const bgSlot: string = data?.slot ?? '__default__';
 
         switch (eventType) {
+          case 'token': {
+            // Hot path — O(1) accumulation only.  No array allocation.
+            const prev = stream.slotContent.get(bgSlot) ?? '';
+            stream.slotContent.set(bgSlot, prev + data.text);
+            return; // skip cache write for high-frequency events
+          }
+          case 'report_section_stream': {
+            // Hot path — O(1) string append.
+            if (stream.pendingReport) {
+              const sec = stream.pendingReport.sections.find((s) => s.id === data.sectionId);
+              if (sec) sec.content = (sec.content ?? '') + (data.text ?? '');
+            }
+            return; // skip cache write
+          }
           case 'agent_start': {
             const agentName = data.agentName || 'AI Engine';
             if (bgSlot === '__default__' && stream.slotMessages.has('__default__')) {
@@ -1649,18 +1666,6 @@ export default function ChatPage() {
               const msgId = stream.slotMessages.get(bgSlot)!;
               stream.messages = stream.messages.map((m) =>
                 m.id === msgId ? { ...m, agentName } : m
-              );
-            }
-            break;
-          }
-          case 'token': {
-            const msgId = stream.slotMessages.get(bgSlot);
-            if (msgId) {
-              const prev = stream.slotContent.get(bgSlot) ?? '';
-              const next = prev + data.text;
-              stream.slotContent.set(bgSlot, next);
-              stream.messages = stream.messages.map((m) =>
-                m.id === msgId ? { ...m, content: next } : m
               );
             }
             break;
@@ -1725,14 +1730,6 @@ export default function ChatPage() {
             stream.pendingReport = stream.activeReport;
             break;
           }
-          case 'report_section_stream': {
-            if (stream.pendingReport) {
-              const sec = stream.pendingReport.sections.find((s) => s.id === data.sectionId);
-              if (sec) sec.content = (sec.content ?? '') + (data.text ?? '');
-              stream.activeReport = { ...stream.pendingReport, sections: [...stream.pendingReport.sections] };
-            }
-            break;
-          }
           case 'report_section_update': {
             if (stream.pendingReport) {
               const sec = stream.pendingReport.sections.find((s) => s.id === data.sectionId);
@@ -1757,9 +1754,11 @@ export default function ChatPage() {
             }
             break;
           }
+          default:
+            return; // Unknown background event — skip cache write
         }
 
-        // Keep the session cache in sync
+        // Only write to cache for significant events (not tokens/section_stream)
         sessionCacheRef.current.set(eventSessionId!, {
           messages: stream.messages,
           sending: true,
@@ -2569,12 +2568,30 @@ export default function ChatPage() {
     const incomingStream = activeStreamsRef.current.get(sid);
 
     if (incomingStream) {
-      // Active stream running in background — restore it live
-      setMessages(incomingStream.messages);
+      // Active stream running in background — restore it live.
+      // Apply latest slotContent to messages (background tokens only update
+      // the slotContent map, not the messages array, for performance).
+      const msgIdToSlot = new Map<string, string>();
+      for (const [slot, msgId] of incomingStream.slotMessages) {
+        msgIdToSlot.set(msgId, slot);
+      }
+      const restoredMessages = incomingStream.messages.map((m) => {
+        const slot = msgIdToSlot.get(m.id);
+        if (slot != null) {
+          const latestContent = incomingStream.slotContent.get(slot) ?? '';
+          if (latestContent && latestContent !== m.content) {
+            return { ...m, content: latestContent };
+          }
+        }
+        return m;
+      });
+      incomingStream.messages = restoredMessages;
+
+      setMessages(restoredMessages);
       setSending(true);
       setActiveReport(incomingStream.activeReport);
       setClarification(null);
-      setContextTokens(estimateTokensFromMessages(incomingStream.messages));
+      setContextTokens(estimateTokensFromMessages(restoredMessages));
 
       // Reconnect the streaming refs so new events flow to the UI
       slotMessagesRef.current = incomingStream.slotMessages;

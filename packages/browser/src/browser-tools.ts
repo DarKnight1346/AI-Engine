@@ -34,8 +34,11 @@ export class BrowserTools {
   /**
    * Acquire a browser session from the pool for the given task.
    * Blocks if the pool is at capacity until a slot opens.
+   *
+   * @param options.headless  Override the pool's default headless mode for this
+   *   session.  When omitted the pool's default is used.
    */
-  async acquire(taskId: string, options?: { persistentName?: string; timeoutMs?: number }): Promise<void> {
+  async acquire(taskId: string, options?: { persistentName?: string; timeoutMs?: number; headless?: boolean }): Promise<void> {
     if (this.session) throw new Error(`BrowserTools already acquired for task ${this.taskId}`);
     this.taskId = taskId;
     this.released = false;
@@ -46,6 +49,11 @@ export class BrowserTools {
   /** Whether this instance currently holds a session. */
   get isAcquired(): boolean {
     return this.session !== null && !this.released;
+  }
+
+  /** The headless mode of the current session, or `undefined` if not acquired. */
+  get currentHeadless(): boolean | undefined {
+    return this.session?.headless;
   }
 
   /**

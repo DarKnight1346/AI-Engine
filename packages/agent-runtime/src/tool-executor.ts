@@ -256,17 +256,12 @@ export class ToolExecutor {
         );
       }
 
-      // Browser tools require workers with browser capability.
-      // Session ID ensures all browser calls from the same agent use the
-      // same browser tab on the same worker (session affinity).
+      // All workers are browser-capable (headless). No capability filter needed.
+      // Session ID ensures all browser/Docker calls from the same agent use the
+      // same worker (session affinity for browser tabs / container cleanup).
       const isBrowserTool = toolName.startsWith('browser_');
       const isDockerTool = toolName.startsWith('docker') && !toolName.startsWith('docker_');
-      const requiredCaps = isBrowserTool
-        ? { browserCapable: true }
-        : undefined;
 
-      // Pass session ID for browser tools (tab affinity) and Docker tools
-      // (container cleanup tracking).  Both use the same session lifecycle.
       const sessionId = (isBrowserTool || isDockerTool)
         ? context.browserSessionId ?? context.workItemId ?? context.agentId
         : undefined;
@@ -274,7 +269,7 @@ export class ToolExecutor {
       return await this.workerDispatcher.executeToolOnWorker(
         toolName,
         cleanInput,
-        requiredCaps,
+        undefined,
         undefined,
         sessionId,
       );
