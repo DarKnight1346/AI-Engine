@@ -262,8 +262,19 @@ export class WorkerHub {
       }
     });
 
+    // Server-side ping every 30s to detect dead worker connections
+    // (complements the worker's own 10s ping from the client side)
+    const pingTimer = setInterval(() => {
+      if (ws.readyState === 1) {
+        (ws as any).ping?.();
+      } else {
+        clearInterval(pingTimer);
+      }
+    }, 30_000);
+
     ws.on('close', () => {
       clearTimeout(authTimeout);
+      clearInterval(pingTimer);
       if (entry.workerId) {
         console.log(`[hub] Worker disconnected: ${entry.workerId}`);
         this.workers.delete(entry.workerId);

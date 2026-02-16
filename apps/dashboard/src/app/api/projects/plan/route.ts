@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@ai-engine/db';
 import { MemoryService, EmbeddingService, ProjectMemoryService } from '@ai-engine/memory';
-import { createPlanningTools, createPrdTools, createTaskTools, createWireframeTools, getPlanningModeSystemPrompt, createWebSearchTools, createXaiSearchTools } from '@ai-engine/agent-runtime';
+import { createPlanningTools, createPrdTools, createTaskTools, createWireframeTools, createProjectOverviewTools, getPlanningModeSystemPrompt, createWebSearchTools, createXaiSearchTools } from '@ai-engine/agent-runtime';
 import type { SerperServiceLike, XaiServiceLike } from '@ai-engine/agent-runtime';
 import type { LLMMessage, LLMToolDefinition, LLMMessageContent } from '@ai-engine/shared';
 import { getAuthFromRequest } from '@/lib/auth';
@@ -124,7 +124,7 @@ async function loadSearchTools(): Promise<{
       const webGetPageDef: LLMToolDefinition = {
         name: 'webGetPage',
         description:
-          '[Tier 1 — free/fast] Fetch and extract content from a web page by URL. ' +
+          'Fetch and extract content from a web page by URL. ' +
           'Returns the page title and readable text. Use to read articles, documentation, ' +
           'blog posts, or any web page after finding it via webSearch.',
         inputSchema: {
@@ -403,37 +403,22 @@ export async function POST(request: NextRequest) {
     const baseSystemPrompt = getPlanningModeSystemPrompt(project.name);
 
     const systemPrompt = `${baseSystemPrompt}
-
 ${project.description ? `\nProject Description: ${project.description}` : ''}
 
 ## Relevant Project Knowledge (from previous discussions)
-${memoryContext || 'No prior context yet - this is the beginning of our planning conversation.'}
+${memoryContext || 'No prior context yet - this is the beginning of our planning conversation.'}`;
 
-## Conversation Guidelines
-- Ask thoughtful, specific clarifying questions to understand the user's vision
-- Store every requirement and decision in memory using your tools
-- Be conversational and engaging — guide the user through planning
-- When you have enough context, offer to generate the PRD and task breakdown
-- DO NOT repeat back the same information verbatim — synthesize and build on it
-
-## Asking Questions (IMPORTANT)
-When you need information from the user, use the **ask_user** tool to present structured questions with clickable options. This gives the user a better experience than just typing questions in prose. For example:
-- "What platform?" → options: ["Web app", "Mobile app", "Desktop app", "All platforms"]
-- "Authentication?" → options: ["Email/password", "OAuth (Google/GitHub)", "Magic links", "No auth needed"]
-- Always set allowFreeText: true so users can provide custom answers if none of the options fit
-- Ask 1-5 focused questions at a time, don't overwhelm the user
-- Combine ask_user with a brief text response explaining context or acknowledging what you've learned`;
-
-    // Build all planning tools: memory, PRD, tasks, wireframes, search
+    // Build all planning tools: memory, PRD, tasks, wireframes, overview, search
     const planningTools = createPlanningTools(projectMemoryService, projectId);
     const prdTools = createPrdTools(db, projectId);
     const taskTools = createTaskTools(db, projectId);
     const wireframeTools = createWireframeTools(db, projectId);
+    const overviewTools = createProjectOverviewTools(db, projectId);
 
     // Load web search tools (Tier 1 + Tier 2)
     const searchTools = await loadSearchTools();
 
-    const allLocalTools = [...planningTools, ...prdTools, ...taskTools, ...wireframeTools];
+    const allLocalTools = [...planningTools, ...prdTools, ...taskTools, ...wireframeTools, ...overviewTools];
 
     const toolDefs: LLMToolDefinition[] = [
       ...allLocalTools.map((t) => ({

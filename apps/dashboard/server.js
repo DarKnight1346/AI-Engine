@@ -29,8 +29,9 @@ app.prepare().then(() => {
     handle(req, res, parse(req.url || '/', true));
   });
 
-  // ── WebSocket server (noServer mode — we handle upgrade ourselves) ──
-  const wss = new WebSocketServer({ noServer: true });
+  // ── WebSocket servers (noServer mode — we handle upgrade ourselves) ──
+  const wss = new WebSocketServer({ noServer: true });       // workers
+  const wssClient = new WebSocketServer({ noServer: true }); // browser clients
 
   server.on('upgrade', (request, socket, head) => {
     const { pathname } = parse(request.url || '');
@@ -38,6 +39,10 @@ app.prepare().then(() => {
     if (pathname === '/ws/worker') {
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
+      });
+    } else if (pathname === '/ws/client') {
+      wssClient.handleUpgrade(request, socket, head, (ws) => {
+        wssClient.emit('connection', ws, request);
       });
     } else if (dev) {
       // In dev mode, let Next.js HMR WebSocket through (don't destroy)
@@ -73,6 +78,31 @@ app.prepare().then(() => {
   }
 
   initHub();
+
+  // ── Initialise the client hub for browser WebSocket connections ──
+  async function initClientHub() {
+    try {
+      const clientHubMod = require('./src/lib/client-hub');
+      const { ClientHub } = clientHubMod;
+      const hub = ClientHub.getInstance();
+      hub.setPort(port);
+
+      wssClient.on('connection', (ws, req) => {
+        hub.handleConnection(ws, req);
+      });
+
+      globalThis.__clientHub = hub;
+      console.log('[ws] Client hub initialised');
+    } catch (err) {
+      console.warn('[ws] Client hub not ready yet:', err.message);
+      wssClient.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: 'error', message: 'Server starting up — retry in a moment' }));
+        ws.close();
+      });
+    }
+  }
+
+  initClientHub();
 
   // ── Start the Cloudflare tunnel ──
   (async () => {

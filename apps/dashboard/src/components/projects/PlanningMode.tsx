@@ -25,6 +25,8 @@ import DependencyGraph from './DependencyGraph';
 import WireframeGallery from './WireframeGallery';
 import WireframeEditor from './WireframeEditor';
 import type { Wireframe } from './WireframeEditor';
+import { useDashboardWS } from '@/hooks/useDashboardWS';
+import type { PlanSendPayload } from '@/hooks/useDashboardWS';
 
 interface PlanningModeProps {
   projectId: string;
@@ -104,6 +106,30 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // WS-based planning: resolve/reject promise bridges
+  const planResolveRef = useRef<((data: any) => void) | null>(null);
+  const planRejectRef = useRef<((err: Error) => void) | null>(null);
+
+  const { connected: wsConnected, sendPlan } = useDashboardWS({
+    onPlanResult: (data) => {
+      if (planResolveRef.current) {
+        planResolveRef.current(data);
+        planResolveRef.current = null;
+        planRejectRef.current = null;
+      }
+    },
+    onPlanProgress: (p) => {
+      setProgress(p);
+    },
+    onPlanError: (message) => {
+      if (planRejectRef.current) {
+        planRejectRef.current(new Error(message));
+        planResolveRef.current = null;
+        planRejectRef.current = null;
+      }
+    },
+  });
 
   const scrollToBottom = useCallback((smooth = true) => {
     requestAnimationFrame(() => {
@@ -332,28 +358,45 @@ The more context you provide, the better I can help you build exactly what you e
   ): Promise<{ text: string; questions?: PlanningQuestion[] }> => {
     setProgress(10);
 
+    const payload: PlanSendPayload = {
+      projectId,
+      userMessage: conversationHistory[conversationHistory.length - 1].content,
+      attachments: newAttachments.map(a => a.id),
+    };
+
     try {
-      // Call the real planning agent API (runs LLM with planning tools)
-      const response = await fetch('/api/projects/plan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId,
-          userMessage: conversationHistory[conversationHistory.length - 1].content,
-          attachments: newAttachments.map(a => a.id),
-        }),
-      });
+      let data: any;
 
-      setProgress(60);
+      // Prefer WebSocket (survives Cloudflare tunnel), fall back to HTTP
+      if (wsConnected) {
+        data = await new Promise<any>((resolve, reject) => {
+          planResolveRef.current = resolve;
+          planRejectRef.current = reject;
 
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
+          const sent = sendPlan(payload);
+          if (!sent) {
+            planResolveRef.current = null;
+            planRejectRef.current = null;
+            reject(new Error('WebSocket send failed'));
+          }
+        });
+      } else {
+        // HTTP fallback (may timeout through Cloudflare tunnel on long requests)
+        const response = await fetch('/api/projects/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        setProgress(60);
+        data = await response.json();
+        if (data.error) throw new Error(data.error);
+      }
 
       // Update PRD, tasks, and wireframes from the database state returned by the agent
       if (data.prd) setPrd(data.prd);
       if (data.tasks) setTasks(data.tasks);
       if (data.wireframes) setWireframes(data.wireframes);
-      else loadWireframes(); // Refresh wireframes in case the agent created any
+      else loadWireframes();
 
       setProgress(100);
       return {

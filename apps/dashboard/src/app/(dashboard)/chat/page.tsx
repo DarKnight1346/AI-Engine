@@ -25,6 +25,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import HourglassTopIcon from '@mui/icons-material/HourglassTop';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import { useDashboardWS } from '@/hooks/useDashboardWS';
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -1567,6 +1568,212 @@ export default function ChatPage() {
   const reportDirtyRef = useRef(false);
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const slotMessagesRef = useRef<Map<string, string>>(new Map());
+  const slotContentRef = useRef<Map<string, string>>(new Map());
+  const receivedDoneRef = useRef(false);
+  const streamSessionIdRef = useRef<string | null>(null);
+
+  // ── WebSocket connection for chat streaming ──
+  const { connected: wsConnected, sendChat } = useDashboardWS({
+    onChatEvent: useCallback((eventType: string, data: any) => {
+      const slotMessages = slotMessagesRef.current;
+      const slotContent = slotContentRef.current;
+      const slot: string = data?.slot ?? '__default__';
+
+      switch (eventType) {
+        case 'session':
+          if (data.sessionId) {
+            streamSessionIdRef.current = data.sessionId;
+            setSessionId(data.sessionId);
+            loadSessions();
+          }
+          break;
+
+        case 'agent_start': {
+          const agentName = data.agentName || 'AI Engine';
+          if (slot === '__default__' && slotMessages.has('__default__')) {
+            const msgId = slotMessages.get('__default__')!;
+            slotMessages.delete('__default__');
+            slotMessages.set(slot, msgId);
+            slotContent.delete('__default__');
+            slotContent.set(slot, '');
+            setMessages((prev) => prev.map((m) =>
+              m.id === msgId ? { ...m, agentName } : m
+            ));
+          } else if (!slotMessages.has(slot)) {
+            const msgId = crypto.randomUUID();
+            slotMessages.set(slot, msgId);
+            slotContent.set(slot, '');
+            setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
+          } else {
+            const msgId = slotMessages.get(slot)!;
+            setMessages((prev) => prev.map((m) =>
+              m.id === msgId ? { ...m, agentName } : m
+            ));
+          }
+          break;
+        }
+
+        case 'token': {
+          const msgId = slotMessages.get(slot);
+          if (msgId) {
+            const prev = slotContent.get(slot) ?? '';
+            const next = prev + data.text;
+            slotContent.set(slot, next);
+            pendingSlotContentRef.current.set(msgId, next);
+          }
+          break;
+        }
+
+        case 'background_task': {
+          const newTask: BackgroundTaskInfo = {
+            id: data.taskId,
+            sessionId: sessionIdRef.current ?? '',
+            toolName: data.toolName,
+            description: data.toolName === 'xaiGenerateVideo' ? 'Generating video' : `Running ${data.toolName}`,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+          };
+          setBackgroundTasks((prev) => [...prev, newTask]);
+          break;
+        }
+
+        case 'tool':
+        case 'status':
+          break;
+
+        case 'clarification_request': {
+          const questions = data.questions ?? [];
+          setClarification({ questions, answers: {}, submitted: false });
+          break;
+        }
+
+        case 'report_outline': {
+          const sections: ReportSectionState[] = (data.sections ?? []).map((s: any) => ({
+            id: s.id, title: s.title, status: 'pending' as const, tier: s.tier,
+          }));
+          const outline: ReportState = { title: data.title ?? 'Report', sections, completed: 0, total: sections.length };
+          pendingReportRef.current = outline;
+          reportDirtyRef.current = true;
+          setActiveReport(outline);
+          break;
+        }
+
+        case 'report_section_stream': {
+          const report = pendingReportRef.current;
+          if (report) {
+            const sec = report.sections.find((s) => s.id === data.sectionId);
+            if (sec) { sec.content = (sec.content ?? '') + (data.text ?? ''); reportDirtyRef.current = true; }
+          }
+          break;
+        }
+
+        case 'report_section_update': {
+          const reportRef = pendingReportRef.current;
+          if (reportRef) {
+            const sec = reportRef.sections.find((s) => s.id === data.sectionId);
+            if (sec) {
+              sec.status = data.status as ReportSectionState['status'];
+              if (data.content != null) sec.content = data.content;
+              if (data.tier != null) sec.tier = data.tier;
+            }
+            reportRef.completed = reportRef.sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
+            if (data.status === 'complete' || data.status === 'failed') {
+              try { if (streamSessionIdRef.current) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionIdRef.current}`, JSON.stringify(reportRef)); } catch {}
+            }
+            reportDirtyRef.current = true;
+          }
+          setActiveReport((prev) => {
+            if (!prev) return prev;
+            const sections = prev.sections.map((s) =>
+              s.id === data.sectionId
+                ? { ...s, status: data.status as ReportSectionState['status'], content: data.content ?? s.content, tier: data.tier ?? s.tier }
+                : s
+            );
+            const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
+            return { ...prev, sections, completed };
+          });
+          break;
+        }
+
+        case 'report_section_added': {
+          const reportR = pendingReportRef.current;
+          if (reportR) {
+            reportR.sections.push({ id: data.section.id, title: data.section.title, status: 'complete', content: data.section.content });
+            reportR.total += 1;
+            reportR.completed += 1;
+            reportDirtyRef.current = true;
+          }
+          setActiveReport((prev) => {
+            if (!prev) return prev;
+            const newSection: ReportSectionState = { id: data.section.id, title: data.section.title, status: 'complete', content: data.section.content };
+            return { ...prev, sections: [...prev.sections, newSection], total: prev.total + 1, completed: prev.completed + 1 };
+          });
+          break;
+        }
+
+        case 'subtask_complete': {
+          const reportRf = pendingReportRef.current;
+          if (reportRf && data.completed != null) { reportRf.completed = data.completed; reportDirtyRef.current = true; }
+          break;
+        }
+
+        case 'done': {
+          receivedDoneRef.current = true;
+          const msgId = slotMessages.get(slot);
+          if (msgId) {
+            setActiveReport((curReport) => {
+              setMessages((msgs) => msgs.map((m) =>
+                m.id === msgId
+                  ? { ...m, content: data.content, agentName: data.agentName || m.agentName, reportData: curReport ?? undefined }
+                  : m
+              ));
+              if (curReport && streamSessionIdRef.current) {
+                try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionIdRef.current}`, JSON.stringify(curReport)); } catch {}
+                fetch('/api/chat/messages/metadata', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ sessionId: streamSessionIdRef.current, reportData: curReport }),
+                }).catch(() => {});
+              }
+              return curReport;
+            });
+          } else {
+            setActiveReport((cur) => {
+              if (cur && streamSessionIdRef.current) {
+                try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionIdRef.current}`, JSON.stringify(cur)); } catch {}
+              }
+              return cur;
+            });
+          }
+          if (data.usage) {
+            const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
+            if (totalUsed > 0) setContextTokens((prev) => Math.max(prev, totalUsed));
+          }
+          break;
+        }
+
+        case 'error': {
+          receivedDoneRef.current = true;
+          const msgId = slotMessages.get(slot);
+          if (msgId) {
+            setMessages((msgs) => msgs.map((m) =>
+              m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
+            ));
+          }
+          break;
+        }
+      }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+
+    onChatComplete: useCallback(() => {
+      stopFlushTimer();
+      setSending(false);
+      abortRef.current = null;
+      setTimeout(() => inputRef.current?.focus(), 50);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  });
 
   /** Start the batched-flush interval when streaming begins. */
   const startFlushTimer = useCallback(() => {
@@ -2186,7 +2393,43 @@ export default function ChatPage() {
     // Start the batched state-flush timer (50ms interval)
     startFlushTimer();
 
-    // Abort any previous stream
+    // Reset per-send tracking refs for WS event handler
+    slotContentRef.current = slotContent;
+    receivedDoneRef.current = false;
+    streamSessionIdRef.current = null;
+
+    // Send via WebSocket (preferred — survives Cloudflare tunnel)
+    if (wsConnected) {
+      const sent = sendChat({
+        sessionId,
+        message: currentInput,
+        agentIds: agentIds.length > 0 ? agentIds : undefined,
+        attachments: currentAttachments.length > 0
+          ? currentAttachments.map(a => ({ name: a.name, type: a.type, url: a.url, size: a.size }))
+          : undefined,
+      });
+
+      if (!sent) {
+        // WS send failed (race condition) — show error
+        setMessages((prev) => {
+          const emptySlotMsgIds = Array.from(slotMessages.values());
+          return prev.map((m) => {
+            if (emptySlotMsgIds.includes(m.id) && !m.content) {
+              return { ...m, content: 'WebSocket connection lost. Please try again.' };
+            }
+            return m;
+          });
+        });
+        stopFlushTimer();
+        setSending(false);
+        setTimeout(() => inputRef.current?.focus(), 50);
+      }
+      // Events will arrive via the onChatEvent callback above.
+      // Cleanup happens in the onChatComplete callback.
+      return;
+    }
+
+    // ── HTTP/SSE fallback (when WebSocket is not connected) ──
     abortRef.current?.abort();
     if (readerRef.current) {
       readerRef.current.cancel().catch(() => {});
@@ -2212,7 +2455,6 @@ export default function ChatPage() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
-        // Error on all slots
         setMessages((prev) => prev.map((m) => {
           for (const msgId of slotMessages.values()) {
             if (m.id === msgId) return { ...m, content: `Error: ${errData.error}` };
@@ -2232,7 +2474,6 @@ export default function ChatPage() {
       let buffer = '';
       let currentEventType = '';
       let receivedDone = false;
-      let streamSessionId: string | null = null;
 
       try {
         while (true) {
@@ -2245,388 +2486,118 @@ export default function ChatPage() {
 
           for (const line of lines) {
             const trimmed = line.trim();
-
             if (trimmed.startsWith(':')) continue;
-            if (trimmed.startsWith('event: ')) {
-              currentEventType = trimmed.slice(7).trim();
-              continue;
-            }
+            if (trimmed.startsWith('event: ')) { currentEventType = trimmed.slice(7).trim(); continue; }
             if (!trimmed) { currentEventType = ''; continue; }
             if (!trimmed.startsWith('data: ')) continue;
 
             try {
               const data = JSON.parse(trimmed.slice(6));
-
-              // Resolve the slot (for multi-agent, events carry a `slot` field)
+              // Reuse the same WS event handler for SSE events
+              if (currentEventType === 'done' || currentEventType === 'error') receivedDone = true;
+              // Forward to the shared onChatEvent handler via the callback ref
               const slot: string = data.slot ?? '__default__';
 
-              switch (currentEventType) {
-                case 'session':
-                  if (data.sessionId) {
-                    streamSessionId = data.sessionId;
-                    setSessionId(data.sessionId);
-                    loadSessions();
-                  }
-                  break;
-
-                case 'agent_start': {
-                  // Backend tells us which agent is responding in this slot.
-                  // If we have a __default__ placeholder, rebind it.
-                  const agentName = data.agentName || 'AI Engine';
-                  if (slot === '__default__' && slotMessages.has('__default__')) {
-                    // Rename the default slot
-                    const msgId = slotMessages.get('__default__')!;
-                    slotMessages.delete('__default__');
-                    slotMessages.set(slot, msgId);
-                    slotContent.delete('__default__');
-                    slotContent.set(slot, '');
-                    setMessages((prev) => prev.map((m) =>
-                      m.id === msgId ? { ...m, agentName } : m
-                    ));
-                  } else if (!slotMessages.has(slot)) {
-                    // New agent slot (was auto-classified) — create a new placeholder
-                    const msgId = crypto.randomUUID();
-                    slotMessages.set(slot, msgId);
-                    slotContent.set(slot, '');
-                    setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
-                  } else {
-                    // Update name on an existing slot
-                    const msgId = slotMessages.get(slot)!;
-                    setMessages((prev) => prev.map((m) =>
-                      m.id === msgId ? { ...m, agentName } : m
-                    ));
-                  }
-                  break;
-                }
-
-                case 'token': {
-                  const msgId = slotMessages.get(slot);
-                  if (msgId) {
-                    const prev = slotContent.get(slot) ?? '';
-                    const next = prev + data.text;
-                    slotContent.set(slot, next);
-                    // Accumulate in ref — flushed to state by the 50ms interval timer
-                    pendingSlotContentRef.current.set(msgId, next);
-                  }
-                  break;
-                }
-
-                case 'background_task': {
-                  // A long-running tool was started in the background
-                  const newTask: BackgroundTaskInfo = {
-                    id: data.taskId,
-                    sessionId: sessionId ?? '',
-                    toolName: data.toolName,
-                    description: data.toolName === 'xaiGenerateVideo' ? 'Generating video' : `Running ${data.toolName}`,
-                    status: 'running',
-                    startedAt: new Date().toISOString(),
-                  };
-                  setBackgroundTasks((prev) => [...prev, newTask]);
-                  break;
-                }
-
-                case 'tool':
-                case 'status':
-                  break;
-
-                // ── Orchestration / sub-agent events ──
-
-                case 'clarification_request': {
-                  const questions = data.questions ?? [];
-                  setClarification({
-                    questions,
-                    answers: {},
-                    submitted: false,
-                  });
-                  break;
-                }
-
-                case 'report_outline': {
-                  const sections: ReportSectionState[] = (data.sections ?? []).map((s: any) => ({
-                    id: s.id,
-                    title: s.title,
-                    status: 'pending' as const,
-                    tier: s.tier,
-                  }));
-                  const outline: ReportState = {
-                    title: data.title ?? 'Report',
-                    sections,
-                    completed: 0,
-                    total: sections.length,
-                  };
-                  // Initialize the mutable ref for batched streaming updates
-                  pendingReportRef.current = outline;
-                  reportDirtyRef.current = true;
-                  setActiveReport(outline);
-                  break;
-                }
-
-                case 'report_section_stream': {
-                  // Incremental token from a sub-agent — accumulate in ref,
-                  // flushed to state by the 50ms interval timer.
-                  const report = pendingReportRef.current;
-                  if (report) {
-                    const sec = report.sections.find((s) => s.id === data.sectionId);
-                    if (sec) {
-                      sec.content = (sec.content ?? '') + (data.text ?? '');
-                      reportDirtyRef.current = true;
+              // Minimal inline handling for session event (needs local var)
+              if (currentEventType === 'session' && data.sessionId) {
+                streamSessionIdRef.current = data.sessionId;
+                setSessionId(data.sessionId);
+                loadSessions();
+              }
+              // Handle key event types inline for SSE fallback
+              if (currentEventType) {
+                switch (currentEventType) {
+                  case 'token': {
+                    const msgId = slotMessages.get(slot);
+                    if (msgId) {
+                      const prev = slotContent.get(slot) ?? '';
+                      const next = prev + data.text;
+                      slotContent.set(slot, next);
+                      pendingSlotContentRef.current.set(msgId, next);
                     }
+                    break;
                   }
-                  break;
-                }
-
-                case 'report_section_update': {
-                  // Update both the mutable ref AND React state for section-level changes
-                  // (these are infrequent — only when a section starts/completes)
-                  const reportRef = pendingReportRef.current;
-                  if (reportRef) {
-                    const sec = reportRef.sections.find((s) => s.id === data.sectionId);
-                    if (sec) {
-                      sec.status = data.status as ReportSectionState['status'];
-                      if (data.content != null) sec.content = data.content;
-                      if (data.tier != null) sec.tier = data.tier;
-                    }
-                    reportRef.completed = reportRef.sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
-                    // Persist when sections complete
-                    if (data.status === 'complete' || data.status === 'failed') {
-                      try { if (streamSessionId) sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(reportRef)); } catch {}
-                    }
-                    reportDirtyRef.current = true;
-                  }
-                  setActiveReport((prev) => {
-                    if (!prev) return prev;
-                    const sections = prev.sections.map((s) =>
-                      s.id === data.sectionId
-                        ? { ...s, status: data.status as ReportSectionState['status'], content: data.content ?? s.content, tier: data.tier ?? s.tier }
-                        : s
-                    );
-                    const completed = sections.filter((s) => s.status === 'complete' || s.status === 'failed').length;
-                    return { ...prev, sections, completed };
-                  });
-                  break;
-                }
-
-                case 'report_section_added': {
-                  const reportR = pendingReportRef.current;
-                  if (reportR) {
-                    reportR.sections.push({
-                      id: data.section.id,
-                      title: data.section.title,
-                      status: 'complete',
-                      content: data.section.content,
-                    });
-                    reportR.total += 1;
-                    reportR.completed += 1;
-                    reportDirtyRef.current = true;
-                  }
-                  setActiveReport((prev) => {
-                    if (!prev) return prev;
-                    const newSection: ReportSectionState = {
-                      id: data.section.id,
-                      title: data.section.title,
-                      status: 'complete',
-                      content: data.section.content,
-                    };
-                    return {
-                      ...prev,
-                      sections: [...prev.sections, newSection],
-                      total: prev.total + 1,
-                      completed: prev.completed + 1,
-                    };
-                  });
-                  break;
-                }
-
-                case 'subtask_complete': {
-                  const reportRf = pendingReportRef.current;
-                  if (reportRf && data.completed != null) {
-                    reportRf.completed = data.completed;
-                    reportDirtyRef.current = true;
-                  }
-                  break;
-                }
-
-                case 'done': {
-                  receivedDone = true;
-                  const msgId = slotMessages.get(slot);
-                  if (msgId) {
-                    // Attach report data to the message so it persists with the message
-                    setActiveReport((curReport) => {
+                  case 'done': {
+                    const msgId = slotMessages.get(slot);
+                    if (msgId) {
                       setMessages((msgs) => msgs.map((m) =>
-                        m.id === msgId
-                          ? { ...m, content: data.content, agentName: data.agentName || m.agentName, reportData: curReport ?? undefined }
-                          : m
+                        m.id === msgId ? { ...m, content: data.content, agentName: data.agentName || m.agentName } : m
                       ));
-                      // Persist to sessionStorage for quick restore
-                      if (curReport && streamSessionId) {
-                        try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(curReport)); } catch {}
-                      }
-                      // Also save report to DB by updating the message's metadata
-                      if (curReport && streamSessionId) {
-                        fetch('/api/chat/messages/metadata', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ sessionId: streamSessionId, reportData: curReport }),
-                        }).catch(() => { /* fire-and-forget */ });
-                      }
-                      return curReport;
-                    });
-                  } else {
-                    // Persist report state
-                    setActiveReport((cur) => {
-                      if (cur && streamSessionId) {
-                        try { sessionStorage.setItem(`${REPORT_STORAGE_PREFIX}${streamSessionId}`, JSON.stringify(cur)); } catch {}
-                      }
-                      return cur;
-                    });
+                    }
+                    if (data.usage) {
+                      const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
+                      if (totalUsed > 0) setContextTokens((prev) => Math.max(prev, totalUsed));
+                    }
+                    break;
                   }
-                  if (data.usage) {
-                    const totalUsed = (data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0);
-                    if (totalUsed > 0) setContextTokens((prev) => Math.max(prev, totalUsed));
+                  case 'error': {
+                    const msgId = slotMessages.get(slot);
+                    if (msgId) {
+                      setMessages((msgs) => msgs.map((m) =>
+                        m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
+                      ));
+                    }
+                    break;
                   }
-                  break;
-                }
-
-                case 'error': {
-                  receivedDone = true; // Error is also a terminal event
-                  const msgId = slotMessages.get(slot);
-                  if (msgId) {
-                    setMessages((msgs) => msgs.map((m) =>
-                      m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
-                    ));
+                  case 'agent_start': {
+                    const agentName = data.agentName || 'AI Engine';
+                    if (!slotMessages.has(slot)) {
+                      const msgId = crypto.randomUUID();
+                      slotMessages.set(slot, msgId);
+                      slotContent.set(slot, '');
+                      setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
+                    }
+                    break;
                   }
-                  break;
                 }
               }
-            } catch {
-              // Skip unparseable lines
-            }
+            } catch { /* skip unparseable */ }
           }
         }
       } finally {
-        // Always clean up the reader
-        try {
-          reader.cancel();
-        } catch {
-          // Reader already closed
-        }
+        try { reader.cancel(); } catch {}
         readerRef.current = null;
       }
 
-      // ── Stream ended — check if we got a proper termination ──
-      // If the stream was cut (proxy timeout, network blip) without a
-      // `done` or `error` event, the backend may still be processing.
-      // Poll the messages API to recover the AI response from DB.
-      if (!receivedDone && streamSessionId) {
-        console.warn('[Chat] SSE stream ended without done event — attempting recovery via polling');
-
-        const recoverSessionId = streamSessionId;
-        const slotMsgEntries = Array.from(slotMessages.entries());
-
-        // Retry up to 5 times with exponential backoff (2s, 4s, 8s, 16s, 32s)
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const delay = 2000 * Math.pow(2, attempt);
-          await new Promise((r) => setTimeout(r, delay));
-
+      // Recovery if stream ended without done event
+      if (!receivedDone && streamSessionIdRef.current) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
           try {
-            const pollRes = await fetch(`/api/chat/messages?sessionId=${recoverSessionId}`);
+            const pollRes = await fetch(`/api/chat/messages?sessionId=${streamSessionIdRef.current}`);
             if (!pollRes.ok) continue;
             const pollData = await pollRes.json();
-            const dbMessages: Array<{ id: string; role: string; content: string; agentName?: string }> = pollData.messages ?? [];
-
-            // Find the latest AI messages that weren't part of our local slots
-            const localSlotIds = new Set(slotMsgEntries.map(([, id]) => id));
-            const latestAiMsgs = dbMessages.filter(
-              (m) => m.role === 'ai' && m.content && !localSlotIds.has(m.id)
-            );
-
-            if (latestAiMsgs.length > 0) {
-              // The backend finished — replace our placeholder(s) with the DB content
-              const lastAi = latestAiMsgs[latestAiMsgs.length - 1];
-              // Update the first empty slot with the recovered content
-              for (const [, msgId] of slotMsgEntries) {
-                const slotText = slotContent.get(slotMsgEntries.find(([, id]) => id === msgId)?.[0] ?? '') ?? '';
-                if (!slotText) {
+            const lastAi = [...(pollData.messages ?? [])].reverse().find((m: any) => m.role === 'ai' && m.content);
+            if (lastAi) {
+              for (const [, msgId] of slotMessages.entries()) {
+                if (!(slotContent.get([...slotMessages.entries()].find(([, id]) => id === msgId)?.[0] ?? '') ?? '')) {
                   setMessages((msgs) => msgs.map((m) =>
-                    m.id === msgId
-                      ? { ...m, content: lastAi.content, agentName: lastAi.agentName || m.agentName }
-                      : m
+                    m.id === msgId ? { ...m, content: lastAi.content, agentName: lastAi.agentName || m.agentName } : m
                   ));
                   break;
                 }
               }
-              console.log(`[Chat] Recovery successful on attempt ${attempt + 1}`);
               break;
             }
-
-            // Check if all our slot messages already have content (partial streaming succeeded)
-            const allSlotsHaveContent = slotMsgEntries.every(
-              ([slot]) => (slotContent.get(slot) ?? '').length > 0
-            );
-            if (allSlotsHaveContent) {
-              console.log('[Chat] All slots have partial content — keeping streamed text');
-              break;
-            }
-          } catch {
-            // Poll failed — continue retrying
-          }
+          } catch { /* continue */ }
         }
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
-        // ── Connection error recovery ──
-        // If we got a network error but a session was established,
-        // attempt to recover by polling the messages API.
-        const recoverSessionId = sessionId;
-        const slotMsgEntries = Array.from(slotMessages.entries());
-        let recovered = false;
-
-        if (recoverSessionId) {
-          for (let attempt = 0; attempt < 3; attempt++) {
-            await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
-            try {
-              const pollRes = await fetch(`/api/chat/messages?sessionId=${recoverSessionId}`);
-              if (!pollRes.ok) continue;
-              const pollData = await pollRes.json();
-              const dbMessages: Array<{ id: string; role: string; content: string; agentName?: string }> = pollData.messages ?? [];
-              const lastAi = [...dbMessages].reverse().find((m) => m.role === 'ai' && m.content);
-              if (lastAi) {
-                for (const [, msgId] of slotMsgEntries) {
-                  const slotText = slotContent.get(slotMsgEntries.find(([, id]) => id === msgId)?.[0] ?? '') ?? '';
-                  if (!slotText) {
-                    setMessages((msgs) => msgs.map((m) =>
-                      m.id === msgId
-                        ? { ...m, content: lastAi.content, agentName: lastAi.agentName || m.agentName }
-                        : m
-                    ));
-                    recovered = true;
-                    break;
-                  }
-                }
-                if (recovered) break;
-              }
-            } catch { /* continue */ }
-          }
-        }
-
-        if (!recovered) {
-          setMessages((prev) => {
-            const emptySlotMsgIds = Array.from(slotMessages.values());
-            return prev.map((m) => {
-              if (emptySlotMsgIds.includes(m.id) && !m.content) {
-                return { ...m, content: `Connection lost: ${err.message}. The agent may still be processing — check back shortly.` };
-              }
-              return m;
-            });
+        setMessages((prev) => {
+          const emptySlotMsgIds = Array.from(slotMessages.values());
+          return prev.map((m) => {
+            if (emptySlotMsgIds.includes(m.id) && !m.content) {
+              return { ...m, content: `Connection lost: ${err.message}. The agent may still be processing — check back shortly.` };
+            }
+            return m;
           });
-        }
+        });
       }
     } finally {
-      // Stop batched flush timer and do a final flush
       stopFlushTimer();
       setSending(false);
       abortRef.current = null;
-      // Auto-focus the chat input after the agent finishes responding
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   };

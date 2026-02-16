@@ -37,6 +37,7 @@ export class DashboardClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
+  private isConnecting = false;
   private activeTasks = 0;
   private connected = false;
   private _dockerAvailable = false;
@@ -51,9 +52,54 @@ export class DashboardClient {
   // Lifecycle
   // -----------------------------------------------------------------------
 
+  /**
+   * Connect to the dashboard with automatic retry for transient errors.
+   * Retries indefinitely with exponential backoff until connected or stopped.
+   */
   async connect(): Promise<string> {
     this.stopped = false;
+    this.isConnecting = true;
+    this.clearReconnect();
 
+    let attempt = 0;
+
+    while (!this.stopped) {
+      attempt++;
+      try {
+        const workerId = await this.attemptConnect();
+        this.isConnecting = false;
+        return workerId;
+      } catch (err: any) {
+        // Clean up the failed WebSocket before retrying
+        const failedWs = this.ws;
+        this.ws = null;
+        if (failedWs) {
+          try { failedWs.removeAllListeners(); failedWs.close(); } catch { /* ignore */ }
+        }
+
+        if (this.stopped) {
+          this.isConnecting = false;
+          throw err;
+        }
+
+        // Exponential backoff: 5s → 7.5s → 11s → 17s → 25s → 30s (cap)
+        const delay = Math.min(5_000 * Math.pow(1.5, attempt - 1), 30_000);
+        console.log(
+          `[client] Connection failed: ${err.message}. Attempt ${attempt}, retrying in ${Math.round(delay / 1000)}s...`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    this.isConnecting = false;
+    throw new Error('Connection stopped');
+  }
+
+  /**
+   * Single connection attempt. Resolves with workerId on auth:ok,
+   * rejects on auth:error, timeout, or WebSocket error.
+   */
+  private attemptConnect(): Promise<string> {
     return new Promise((resolve, reject) => {
       const wsUrl = this.opts.serverUrl
         .replace(/^http/, 'ws')
@@ -88,7 +134,8 @@ export class DashboardClient {
         this.connected = false;
         this.stopHeartbeat();
         console.log(`[client] Disconnected (code ${code}: ${reason?.toString() ?? 'unknown'})`);
-        if (!this.stopped) this.scheduleReconnect();
+        // Only auto-reconnect if not already inside the connect() retry loop
+        if (!this.stopped && !this.isConnecting) this.scheduleReconnect();
       });
 
       this.ws.on('error', (err) => {
@@ -268,6 +315,10 @@ export class DashboardClient {
         capabilities: this.opts.capabilities,
         dockerAvailable: this._dockerAvailable,
       });
+      // WebSocket-level ping to detect dead connections through Cloudflare tunnel
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.ping();
+      }
     }, 10_000);
   }
 
@@ -284,9 +335,13 @@ export class DashboardClient {
     console.log(`[client] Reconnecting in ${delay / 1000}s...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect().catch((err) => {
-        console.error('[client] Reconnect failed:', err.message);
-      });
+      // connect() retries transient errors internally with backoff,
+      // so this single call is sufficient for full resilience.
+      this.connect()
+        .then(() => console.log('[client] Reconnected successfully'))
+        .catch((err) => {
+          console.error('[client] Reconnect failed:', err.message);
+        });
     }, delay);
   }
 
