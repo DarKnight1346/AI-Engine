@@ -13,7 +13,7 @@
 import { generateKeyPairSync, createHash } from 'crypto';
 import { readFile, writeFile, mkdir, access, constants } from 'fs/promises';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, hostname } from 'os';
 import type { SshKeyPair, SshKeyInfo } from '@ai-engine/shared';
 
 const KEYS_DIR = join(homedir(), '.ai-engine', 'keys');
@@ -215,8 +215,7 @@ export class SshKeyService {
     rawKeyLen.writeUInt32BE(rawKey.length);
 
     const blob = Buffer.concat([keyTypeLen, Buffer.from(keyType), rawKeyLen, rawKey]);
-    const hostname = require('os').hostname();
-    return `ssh-ed25519 ${blob.toString('base64')} ai-engine@${hostname}`;
+    return `ssh-ed25519 ${blob.toString('base64')} ai-engine@${hostname()}`;
   }
 
   /**

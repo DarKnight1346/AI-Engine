@@ -448,7 +448,7 @@ async function executeTaskDirectly(
       systemPrompt,
     );
   } finally {
-    executor.cleanup();
+    executor.cleanup({ releaseBrowser: true });
   }
 
   const durationMs = Date.now() - startTime;

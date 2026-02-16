@@ -73,11 +73,21 @@ export class BrowserTools {
 
   private get page(): Page {
     if (!this.session || this.released) {
-      throw new Error('No active browser session. Call acquire() first.');
+      throw new Error(
+        'Browser session expired — no active session. Use browser_navigate to start a new session.',
+      );
+    }
+    const p = this.session.page;
+    if (p.isClosed()) {
+      throw new Error(
+        'Browser session expired — the tab was automatically closed after 5 minutes of inactivity. '
+        + 'All page state (URL, cookies, viewport settings) has been lost. '
+        + 'Use browser_navigate to open a new page.',
+      );
     }
     // Touch the pool to prevent idle reaping
     this.pool.touchSession(this.session.id);
-    return this.session.page;
+    return p;
   }
 
   private attachListeners(page: Page): void {

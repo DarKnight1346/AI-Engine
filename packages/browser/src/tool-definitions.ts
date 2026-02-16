@@ -65,12 +65,26 @@ export async function createPerTaskBrowserTools(
 
   const rawDefs = buildToolDefs(bt);
 
-  // Wrap each tool's execute to ensure session exists
+  // Wrap each tool's execute to ensure session exists and to detect expired
+  // sessions (e.g. reclaimed by the pool's idle reaper after inactivity).
+  // On expiry the wrapper tears down the dead session and resets `acquired`
+  // so the *next* browser tool call (typically browser_navigate) transparently
+  // checks out a fresh session from the pool.
   const tools: ToolDef[] = rawDefs.map((def) => ({
     ...def,
     execute: async (input: Record<string, unknown>) => {
       await ensureAcquired();
-      return def.execute(input);
+      try {
+        return await def.execute(input);
+      } catch (err: any) {
+        if (isSessionExpiredError(err)) {
+          // Tear down the dead session so the next call can re-acquire
+          await bt.release().catch(() => {});
+          acquired = false;
+          return { success: false, output: err.message };
+        }
+        throw err;
+      }
     },
   }));
 
@@ -95,7 +109,10 @@ function buildToolDefs(bt: BrowserTools): ToolDef[] {
   return [
     {
       name: 'browser_navigate',
-      description: 'Navigate to a URL in the browser.',
+      description:
+        'Navigate to a URL in the browser. Browser tabs persist across messages but are ' +
+        'automatically closed after 5 minutes of inactivity. If you receive a "session expired" ' +
+        'error, call this tool again to open a fresh tab at the desired URL.',
       inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
       execute: async (input) => {
         const url = await bt.navigate(input.url as string);
@@ -310,4 +327,20 @@ function buildToolDefs(bt: BrowserTools): ToolDef[] {
       },
     },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Detect errors that indicate the underlying browser page/context was closed. */
+function isSessionExpiredError(err: Error): boolean {
+  const msg = err.message ?? '';
+  return (
+    msg.includes('Browser session expired') ||
+    msg.includes('Target closed') ||
+    msg.includes('Session closed') ||
+    msg.includes('page has been closed') ||
+    msg.includes('Execution context was destroyed')
+  );
 }

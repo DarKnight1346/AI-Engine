@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, Fragment, lazy, Suspense } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Box, TextField, IconButton, Typography, Paper, List, ListItemButton,
   ListItemText, Divider, Avatar, Chip, InputAdornment, Stack,
@@ -303,7 +304,7 @@ function InlineImage({ url }: { url: string }) {
           </Tooltip>
         </Box>
       </Box>
-      {expanded && (
+      {expanded && createPortal(
         <Box
           onClick={() => setExpanded(false)}
           sx={{
@@ -328,7 +329,8 @@ function InlineImage({ url }: { url: string }) {
               <DownloadIcon />
             </IconButton>
           </Box>
-        </Box>
+        </Box>,
+        document.body,
       )}
     </>
   );
@@ -790,7 +792,7 @@ function ImageGallery({ urls }: { urls: string[] }) {
       </Box>
 
       {/* Lightbox overlay */}
-      {lightboxIdx !== null && (
+      {lightboxIdx !== null && createPortal(
         <Box
           onClick={() => setLightboxIdx(null)}
           sx={{
@@ -833,7 +835,8 @@ function ImageGallery({ urls }: { urls: string[] }) {
               <DownloadIcon />
             </IconButton>
           </Box>
-        </Box>
+        </Box>,
+        document.body,
       )}
     </>
   );
@@ -1575,19 +1578,199 @@ export default function ChatPage() {
   const receivedDoneRef = useRef(false);
   const streamSessionIdRef = useRef<string | null>(null);
 
+  // ── Per-session caching (Discord-like channel switching) ──
+  // Preserves messages, streaming state, and active agent status across switches.
+
+  /** Snapshot of a session's UI state — saved when switching away. */
+  interface SessionSnapshot {
+    messages: Message[];
+    sending: boolean;
+    activeReport: ReportState | null;
+    clarification: ClarificationState | null;
+    backgroundTasks: BackgroundTaskInfo[];
+  }
+
+  /** Streaming state for an active agent session running in the background. */
+  interface ActiveStreamState {
+    slotMessages: Map<string, string>;
+    slotContent: Map<string, string>;
+    pendingContent: Map<string, string>;
+    messages: Message[];
+    activeReport: ReportState | null;
+    pendingReport: ReportState | null;
+    reportDirty: boolean;
+  }
+
+  const sessionCacheRef = useRef<Map<string, SessionSnapshot>>(new Map());
+  const activeStreamsRef = useRef<Map<string, ActiveStreamState>>(new Map());
+  const messagesRef = useRef<Message[]>([]);
+  const sendingRef = useRef(false);
+
   // ── WebSocket connection for chat streaming ──
   const { connected: wsConnected, sendChat } = useDashboardWS({
     onChatEvent: useCallback((eventType: string, data: any) => {
-      // Filter events to only process those belonging to the current session.
-      // The 'session' event establishes a new stream so it must not be filtered.
-      if (eventType !== 'session' && data?.sessionId) {
-        const currentSession = sessionIdRef.current;
-        const streamSession = streamSessionIdRef.current;
-        if (data.sessionId !== currentSession && data.sessionId !== streamSession) {
-          return;
+      const eventSessionId: string | undefined = data?.sessionId;
+      const currentSession = sessionIdRef.current;
+      const streamSession = streamSessionIdRef.current;
+
+      // Determine if this event belongs to the currently displayed session.
+      const isCurrentSession =
+        eventType === 'session' ||
+        !eventSessionId ||
+        eventSessionId === currentSession ||
+        eventSessionId === streamSession;
+
+      // For events that belong to a background stream (not the active chat),
+      // accumulate them in the per-session cache so they're restored on switch.
+      if (!isCurrentSession) {
+        const stream = activeStreamsRef.current.get(eventSessionId!);
+        if (!stream) return; // Unknown session — drop
+
+        const bgSlot: string = data?.slot ?? '__default__';
+
+        switch (eventType) {
+          case 'agent_start': {
+            const agentName = data.agentName || 'AI Engine';
+            if (bgSlot === '__default__' && stream.slotMessages.has('__default__')) {
+              const msgId = stream.slotMessages.get('__default__')!;
+              stream.slotMessages.delete('__default__');
+              stream.slotMessages.set(bgSlot, msgId);
+              stream.slotContent.delete('__default__');
+              stream.slotContent.set(bgSlot, '');
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId ? { ...m, agentName } : m
+              );
+            } else if (!stream.slotMessages.has(bgSlot)) {
+              const msgId = crypto.randomUUID();
+              stream.slotMessages.set(bgSlot, msgId);
+              stream.slotContent.set(bgSlot, '');
+              stream.messages = [...stream.messages, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }];
+            } else {
+              const msgId = stream.slotMessages.get(bgSlot)!;
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId ? { ...m, agentName } : m
+              );
+            }
+            break;
+          }
+          case 'token': {
+            const msgId = stream.slotMessages.get(bgSlot);
+            if (msgId) {
+              const prev = stream.slotContent.get(bgSlot) ?? '';
+              const next = prev + data.text;
+              stream.slotContent.set(bgSlot, next);
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId ? { ...m, content: next } : m
+              );
+            }
+            break;
+          }
+          case 'done': {
+            const msgId = stream.slotMessages.get(bgSlot);
+            if (msgId) {
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId
+                  ? { ...m, content: data.content, agentName: data.agentName || m.agentName, reportData: stream.activeReport ?? undefined }
+                  : m
+              );
+            }
+            break;
+          }
+          case 'error': {
+            const msgId = stream.slotMessages.get(bgSlot);
+            if (msgId) {
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId ? { ...m, content: `Error: ${data.message}` } : m
+              );
+            }
+            break;
+          }
+          case 'screenshot': {
+            const msgId = stream.slotMessages.get(bgSlot);
+            if (msgId && data.base64) {
+              const att: Attachment = {
+                id: crypto.randomUUID(),
+                name: 'screenshot.png',
+                type: 'image/png',
+                url: `data:image/png;base64,${data.base64}`,
+                size: data.base64.length,
+              };
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId ? { ...m, attachments: [...(m.attachments ?? []), att] } : m
+              );
+            }
+            break;
+          }
+          case 'artifact': {
+            const msgId = stream.slotMessages.get(bgSlot);
+            if (msgId && data.url) {
+              const att: Attachment = {
+                id: crypto.randomUUID(),
+                name: data.filename || 'artifact',
+                type: data.mimeType || 'application/octet-stream',
+                url: data.url,
+                size: data.size ?? 0,
+              };
+              stream.messages = stream.messages.map((m) =>
+                m.id === msgId ? { ...m, attachments: [...(m.attachments ?? []), att] } : m
+              );
+            }
+            break;
+          }
+          case 'report_outline': {
+            const sections: ReportSectionState[] = (data.sections ?? []).map((s: any) => ({
+              id: s.id, title: s.title, status: 'pending' as const, tier: s.tier,
+            }));
+            stream.activeReport = { title: data.title ?? 'Report', sections, completed: 0, total: sections.length };
+            stream.pendingReport = stream.activeReport;
+            break;
+          }
+          case 'report_section_stream': {
+            if (stream.pendingReport) {
+              const sec = stream.pendingReport.sections.find((s) => s.id === data.sectionId);
+              if (sec) sec.content = (sec.content ?? '') + (data.text ?? '');
+              stream.activeReport = { ...stream.pendingReport, sections: [...stream.pendingReport.sections] };
+            }
+            break;
+          }
+          case 'report_section_update': {
+            if (stream.pendingReport) {
+              const sec = stream.pendingReport.sections.find((s) => s.id === data.sectionId);
+              if (sec) {
+                sec.status = data.status as ReportSectionState['status'];
+                if (data.content != null) sec.content = data.content;
+                if (data.tier != null) sec.tier = data.tier;
+              }
+              stream.pendingReport.completed = stream.pendingReport.sections.filter(
+                (s) => s.status === 'complete' || s.status === 'failed'
+              ).length;
+              stream.activeReport = { ...stream.pendingReport, sections: [...stream.pendingReport.sections] };
+            }
+            break;
+          }
+          case 'report_section_added': {
+            if (stream.pendingReport) {
+              stream.pendingReport.sections.push({ id: data.section.id, title: data.section.title, status: 'complete', content: data.section.content });
+              stream.pendingReport.total += 1;
+              stream.pendingReport.completed += 1;
+              stream.activeReport = { ...stream.pendingReport, sections: [...stream.pendingReport.sections] };
+            }
+            break;
+          }
         }
+
+        // Keep the session cache in sync
+        sessionCacheRef.current.set(eventSessionId!, {
+          messages: stream.messages,
+          sending: true,
+          activeReport: stream.activeReport,
+          clarification: null,
+          backgroundTasks: [],
+        });
+        return;
       }
 
+      // ── Current session event handling (foreground) ──
       const slotMessages = slotMessagesRef.current;
       const slotContent = slotContentRef.current;
       const slot: string = data?.slot ?? '__default__';
@@ -1595,8 +1778,35 @@ export default function ChatPage() {
       switch (eventType) {
         case 'session':
           if (data.sessionId) {
-            streamSessionIdRef.current = data.sessionId;
-            setSessionId(data.sessionId);
+            // Register the active stream for background tracking first
+            if (!activeStreamsRef.current.has(data.sessionId)) {
+              activeStreamsRef.current.set(data.sessionId, {
+                slotMessages: slotMessagesRef.current,
+                slotContent: slotContentRef.current,
+                pendingContent: pendingSlotContentRef.current,
+                messages: messagesRef.current,
+                activeReport: null,
+                pendingReport: pendingReportRef.current,
+                reportDirty: false,
+              });
+            }
+
+            // Only update the active session ID and stream ref if the user
+            // hasn't navigated away to a different session. For new conversations
+            // (sessionIdRef.current is null), always accept the server-assigned ID.
+            // Otherwise, only accept if the user is still on the sending session.
+            const userStillOnSendingSession =
+              !sessionIdRef.current ||
+              sessionIdRef.current === streamSessionIdRef.current;
+
+            if (userStillOnSendingSession) {
+              streamSessionIdRef.current = data.sessionId;
+              setSessionId(data.sessionId);
+            }
+            // If the user navigated away, keep streamSessionIdRef unchanged
+            // so that subsequent events for this session route to the background
+            // handler via activeStreamsRef instead.
+
             loadSessions();
           }
           break;
@@ -1820,18 +2030,51 @@ export default function ChatPage() {
     }, []),
 
     onChatComplete: useCallback((data?: any) => {
-      // Only process completion for the active session
-      if (data?.sessionId) {
-        const currentSession = sessionIdRef.current;
-        const streamSession = streamSessionIdRef.current;
-        if (data.sessionId !== currentSession && data.sessionId !== streamSession) {
-          return;
+      const eventSessionId = data?.sessionId;
+      const currentSession = sessionIdRef.current;
+      const streamSession = streamSessionIdRef.current;
+
+      const isCurrentSession =
+        !eventSessionId ||
+        eventSessionId === currentSession ||
+        eventSessionId === streamSession;
+
+      if (isCurrentSession) {
+        // Foreground session completed — update UI
+        stopFlushTimer();
+        setSending(false);
+        abortRef.current = null;
+        // Finalize the active stream entry for this session
+        const sid = eventSessionId || streamSession || currentSession;
+        if (sid) {
+          const stream = activeStreamsRef.current.get(sid);
+          if (stream) {
+            // Snapshot final state to cache
+            sessionCacheRef.current.set(sid, {
+              messages: messagesRef.current,
+              sending: false,
+              activeReport: stream.activeReport,
+              clarification: null,
+              backgroundTasks: [],
+            });
+            activeStreamsRef.current.delete(sid);
+          }
+        }
+        setTimeout(() => inputRef.current?.focus(), 50);
+      } else if (eventSessionId) {
+        // Background session completed — update cache, remove active stream
+        const stream = activeStreamsRef.current.get(eventSessionId);
+        if (stream) {
+          sessionCacheRef.current.set(eventSessionId, {
+            messages: stream.messages,
+            sending: false,
+            activeReport: stream.activeReport,
+            clarification: null,
+            backgroundTasks: [],
+          });
+          activeStreamsRef.current.delete(eventSessionId);
         }
       }
-      stopFlushTimer();
-      setSending(false);
-      abortRef.current = null;
-      setTimeout(() => inputRef.current?.focus(), 50);
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []),
   });
@@ -2272,15 +2515,43 @@ export default function ChatPage() {
     }
   }, []);
 
-  // ── Switch session ──
+  // ── Switch session (Discord-like channel switching) ──
   const switchSession = useCallback((sid: string) => {
-    // Save current session's report state before switching
+    if (sid === sessionId) return; // already on this session
+
+    // ── Save outgoing session's state to cache ──
     saveReportState(sessionId, activeReport, clarification);
 
-    // Abort any in-flight stream or recovery polling
-    abortRef.current?.abort();
-    abortRef.current = null;
+    if (sessionId) {
+      // Snapshot current messages + UI state so we can restore instantly
+      sessionCacheRef.current.set(sessionId, {
+        messages: messagesRef.current,
+        sending: sendingRef.current,
+        activeReport,
+        clarification,
+        backgroundTasks,
+      });
+
+      // If the outgoing session has an active WS stream, sync its messages
+      // into the stream entry so background events keep them up-to-date.
+      const outgoingStream =
+        activeStreamsRef.current.get(sessionId) ||
+        activeStreamsRef.current.get(streamSessionIdRef.current ?? '');
+      if (outgoingStream && sendingRef.current) {
+        outgoingStream.messages = messagesRef.current;
+        outgoingStream.activeReport = activeReport;
+      }
+    }
+
+    // Clear streamSessionIdRef so WS events for the outgoing session route
+    // through the background handler (activeStreamsRef) instead of the foreground.
+    streamSessionIdRef.current = null;
+
+    // Abort SSE readers (per-request — can't multiplex), but NOT WS streams
+    // (they continue flowing via the shared connection).
     if (readerRef.current) {
+      abortRef.current?.abort();
+      abortRef.current = null;
       readerRef.current.cancel().catch(() => {});
       readerRef.current = null;
     }
@@ -2289,23 +2560,93 @@ export default function ChatPage() {
       pollingIntervalRef.current = null;
     }
     recoverySessionRef.current = null;
-    setSending(false);
 
     setSessionId(sid);
     acknowledgedTasksRef.current.clear();
-    loadMessages(sid);
-    loadBackgroundTasks(sid);
 
-    // Restore report state for the target session
-    restoreReportState(sid);
+    // ── Restore incoming session's state ──
+    // Priority: active stream > session cache > load from DB
+    const incomingStream = activeStreamsRef.current.get(sid);
+
+    if (incomingStream) {
+      // Active stream running in background — restore it live
+      setMessages(incomingStream.messages);
+      setSending(true);
+      setActiveReport(incomingStream.activeReport);
+      setClarification(null);
+      setContextTokens(estimateTokensFromMessages(incomingStream.messages));
+
+      // Reconnect the streaming refs so new events flow to the UI
+      slotMessagesRef.current = incomingStream.slotMessages;
+      slotContentRef.current = incomingStream.slotContent;
+      pendingSlotContentRef.current = incomingStream.pendingContent;
+      pendingReportRef.current = incomingStream.pendingReport;
+      reportDirtyRef.current = incomingStream.reportDirty;
+      streamSessionIdRef.current = sid;
+
+      // Ensure the flush timer is running for this active stream
+      if (!flushTimerRef.current) startFlushTimer();
+      loadBackgroundTasks(sid);
+    } else {
+      // No active stream — stop the flush timer (it's not needed for this session)
+      stopFlushTimer();
+
+      const cached = sessionCacheRef.current.get(sid);
+
+      if (cached) {
+        // Cached snapshot — restore instantly, then refresh from DB in background
+        setMessages(cached.messages);
+        setSending(cached.sending);
+        setActiveReport(cached.activeReport);
+        setClarification(cached.clarification);
+        setBackgroundTasks(cached.backgroundTasks);
+        setContextTokens(estimateTokensFromMessages(cached.messages));
+
+        // Background DB refresh to catch any updates we missed
+        // (e.g., background task completions, messages from other tabs)
+        loadMessages(sid);
+        loadBackgroundTasks(sid);
+      } else {
+        // No cache — full load from DB
+        setSending(false);
+        setActiveReport(null);
+        setClarification(null);
+        loadMessages(sid);
+        loadBackgroundTasks(sid);
+        restoreReportState(sid);
+      }
+    }
+
     setTimeout(() => inputRef.current?.focus(), 100);
-  }, [loadMessages, loadBackgroundTasks, saveReportState, restoreReportState, sessionId, activeReport, clarification]);
+  }, [loadMessages, loadBackgroundTasks, saveReportState, restoreReportState, startFlushTimer, stopFlushTimer, sessionId, activeReport, clarification, backgroundTasks]);
 
   // ── New conversation ──
   const startNewConversation = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
+    // Save outgoing session state to cache
+    const outSid = sessionIdRef.current;
+    if (outSid) {
+      sessionCacheRef.current.set(outSid, {
+        messages: messagesRef.current,
+        sending: sendingRef.current,
+        activeReport: null,
+        clarification: null,
+        backgroundTasks: [],
+      });
+      const outStream =
+        activeStreamsRef.current.get(outSid) ||
+        activeStreamsRef.current.get(streamSessionIdRef.current ?? '');
+      if (outStream && sendingRef.current) {
+        outStream.messages = messagesRef.current;
+      }
+    }
+
+    // Clear stream ref so events route to background handler
+    streamSessionIdRef.current = null;
+
+    // Only abort SSE readers, not WS streams
     if (readerRef.current) {
+      abortRef.current?.abort();
+      abortRef.current = null;
       readerRef.current.cancel().catch(() => {});
       readerRef.current = null;
     }
@@ -2314,6 +2655,7 @@ export default function ChatPage() {
       pollingIntervalRef.current = null;
     }
     recoverySessionRef.current = null;
+    stopFlushTimer();
     setSending(false);
 
     setSessionId(null);
@@ -2321,6 +2663,8 @@ export default function ChatPage() {
     setInput('');
     setContextTokens(0);
     setBackgroundTasks([]);
+    setActiveReport(null);
+    setClarification(null);
     inputRef.current?.focus();
   }, []);
 
@@ -2328,10 +2672,17 @@ export default function ChatPage() {
   const deleteSession = useCallback(async (sid: string) => {
     try {
       await fetch(`/api/chat/sessions?id=${sid}`, { method: 'DELETE' });
+      // Clean up caches
+      sessionCacheRef.current.delete(sid);
+      activeStreamsRef.current.delete(sid);
       if (sessionId === sid) {
         setSessionId(null);
         setMessages([]);
         setContextTokens(0);
+        setActiveReport(null);
+        setClarification(null);
+        setBackgroundTasks([]);
+        setSending(false);
       }
       loadSessions();
       setSnack({ open: true, message: 'Conversation deleted', severity: 'success' });
@@ -2444,9 +2795,11 @@ export default function ChatPage() {
     const slotMessages = new Map<string, string>(); // slotId -> msgId
     const slotContent = new Map<string, string>();   // slotId -> streamed text
 
-    // Wire up batched-flush refs for this streaming session
+    // Wire up batched-flush refs for this streaming session.
+    // Create NEW maps rather than clearing in-place so that any background
+    // streams still referencing the old maps are not corrupted.
     slotMessagesRef.current = slotMessages;
-    pendingSlotContentRef.current.clear();
+    pendingSlotContentRef.current = new Map();
     pendingReportRef.current = null;
     reportDirtyRef.current = false;
 
@@ -2473,6 +2826,21 @@ export default function ChatPage() {
     slotContentRef.current = slotContent;
     receivedDoneRef.current = false;
     streamSessionIdRef.current = null;
+
+    // Register as an active stream for background tracking when switching chats.
+    // For existing sessions (known sessionId), register now. For new sessions
+    // (sessionId is null), the 'session' WS event will register it.
+    if (sessionId) {
+      activeStreamsRef.current.set(sessionId, {
+        slotMessages,
+        slotContent,
+        pendingContent: pendingSlotContentRef.current,
+        messages: messagesRef.current,
+        activeReport: null,
+        pendingReport: pendingReportRef.current,
+        reportDirty: false,
+      });
+    }
 
     // Send via WebSocket (preferred — survives Cloudflare tunnel)
     if (wsConnected) {
@@ -2751,6 +3119,8 @@ export default function ChatPage() {
   // without needing state in the dependency array.
   hasRunningTasksRef.current = backgroundTasks.some((t) => t.status === 'running');
   sessionIdRef.current = sessionId;
+  messagesRef.current = messages;
+  sendingRef.current = sending;
 
   // Idempotent function: starts a polling interval if one isn't already
   // running. The interval reads from refs so it always has fresh values
@@ -2913,11 +3283,29 @@ export default function ChatPage() {
                   }}
                 >
                   <ListItemText
-                    primary={session.title || 'Untitled'}
+                    primary={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                        <Typography noWrap sx={{ fontSize: 13, fontWeight: sessionId === session.id ? 600 : 400 }}>
+                          {session.title || 'Untitled'}
+                        </Typography>
+                        {(activeStreamsRef.current.has(session.id) ||
+                          (sessionId === session.id && sending) ||
+                          sessionCacheRef.current.get(session.id)?.sending) && (
+                          <Box
+                            sx={{
+                              width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                              bgcolor: 'primary.main',
+                              animation: 'pulse 1.5s ease-in-out infinite',
+                              '@keyframes pulse': {
+                                '0%, 100%': { opacity: 1 },
+                                '50%': { opacity: 0.3 },
+                              },
+                            }}
+                          />
+                        )}
+                      </Box>
+                    }
                     secondary={session.lastMessage?.slice(0, 45) || `${session.messageCount} messages`}
-                    primaryTypographyProps={{
-                      noWrap: true, fontSize: 13, fontWeight: sessionId === session.id ? 600 : 400,
-                    }}
                     secondaryTypographyProps={{
                       noWrap: true, fontSize: 11, sx: { mt: 0.25 },
                     }}

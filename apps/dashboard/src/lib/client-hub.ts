@@ -350,6 +350,11 @@ export class ClientHub {
 
     try {
       const port = this._port;
+      // The planning agent loop can run for many minutes on heavy tasks (web
+      // research, large PRDs, complex wireframes).  Node.js fetch (undici) has
+      // a default headersTimeout of ~5 min which kills the request before the
+      // route responds.  Use a 15-minute AbortSignal to match server.js's
+      // requestTimeout so the fetch stays alive for the entire agent run.
       const response = await fetch(`http://localhost:${port}/api/projects/plan`, {
         method: 'POST',
         headers: {
@@ -361,6 +366,7 @@ export class ClientHub {
           userMessage: msg.userMessage,
           attachments: msg.attachments,
         }),
+        signal: AbortSignal.timeout(900_000), // 15 minutes
       });
 
       clearInterval(progressTimer);

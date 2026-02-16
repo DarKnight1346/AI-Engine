@@ -114,6 +114,14 @@ app.prepare().then(() => {
     }
   })();
 
+  // Node.js 18+ defaults requestTimeout to 300 000 ms (5 min).  Agent loops
+  // (planning, orchestration) routinely exceed that for heavy tasks.  Bump to
+  // 15 minutes so the HTTP connection stays open long enough for the plan
+  // route to return.  The WebSocket keep-alive already prevents idle drops.
+  server.requestTimeout = 900_000;   // 15 min
+  server.headersTimeout = 120_000;   // 2 min (receiving request headers — fine)
+  server.timeout = 0;                // no idle socket timeout (WS needs this)
+
   server.listen(port, hostname, () => {
     console.log('');
     console.log(`> Dashboard ready on http://${hostname}:${port}`);

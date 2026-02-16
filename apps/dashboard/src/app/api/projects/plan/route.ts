@@ -7,6 +7,7 @@ import type { LLMMessage, LLMToolDefinition, LLMMessageContent } from '@ai-engin
 import { getAuthFromRequest } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 900; // 15 minutes — heavy planning tasks with web research + tool loops
 
 // Initialize services (in production, these would be singletons)
 const embeddingService = new EmbeddingService();

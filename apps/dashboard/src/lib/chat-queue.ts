@@ -657,7 +657,9 @@ You MUST search memory for user preferences before every response — this is yo
           },
         );
       } finally {
-        // Release browser sessions (if any) so the tab is closed on the worker
+        // Browser sessions are kept alive by default so the agent can
+        // continue interacting with the same tab on follow-up messages.
+        // The browser pool's idle reaper handles cleanup after inactivity.
         executor.cleanup();
       }
 

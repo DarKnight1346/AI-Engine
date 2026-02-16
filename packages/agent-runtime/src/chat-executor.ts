@@ -326,6 +326,9 @@ export class ChatExecutor {
    */
   private readonly browserSessionId: string;
 
+  /** Whether cleanup() has already been called on this executor. */
+  private cleanedUp = false;
+
   /**
    * Dynamically switch the LLM tier used for subsequent calls.
    * Called by meta-tools (ask_user, delegate_tasks) to upgrade to Opus
@@ -341,13 +344,25 @@ export class ChatExecutor {
   }
 
   /**
-   * Release resources held by this executor (browser sessions, Docker
-   * containers, etc.).  MUST be called when the chat session / agent
-   * execution finishes to ensure browser tabs are closed, Docker containers
-   * are stopped, and pool slots are freed.
+   * Release resources held by this executor (Docker containers, etc.).
+   *
+   * Browser sessions are kept alive by default so the same tab persists
+   * across consecutive messages in the same chat.  The browser pool's idle
+   * reaper will reclaim them after
+   * {@link DEFAULT_CONFIG.browser.sessionIdleTimeoutMs} of inactivity.
+   * Pass `{ releaseBrowser: true }` to explicitly close the browser session
+   * (used by sub-agents and one-shot tasks that own a unique session).
+   *
+   * Idempotent — safe to call multiple times (e.g. sub-agent cleanup
+   * followed by parent cleanup for the same session).
    */
-  public cleanup(): void {
-    this.toolExecutor.releaseBrowserSession(this.browserSessionId);
+  public cleanup(options?: { releaseBrowser?: boolean }): void {
+    if (this.cleanedUp) return;
+    this.cleanedUp = true;
+
+    if (options?.releaseBrowser) {
+      this.toolExecutor.releaseBrowserSession(this.browserSessionId);
+    }
     // Docker containers created during this session are also cleaned up.
     // We reuse the browserSessionId as the Docker session ID since both
     // need session affinity to the same executor lifecycle.

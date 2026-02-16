@@ -415,8 +415,8 @@ export async function runSubAgent(
       modelUsed: tier,
     };
   } finally {
-    // Release browser sessions (if any) so the tab is closed on the worker
-    executor.cleanup();
+    // Sub-agents own a unique session — release the browser tab on the worker
+    executor.cleanup({ releaseBrowser: true });
   }
 }
 

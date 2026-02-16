@@ -523,6 +523,16 @@ export class WorkerHub {
    */
   releaseDockerSession(dockerSessionId: string): void {
     if (!dockerSessionId) return;
+    if (this.releasedDockerSessions.has(dockerSessionId)) return;
+    this.releasedDockerSessions.add(dockerSessionId);
+
+    // Prevent the set from growing unboundedly — prune after a threshold.
+    // Sessions older than the most recent 500 are unlikely to be re-released.
+    if (this.releasedDockerSessions.size > 500) {
+      const entries = [...this.releasedDockerSessions];
+      this.releasedDockerSessions = new Set(entries.slice(-250));
+    }
+
     for (const worker of this.workers.values()) {
       if (worker.authenticated && worker.dockerAvailable && worker.ws.readyState === 1) {
         this.send(worker.ws, {
@@ -973,6 +983,13 @@ export class WorkerHub {
    * to the same worker (and therefore the same browser tab).
    */
   private browserSessionWorkers = new Map<string, string>();
+
+  /**
+   * Docker sessions that have already been released.  Prevents duplicate
+   * cleanup broadcasts when `cleanup()` is called multiple times for the
+   * same session (e.g. sub-agents + parent sharing the same session ID).
+   */
+  private releasedDockerSessions = new Set<string>();
 
   /**
    * Dispatch a Docker-based task to a worker with Docker support.
