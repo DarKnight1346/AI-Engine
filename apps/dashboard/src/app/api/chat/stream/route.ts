@@ -229,6 +229,13 @@ export async function POST(request: NextRequest) {
                     success: event.success, output: event.output.slice(0, 10_000),
                   });
                   break;
+                case 'screenshot':
+                  send('screenshot', {
+                    slot,
+                    base64: (event as any).base64,
+                    toolCallId: (event as any).toolCallId,
+                  });
+                  break;
                 case 'background_task_start':
                   send('background_task', {
                     slot,

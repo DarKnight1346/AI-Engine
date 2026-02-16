@@ -262,6 +262,7 @@ export type ChatStreamEvent =
   | { type: 'tool_call_end'; name: string; id: string; success: boolean; output: string }
   | { type: 'iteration'; iteration: number; maxIterations: number }
   | { type: 'background_task_start'; taskId: string; toolName: string }
+  | { type: 'screenshot'; base64: string; toolCallId: string }
   | { type: 'done'; result: ChatExecutorResult }
   | { type: 'error'; message: string }
   // ── Orchestration / sub-agent events ──
@@ -559,6 +560,15 @@ export class ChatExecutor {
           };
         }
 
+        // If this was a browser_screenshot call, replace the base64 blob with
+        // a concise description so we don't waste LLM context tokens.
+        const innerToolName = toolCall.name === 'execute_tool'
+          ? String((toolCall.input as Record<string, unknown>)?.tool ?? '')
+          : toolCall.name;
+        if (innerToolName === 'browser_screenshot' && result.success) {
+          result = { ...result, output: 'Screenshot captured successfully and sent to the user.' };
+        }
+
         toolResults.push({
           type: 'tool_result',
           toolUseId: toolCall.id,
@@ -819,6 +829,16 @@ export class ChatExecutor {
             success: false,
             output: `Unknown tool "${toolCall.name}". Use discover_tools to find available tools, then execute_tool to run them.`,
           };
+        }
+
+        // If this was a browser_screenshot call, emit the image to the user
+        // and replace the base64 blob with a concise description for the LLM.
+        const innerToolName = toolCall.name === 'execute_tool'
+          ? String((toolCall.input as Record<string, unknown>)?.tool ?? '')
+          : toolCall.name;
+        if (innerToolName === 'browser_screenshot' && result.success) {
+          onEvent({ type: 'screenshot', base64: result.output, toolCallId: toolCall.id });
+          result = { ...result, output: 'Screenshot captured successfully and sent to the user.' };
         }
 
         onEvent({ type: 'tool_call_end', name: toolCall.name, id: toolCall.id, success: result.success, output: result.output });

@@ -34,7 +34,7 @@ export interface DashboardWSCallbacks {
   /** Fired for every chat stream event (token, done, error, tool, etc.) */
   onChatEvent?: (eventType: string, data: any) => void;
   /** Fired when the chat job finishes (all agents done). */
-  onChatComplete?: () => void;
+  onChatComplete?: (data?: any) => void;
   /** Fired with the full planning result. */
   onPlanResult?: (data: any) => void;
   /** Fired with incremental progress (0-100) during planning. */
@@ -201,7 +201,7 @@ export function useDashboardWS(callbacks: DashboardWSCallbacks = {}) {
           cbRef.current.onChatEvent?.(msg.event, msg.data);
           break;
         case 'chat:complete':
-          cbRef.current.onChatComplete?.();
+          cbRef.current.onChatComplete?.(msg.data);
           break;
         case 'plan:result':
           cbRef.current.onPlanResult?.(msg);

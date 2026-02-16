@@ -1575,6 +1575,16 @@ export default function ChatPage() {
   // ── WebSocket connection for chat streaming ──
   const { connected: wsConnected, sendChat } = useDashboardWS({
     onChatEvent: useCallback((eventType: string, data: any) => {
+      // Filter events to only process those belonging to the current session.
+      // The 'session' event establishes a new stream so it must not be filtered.
+      if (eventType !== 'session' && data?.sessionId) {
+        const currentSession = sessionIdRef.current;
+        const streamSession = streamSessionIdRef.current;
+        if (data.sessionId !== currentSession && data.sessionId !== streamSession) {
+          return;
+        }
+      }
+
       const slotMessages = slotMessagesRef.current;
       const slotContent = slotContentRef.current;
       const slot: string = data?.slot ?? '__default__';
@@ -1634,6 +1644,26 @@ export default function ChatPage() {
             startedAt: new Date().toISOString(),
           };
           setBackgroundTasks((prev) => [...prev, newTask]);
+          break;
+        }
+
+        case 'screenshot': {
+          const screenshotSlot: string = data?.slot ?? '__default__';
+          const msgId = slotMessagesRef.current.get(screenshotSlot);
+          if (msgId && data.base64) {
+            const att: Attachment = {
+              id: crypto.randomUUID(),
+              name: 'screenshot.png',
+              type: 'image/png',
+              url: `data:image/png;base64,${data.base64}`,
+              size: data.base64.length,
+            };
+            setMessages((msgs) => msgs.map((m) =>
+              m.id === msgId
+                ? { ...m, attachments: [...(m.attachments ?? []), att] }
+                : m
+            ));
+          }
           break;
         }
 
@@ -1766,7 +1796,15 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []),
 
-    onChatComplete: useCallback(() => {
+    onChatComplete: useCallback((data?: any) => {
+      // Only process completion for the active session
+      if (data?.sessionId) {
+        const currentSession = sessionIdRef.current;
+        const streamSession = streamSessionIdRef.current;
+        if (data.sessionId !== currentSession && data.sessionId !== streamSession) {
+          return;
+        }
+      }
       stopFlushTimer();
       setSending(false);
       abortRef.current = null;
@@ -2546,6 +2584,24 @@ export default function ChatPage() {
                       slotMessages.set(slot, msgId);
                       slotContent.set(slot, '');
                       setMessages((prev) => [...prev, { id: msgId, role: 'ai', content: '', timestamp: new Date(), agentName }]);
+                    }
+                    break;
+                  }
+                  case 'screenshot': {
+                    const msgId = slotMessages.get(slot);
+                    if (msgId && data.base64) {
+                      const att: Attachment = {
+                        id: crypto.randomUUID(),
+                        name: 'screenshot.png',
+                        type: 'image/png',
+                        url: `data:image/png;base64,${data.base64}`,
+                        size: data.base64.length,
+                      };
+                      setMessages((msgs) => msgs.map((m) =>
+                        m.id === msgId
+                          ? { ...m, attachments: [...(m.attachments ?? []), att] }
+                          : m
+                      ));
                     }
                     break;
                   }

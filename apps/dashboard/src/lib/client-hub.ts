@@ -217,14 +217,14 @@ export class ClientHub {
         attachments: msg.attachments,
         onEvent: (event: any) => {
           try {
-            this.forwardChatEvent(client.ws, event);
+            this.forwardChatEvent(client.ws, event, session.id);
           } catch { /* WS closed */ }
         },
         onComplete: (error?: Error) => {
           if (error) {
-            this.send(client.ws, { type: 'chat:event', event: 'error', data: { message: error.message } });
+            this.send(client.ws, { type: 'chat:event', event: 'error', data: { message: error.message, sessionId: session.id } });
           }
-          this.send(client.ws, { type: 'chat:complete' });
+          this.send(client.ws, { type: 'chat:complete', data: { sessionId: session.id } });
         },
       });
     } catch (err: any) {
@@ -238,7 +238,7 @@ export class ClientHub {
    * Map ChatStreamEvent types to the same event names the SSE stream used,
    * so the frontend event handling logic stays identical.
    */
-  private forwardChatEvent(ws: WebSocket, event: any): void {
+  private forwardChatEvent(ws: WebSocket, event: any, sessionId?: string): void {
     const slot = event.slot as string | undefined;
     let eventType: string;
     let data: any;
@@ -263,6 +263,10 @@ export class ClientHub {
       case 'tool_call_end':
         eventType = 'tool';
         data = { slot, phase: 'end', name: event.name, id: event.id, success: event.success, output: event.output?.slice(0, 10_000) };
+        break;
+      case 'screenshot':
+        eventType = 'screenshot';
+        data = { slot, base64: event.base64, toolCallId: event.toolCallId };
         break;
       case 'background_task_start':
         eventType = 'background_task';
@@ -314,6 +318,7 @@ export class ClientHub {
         return;
     }
 
+    if (sessionId) data.sessionId = sessionId;
     this.send(ws, { type: 'chat:event', event: eventType, data });
   }
 
