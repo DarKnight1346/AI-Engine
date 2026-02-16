@@ -38,6 +38,18 @@ export class Worker {
   /** Registered tools available for execution (browser, shell, filesystem, etc.) */
   private tools = new Map<string, Tool>();
 
+  /**
+   * Active browser sessions: browserSessionId → per-session tools.
+   * Each agent gets its own isolated browser tab that persists across
+   * multiple tool calls. Sessions are released explicitly when the agent
+   * finishes, or reaped by the pool's idle timeout if the agent crashes.
+   */
+  private activeBrowserSessions = new Map<string, {
+    tools: Map<string, Tool>;
+    release: () => Promise<void>;
+    createdAt: Date;
+  }>();
+
   /** Path to stored SSH keys */
   private keysDir = join(os.homedir(), '.ai-engine', 'keys');
 
@@ -71,13 +83,15 @@ export class Worker {
     this.dockerAvailable = await this.detectDocker();
     console.log(`[worker] Docker: ${this.dockerAvailable ? 'available' : 'not available'}`);
 
-    // Initialise browser pool if capable
+    // Initialise browser pool if capable.
+    // Linux workers run headless; macOS workers can run headed or headless.
     if (capabilities.browserCapable) {
       try {
         const { BrowserPool } = await import('@ai-engine/browser');
-        this.browserPool = new BrowserPool();
+        const headless = capabilities.os !== 'darwin' || !capabilities.hasDisplay;
+        this.browserPool = new BrowserPool({ headless });
         await this.browserPool.initialize();
-        console.log('[worker] Browser pool initialised');
+        console.log(`[worker] Browser pool initialised (headless: ${headless})`);
       } catch (err) {
         console.warn('[worker] Browser pool init failed:', err);
       }
@@ -100,10 +114,12 @@ export class Worker {
         console.log(`[worker] Update available: v${msg.version} — ${msg.bundleUrl}`);
       },
       onKeysSync: (msg) => this.handleKeysSync(msg),
+      onBrowserSessionRelease: (msg) => this.handleBrowserSessionRelease(msg),
       onDockerTaskAssign: (msg) => this.handleDockerTaskAssign(msg),
       onDockerTaskFinalize: (msg) => this.handleDockerTaskFinalize(msg),
       onDockerTaskCancel: (msg) => this.handleDockerTaskCancel(msg),
       onDockerCleanup: (msg) => this.handleDockerCleanup(msg),
+      onDockerToolExecute: (msg) => this.handleDockerToolExecute(msg),
     });
 
     const workerId = await this.client.connect();
@@ -125,6 +141,13 @@ export class Worker {
     }
     this.activeContainers.clear();
 
+    // Release all active browser sessions before shutting down the pool
+    for (const [sessionId, session] of this.activeBrowserSessions) {
+      try { await session.release(); } catch { /* ignore */ }
+      console.log(`[worker] Released browser session ${sessionId} during shutdown`);
+    }
+    this.activeBrowserSessions.clear();
+
     if (this.browserPool) {
       try { await this.browserPool.shutdown(); } catch { /* ignore */ }
     }
@@ -141,31 +164,32 @@ export class Worker {
   /**
    * Handle a tool execution request from the dashboard.
    * The dashboard's ChatExecutor dispatches worker-bound tools here.
+   *
+   * Browser tools use session-based management: all calls sharing the same
+   * `browserSessionId` operate on the same browser tab. The session persists
+   * until an explicit `browser:session:release` message arrives or the
+   * pool's idle reaper reclaims it.
    */
   private async handleToolExecute(
-    msg: { type: 'tool:execute'; callId: string; toolName: string; input: Record<string, unknown> },
+    msg: { type: 'tool:execute'; callId: string; toolName: string; input: Record<string, unknown>; browserSessionId?: string },
   ): Promise<void> {
-    const { callId, toolName, input } = msg;
-    console.log(`[worker] Tool execute: ${toolName} (call: ${callId})`);
-
-    // Build per-call browser tools if the tool is browser-related
-    let browserRelease: (() => Promise<void>) | null = null;
-    if (toolName.startsWith('browser_') && this.browserPool && !this.tools.has(toolName)) {
-      try {
-        const { createPerTaskBrowserTools } = await import('@ai-engine/browser');
-        const { tools, release } = createPerTaskBrowserTools(this.browserPool, callId);
-        browserRelease = release;
-        for (const t of tools) {
-          this.tools.set(t.name, t);
-        }
-      } catch (err) {
-        this.client?.sendToolResult(callId, false, `Browser tools unavailable: ${(err as Error).message}`);
-        return;
-      }
-    }
+    const { callId, toolName, input, browserSessionId } = msg;
+    console.log(`[worker] Tool execute: ${toolName} (call: ${callId}${browserSessionId ? `, session: ${browserSessionId}` : ''})`);
 
     try {
-      const tool = this.tools.get(toolName);
+      let tool: Tool | undefined;
+
+      if (toolName.startsWith('browser_') && this.browserPool) {
+        // Look up (or create) a per-session set of browser tools
+        tool = await this.getBrowserTool(toolName, browserSessionId ?? callId);
+        if (!tool) {
+          this.client?.sendToolResult(callId, false, `Browser tool "${toolName}" not found.`);
+          return;
+        }
+      } else {
+        tool = this.tools.get(toolName);
+      }
+
       if (!tool) {
         this.client?.sendToolResult(callId, false, `Unknown tool "${toolName}" — not registered on this worker.`);
         return;
@@ -173,7 +197,8 @@ export class Worker {
 
       const context: ToolContext = {
         nodeId: this.client?.getWorkerId() ?? 'worker',
-        agentId: 'dashboard', // tool is being called by the dashboard's agent
+        agentId: 'dashboard',
+        browserSessionId,
         capabilities: {
           os: os.platform() as any,
           hasDisplay: os.platform() === 'darwin',
@@ -185,13 +210,80 @@ export class Worker {
 
       const result = await tool.execute(input, context);
       this.client?.sendToolResult(callId, result.success, result.output);
+
+      // If the agent explicitly called browser_close, clean up the session
+      if (toolName === 'browser_close' && browserSessionId) {
+        await this.releaseBrowserSession(browserSessionId);
+      }
     } catch (err: any) {
       this.client?.sendToolResult(callId, false, `Tool execution error: ${err.message}`);
-    } finally {
-      if (browserRelease) {
-        try { await browserRelease(); } catch { /* ignore */ }
-      }
     }
+    // NOTE: We do NOT release the browser session here. The session persists
+    // across tool calls until explicitly released by browser:session:release
+    // or by the agent calling browser_close.
+  }
+
+  /**
+   * Get a browser tool from an existing session, or create a new session.
+   * Sessions are keyed by browserSessionId so the same agent always gets
+   * the same browser tab across multiple tool calls.
+   */
+  private async getBrowserTool(toolName: string, browserSessionId: string): Promise<Tool | undefined> {
+    // Check for existing session
+    let session = this.activeBrowserSessions.get(browserSessionId);
+    if (session) {
+      return session.tools.get(toolName);
+    }
+
+    // Create a new session
+    try {
+      const { createPerTaskBrowserTools } = await import('@ai-engine/browser');
+      const { tools, release } = createPerTaskBrowserTools(this.browserPool, browserSessionId);
+
+      const toolMap = new Map<string, Tool>();
+      for (const t of tools) {
+        toolMap.set(t.name, t);
+      }
+
+      this.activeBrowserSessions.set(browserSessionId, {
+        tools: toolMap,
+        release,
+        createdAt: new Date(),
+      });
+
+      console.log(`[worker] Created browser session ${browserSessionId} (active: ${this.activeBrowserSessions.size})`);
+      return toolMap.get(toolName);
+    } catch (err) {
+      console.error(`[worker] Failed to create browser session ${browserSessionId}:`, (err as Error).message);
+      return undefined;
+    }
+  }
+
+  /**
+   * Release a browser session, closing its browser tab and freeing the pool slot.
+   */
+  private async releaseBrowserSession(browserSessionId: string): Promise<void> {
+    const session = this.activeBrowserSessions.get(browserSessionId);
+    if (!session) return;
+
+    this.activeBrowserSessions.delete(browserSessionId);
+    try {
+      await session.release();
+      console.log(`[worker] Released browser session ${browserSessionId} (active: ${this.activeBrowserSessions.size})`);
+    } catch (err) {
+      console.warn(`[worker] Error releasing browser session ${browserSessionId}:`, (err as Error).message);
+    }
+  }
+
+  /**
+   * Handle an explicit browser session release request from the dashboard.
+   * Sent when an agent finishes execution.
+   */
+  private async handleBrowserSessionRelease(
+    msg: { type: 'browser:session:release'; browserSessionId: string },
+  ): Promise<void> {
+    console.log(`[worker] Dashboard requested release of browser session ${msg.browserSessionId}`);
+    await this.releaseBrowserSession(msg.browserSessionId);
   }
 
   // -----------------------------------------------------------------------
@@ -547,6 +639,58 @@ export class Worker {
   // Docker helpers
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // Docker tool execution (routed from dashboard agent loop)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Handle a docker:tool:execute message from the dashboard.
+   * Routes the tool call into the correct Docker container via `docker exec`.
+   */
+  private async handleDockerToolExecute(
+    msg: { type: 'docker:tool:execute'; callId: string; taskId: string; toolName: string; input: Record<string, unknown> },
+  ): Promise<void> {
+    const { callId, taskId, toolName, input } = msg;
+
+    const container = this.activeContainers.get(taskId);
+    if (!container) {
+      this.client?.sendDockerToolResult(callId, false, `No active container for task ${taskId} on this worker.`);
+      return;
+    }
+
+    console.log(`[worker] Docker tool: ${toolName} in ${container.containerName} (call: ${callId})`);
+
+    try {
+      switch (toolName) {
+        case 'docker_exec': {
+          const command = input.command as string;
+          if (!command) {
+            this.client?.sendDockerToolResult(callId, false, 'Missing "command" parameter.');
+            return;
+          }
+          const { stdout, stderr } = await this.dockerExec(
+            container.containerName,
+            ['sh', '-c', command],
+            300_000,
+          );
+          const output = stdout + (stderr ? `\n[stderr] ${stderr}` : '');
+          this.client?.sendDockerToolResult(callId, true, output.slice(0, 100_000));
+          break;
+        }
+
+        default:
+          this.client?.sendDockerToolResult(callId, false, `Unknown docker tool: ${toolName}`);
+      }
+    } catch (err: any) {
+      const errMsg = err.stderr || err.message || String(err);
+      this.client?.sendDockerToolResult(callId, false, `Docker exec failed: ${errMsg}`.slice(0, 50_000));
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Docker utilities
+  // -----------------------------------------------------------------------
+
   /** Check if Docker daemon is running. */
   private async detectDocker(): Promise<boolean> {
     try {
@@ -642,7 +786,9 @@ WORKDIR /workspace
     return {
       os: platform as NodeCapabilities['os'],
       hasDisplay: platform === 'darwin',
-      browserCapable: platform === 'darwin',
+      // Browser automation works on all platforms:
+      // macOS can run headed or headless, Linux runs headless.
+      browserCapable: platform === 'darwin' || platform === 'linux',
       environment: config.environment,
       customTags: config.customTags,
     };

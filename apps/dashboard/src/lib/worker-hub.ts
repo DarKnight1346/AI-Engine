@@ -60,6 +60,10 @@ export class WorkerHub {
   private workers = new Map<string, ConnectedWorker>();
   private pendingAgentCalls = new Map<string, PendingAgentCall>();
   private pendingToolCalls = new Map<string, PendingToolCall>();
+  private pendingDockerToolCalls = new Map<string, PendingToolCall>();
+
+  /** Track which worker hosts containers for each project (affinity). */
+  private projectWorkerAffinity = new Map<string, string>(); // projectId → workerId
 
   /** Redis subscriber for Docker orchestration events from ProjectOrchestrator */
   private redisSub: any = null;
@@ -347,6 +351,8 @@ export class WorkerHub {
           console.log(`[hub] Docker status from ${worker.workerId}: container=${rawMsg.containerId} task=${rawMsg.taskId} status=${rawMsg.status}`);
         } else if (rawMsg.type === 'docker:task:complete') {
           await this.handleDockerTaskComplete(worker.workerId, rawMsg);
+        } else if (rawMsg.type === 'docker:tool:result') {
+          this.handleDockerToolResult(rawMsg);
         }
         break;
       }
@@ -438,14 +444,39 @@ export class WorkerHub {
    * dispatch worker-bound tools (browser, shell, filesystem) to workers.
    * The LLM agentic loop runs on the dashboard; only tool execution
    * happens on the worker.
+   *
+   * For browser tools, `browserSessionId` enables session affinity: all
+   * calls sharing the same ID are routed to the same worker so they
+   * operate on the same browser tab.
    */
   async executeToolOnWorker(
     toolName: string,
     input: Record<string, unknown>,
     requiredCapabilities?: Partial<NodeCapabilities>,
     timeoutMs = 120_000,
+    browserSessionId?: string,
   ): Promise<{ success: boolean; output: string }> {
-    const worker = this.pickWorker(requiredCapabilities);
+    let worker: ConnectedWorker | null = null;
+
+    // Browser session affinity: reuse the same worker for the same session
+    if (browserSessionId) {
+      const existingWorkerId = this.browserSessionWorkers.get(browserSessionId);
+      if (existingWorkerId) {
+        const existing = this.workers.get(existingWorkerId);
+        if (existing?.authenticated && existing.ws.readyState === 1) {
+          worker = existing;
+        } else {
+          // Worker disconnected; clear stale affinity
+          this.browserSessionWorkers.delete(browserSessionId);
+        }
+      }
+    }
+
+    // Fall back to picking the best available worker
+    if (!worker) {
+      worker = this.pickWorker(requiredCapabilities);
+    }
+
     if (!worker) {
       return {
         success: false,
@@ -453,29 +484,56 @@ export class WorkerHub {
       };
     }
 
+    // Record session affinity for browser tools
+    if (browserSessionId && !this.browserSessionWorkers.has(browserSessionId)) {
+      this.browserSessionWorkers.set(browserSessionId, worker.workerId);
+    }
+
     const callId = globalThis.crypto.randomUUID();
 
     return new Promise<{ success: boolean; output: string }>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingToolCalls.delete(callId);
-        resolve({ success: false, output: `Tool "${toolName}" timed out after ${timeoutMs / 1000}s on worker ${worker.workerId}.` });
+        resolve({ success: false, output: `Tool "${toolName}" timed out after ${timeoutMs / 1000}s on worker ${worker!.workerId}.` });
       }, timeoutMs);
 
       this.pendingToolCalls.set(callId, {
         callId,
-        workerId: worker.workerId,
+        workerId: worker!.workerId,
         resolve,
         reject,
         timeout,
       });
 
-      this.send(worker.ws, {
+      this.send(worker!.ws, {
         type: 'tool:execute',
         callId,
         toolName,
         input,
-      });
+        browserSessionId,
+      } as any);
     });
+  }
+
+  /**
+   * Release a browser session on the worker that owns it.
+   * Sends a message to the worker to close the browser tab and free the slot.
+   * Also clears the session affinity mapping.
+   */
+  releaseBrowserSession(browserSessionId: string): void {
+    const workerId = this.browserSessionWorkers.get(browserSessionId);
+    if (!workerId) return;
+
+    this.browserSessionWorkers.delete(browserSessionId);
+
+    const worker = this.workers.get(workerId);
+    if (worker?.authenticated && worker.ws.readyState === 1) {
+      this.send(worker.ws, {
+        type: 'browser:session:release',
+        browserSessionId,
+      } as any);
+      console.log(`[hub] Released browser session ${browserSessionId} on worker ${workerId}`);
+    }
   }
 
   /**
@@ -719,6 +777,8 @@ export class WorkerHub {
     activeTasks: number;
     connectedAt: string;
     lastHeartbeat: string;
+    dockerAvailable: boolean;
+    keysReceived: boolean;
   }> {
     return Array.from(this.workers.values())
       .filter((w) => w.authenticated)
@@ -730,7 +790,39 @@ export class WorkerHub {
         activeTasks: w.activeTasks,
         connectedAt: w.connectedAt.toISOString(),
         lastHeartbeat: w.lastHeartbeat.toISOString(),
+        dockerAvailable: w.dockerAvailable,
+        keysReceived: w.keysReceived,
       }));
+  }
+
+  /**
+   * Get detailed info about a specific connected worker.
+   * Returns null if the worker is not connected.
+   */
+  getWorkerDetails(workerId: string): {
+    workerId: string;
+    hostname: string;
+    capabilities: NodeCapabilities | null;
+    load: number;
+    activeTasks: number;
+    connectedAt: string;
+    lastHeartbeat: string;
+    dockerAvailable: boolean;
+    keysReceived: boolean;
+  } | null {
+    const w = this.workers.get(workerId);
+    if (!w || !w.authenticated) return null;
+    return {
+      workerId: w.workerId,
+      hostname: w.hostname,
+      capabilities: w.capabilities,
+      load: w.load,
+      activeTasks: w.activeTasks,
+      connectedAt: w.connectedAt.toISOString(),
+      lastHeartbeat: w.lastHeartbeat.toISOString(),
+      dockerAvailable: w.dockerAvailable,
+      keysReceived: w.keysReceived,
+    };
   }
 
   getWorkerCount(): number {
@@ -752,6 +844,64 @@ export class WorkerHub {
 
     this.workers.delete(workerId);
     return true;
+  }
+
+  /**
+   * Alias for disconnectWorker — satisfies the WorkerToolDispatcher interface.
+   */
+  disconnectWorkerNode(workerId: string): boolean {
+    return this.disconnectWorker(workerId);
+  }
+
+  // -----------------------------------------------------------------------
+  // Targeted tool execution (specific worker by ID)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Execute a tool on a specific worker identified by its ID.
+   * Unlike executeToolOnWorker, this does NOT auto-pick — it targets
+   * the exact worker. Returns an error if the worker is not connected.
+   */
+  async executeToolOnSpecificWorker(
+    workerId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    timeoutMs = 120_000,
+  ): Promise<{ success: boolean; output: string }> {
+    const worker = this.workers.get(workerId);
+    if (!worker || !worker.authenticated) {
+      return {
+        success: false,
+        output: `Worker "${workerId}" is not connected. Use listWorkers to see available workers.`,
+      };
+    }
+
+    const callId = globalThis.crypto.randomUUID();
+
+    return new Promise<{ success: boolean; output: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingToolCalls.delete(callId);
+        resolve({
+          success: false,
+          output: `Tool "${toolName}" timed out after ${timeoutMs / 1000}s on worker ${workerId} (${worker.hostname}).`,
+        });
+      }, timeoutMs);
+
+      this.pendingToolCalls.set(callId, {
+        callId,
+        workerId,
+        resolve,
+        reject,
+        timeout,
+      });
+
+      this.send(worker.ws, {
+        type: 'tool:execute',
+        callId,
+        toolName,
+        input,
+      });
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -800,6 +950,13 @@ export class WorkerHub {
   private dockerTaskWorkers = new Map<string, string>(); // taskId → workerId
 
   /**
+   * Browser session affinity: browserSessionId → workerId.
+   * Ensures all browser tool calls from the same agent session are routed
+   * to the same worker (and therefore the same browser tab).
+   */
+  private browserSessionWorkers = new Map<string, string>();
+
+  /**
    * Dispatch a Docker-based task to a worker with Docker support.
    * The worker will handle the full lifecycle: container creation, execution,
    * git finalization, and cleanup. Results are reported back via WebSocket
@@ -814,8 +971,8 @@ export class WorkerHub {
     rolePrompt?: string;
     repoUrl: string;
   }): Promise<{ dispatched: boolean; workerId?: string; error?: string }> {
-    // Find a worker with Docker available
-    const worker = this.pickDockerWorker();
+    // Find a worker with Docker available (prefers affinity for same project)
+    const worker = this.pickDockerWorker(opts.projectId);
     if (!worker) {
       return { dispatched: false, error: 'No available worker with Docker support' };
     }
@@ -834,28 +991,214 @@ export class WorkerHub {
     worker.activeTasks += 1;
     // Track which worker has this task so we can route finalize/cleanup
     this.dockerTaskWorkers.set(opts.taskId, worker.workerId);
+    // Set affinity so future containers for the same project prefer this worker
+    this.projectWorkerAffinity.set(opts.projectId, worker.workerId);
 
     return { dispatched: true, workerId: worker.workerId };
   }
 
   /**
    * Pick the best worker with Docker capability.
+   * If a projectId is provided, apply affinity scoring to prefer the worker
+   * that already hosts containers for this project (co-location).
    */
-  private pickDockerWorker(): ConnectedWorker | null {
+  private pickDockerWorker(projectId?: string): ConnectedWorker | null {
+    const affinityWorkerId = projectId
+      ? this.projectWorkerAffinity.get(projectId)
+      : undefined;
+
     let best: ConnectedWorker | null = null;
     let bestScore = Infinity;
 
     for (const worker of this.workers.values()) {
       if (!worker.authenticated || !worker.dockerAvailable || !worker.keysReceived) continue;
 
-      const score = worker.load + worker.activeTasks * 10;
+      let score = worker.load + worker.activeTasks * 10;
+
+      // Strong affinity bonus: prefer the worker that already hosts this project
+      if (affinityWorkerId && worker.workerId === affinityWorkerId) {
+        score -= 100;
+      }
+
       if (score < bestScore) {
         bestScore = score;
         best = worker;
       }
     }
 
+    if (affinityWorkerId && best && best.workerId !== affinityWorkerId) {
+      console.warn(
+        `[hub] Project ${projectId} has affinity to worker ${affinityWorkerId}, but picked ${best.workerId} (affinity worker overloaded or unavailable)`,
+      );
+    }
+
     return best;
+  }
+
+  // -----------------------------------------------------------------------
+  // Docker tool execution (dashboard-driven agent loop)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Execute a Docker tool on the worker that owns the specified container.
+   * Routes the call via WebSocket and waits for the result.
+   * Used by the DockerDispatcher to bridge agent tool calls to workers.
+   */
+  async executeDockerToolOnWorker(
+    taskId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    timeoutMs = 300_000,
+  ): Promise<{ success: boolean; output: string }> {
+    const workerId = this.dockerTaskWorkers.get(taskId);
+    if (!workerId) {
+      return { success: false, output: `No worker assigned for Docker task ${taskId}.` };
+    }
+
+    const worker = this.workers.get(workerId);
+    if (!worker || !worker.authenticated) {
+      return { success: false, output: `Worker ${workerId} for task ${taskId} is not connected.` };
+    }
+
+    const callId = globalThis.crypto.randomUUID();
+
+    return new Promise<{ success: boolean; output: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingDockerToolCalls.delete(callId);
+        resolve({
+          success: false,
+          output: `Docker tool "${toolName}" timed out after ${timeoutMs / 1000}s on worker ${workerId}.`,
+        });
+      }, timeoutMs);
+
+      this.pendingDockerToolCalls.set(callId, {
+        callId,
+        workerId,
+        resolve,
+        reject,
+        timeout,
+      });
+
+      this.send(worker.ws, {
+        type: 'docker:tool:execute',
+        callId,
+        taskId,
+        toolName,
+        input,
+      } as any);
+    });
+  }
+
+  /**
+   * Handle a docker:tool:result message from a worker.
+   * Resolves the pending promise for the tool call.
+   */
+  private handleDockerToolResult(msg: { callId: string; success: boolean; output: string }): void {
+    const pending = this.pendingDockerToolCalls.get(msg.callId);
+    if (!pending) return;
+
+    clearTimeout(pending.timeout);
+    this.pendingDockerToolCalls.delete(msg.callId);
+    pending.resolve({ success: msg.success, output: msg.output });
+  }
+
+  /**
+   * Create a Docker container on a worker for a given project/task.
+   * Returns the container and worker IDs.
+   * Used by DockerDispatcher.createContainer().
+   */
+  async createDockerContainer(opts: {
+    projectId: string;
+    taskId: string;
+    config: Record<string, unknown>;
+    repoUrl: string;
+  }): Promise<{ containerId: string; workerId: string }> {
+    const worker = this.pickDockerWorker(opts.projectId);
+    if (!worker) {
+      throw new Error('No available worker with Docker support');
+    }
+
+    this.send(worker.ws, {
+      type: 'docker:task:assign',
+      taskId: opts.taskId,
+      projectId: opts.projectId,
+      agentId: 'swarm-docker',
+      containerConfig: opts.config,
+      taskPrompt: '',
+      repoUrl: opts.repoUrl,
+    } as any);
+
+    worker.activeTasks += 1;
+    this.dockerTaskWorkers.set(opts.taskId, worker.workerId);
+    this.projectWorkerAffinity.set(opts.projectId, worker.workerId);
+
+    return {
+      containerId: `${opts.taskId}`,
+      workerId: worker.workerId,
+    };
+  }
+
+  /**
+   * Finalize a Docker task container: commit, push, merge, cleanup.
+   * Sends finalize command and waits for result via Redis.
+   */
+  async finalizeDockerContainer(taskId: string, commitMessage: string): Promise<void> {
+    const workerId = this.dockerTaskWorkers.get(taskId);
+    if (!workerId) throw new Error(`No worker assigned for task ${taskId}`);
+
+    const worker = this.workers.get(workerId);
+    if (!worker) throw new Error(`Worker ${workerId} not connected`);
+
+    this.send(worker.ws, {
+      type: 'docker:task:finalize',
+      taskId,
+      commitMessage,
+    });
+  }
+
+  /**
+   * Destroy a Docker task container without finalizing.
+   */
+  async destroyDockerContainer(taskId: string): Promise<void> {
+    const workerId = this.dockerTaskWorkers.get(taskId);
+    if (!workerId) return;
+
+    const worker = this.workers.get(workerId);
+    if (worker) {
+      this.send(worker.ws, {
+        type: 'docker:task:cancel',
+        taskId,
+        containerId: taskId,
+      });
+      worker.activeTasks = Math.max(0, worker.activeTasks - 1);
+    }
+
+    this.dockerTaskWorkers.delete(taskId);
+  }
+
+  /**
+   * List all active containers for a project (across workers).
+   */
+  getProjectContainers(projectId: string): Array<{ taskId: string; workerId: string }> {
+    const containers: Array<{ taskId: string; workerId: string }> = [];
+    for (const [taskId, workerId] of this.dockerTaskWorkers) {
+      containers.push({ taskId, workerId });
+    }
+    return containers;
+  }
+
+  /**
+   * Get the project → worker affinity map (for diagnostics).
+   */
+  getProjectAffinity(): Map<string, string> {
+    return new Map(this.projectWorkerAffinity);
+  }
+
+  /**
+   * Clear affinity for a project (e.g., when all containers are cleaned up).
+   */
+  clearProjectAffinity(projectId: string): void {
+    this.projectWorkerAffinity.delete(projectId);
   }
 
   /**

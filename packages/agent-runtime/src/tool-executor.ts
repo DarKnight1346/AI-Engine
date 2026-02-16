@@ -1,5 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from './types.js';
 import type { ToolManifestEntry } from './tool-index.js';
+import type { NodeCapabilities } from '@ai-engine/shared';
 
 // ---------------------------------------------------------------------------
 // Hybrid ToolExecutor — routes execution to dashboard or worker
@@ -43,6 +44,14 @@ const DASHBOARD_SAFE_TOOLS = new Set([
   'webDeepSearchWithContext',
   // Notifications
   'sendNotification',
+  // CAPTCHA solving (CapSolver — HTTP API, dashboard-safe)
+  'solveCaptcha',
+  'solveImageCaptcha',
+  'getCaptchaBalance',
+  // Worker management (run on dashboard, query WorkerHub)
+  'listWorkers',
+  'getWorkerStatus',
+  'disconnectWorker',
 ]);
 
 /** Tools that must be dispatched to a worker node */
@@ -78,6 +87,22 @@ export function routeTool(toolName: string): ToolExecutionRoute {
   return 'unknown';
 }
 
+// ---------------------------------------------------------------------------
+// Worker info type (returned by getConnectedWorkers / getWorkerDetails)
+// ---------------------------------------------------------------------------
+
+export interface WorkerInfo {
+  workerId: string;
+  hostname: string;
+  capabilities: NodeCapabilities | null;
+  load: number;
+  activeTasks: number;
+  connectedAt: string;
+  lastHeartbeat: string;
+  dockerAvailable: boolean;
+  keysReceived: boolean;
+}
+
 /**
  * Interface for the WorkerHub's tool dispatch capability.
  * Defined here to avoid circular dependency on the dashboard package.
@@ -88,7 +113,43 @@ export interface WorkerToolDispatcher {
     input: Record<string, unknown>,
     requiredCapabilities?: Record<string, unknown>,
     timeoutMs?: number,
+    browserSessionId?: string,
   ): Promise<{ success: boolean; output: string }>;
+
+  /**
+   * Execute a tool on a specific worker identified by its ID.
+   * Unlike executeToolOnWorker, this does NOT auto-pick — it targets
+   * the exact worker. Returns an error if the worker is not connected.
+   */
+  executeToolOnSpecificWorker(
+    workerId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<{ success: boolean; output: string }>;
+
+  /**
+   * Release a browser session on the worker that owns it.
+   * Called when an agent finishes execution to free the browser tab.
+   */
+  releaseBrowserSession(browserSessionId: string): void;
+
+  /**
+   * Get a list of all connected and authenticated workers.
+   */
+  getConnectedWorkers(): WorkerInfo[];
+
+  /**
+   * Get detailed status information for a specific worker.
+   * Returns null if the worker is not connected.
+   */
+  getWorkerDetails(workerId: string): WorkerInfo | null;
+
+  /**
+   * Disconnect a worker by its ID, closing its WebSocket connection.
+   * Returns true if the worker was found and disconnected.
+   */
+  disconnectWorkerNode(workerId: string): boolean;
 }
 
 /**
@@ -132,6 +193,11 @@ export class ToolExecutor {
 
   /**
    * Execute a tool, routing to local execution or worker dispatch.
+   *
+   * Worker tools support an optional `workerId` parameter in their input.
+   * When provided, the tool is dispatched to that specific worker instead
+   * of auto-selecting the least-loaded one. The `workerId` is stripped
+   * from the input before being sent to the worker.
    */
   async execute(
     toolName: string,
@@ -167,16 +233,36 @@ export class ToolExecutor {
         };
       }
 
-      // Browser tools require macOS workers with display capability
+      // Extract optional workerId from input (agent can target a specific worker)
+      const { workerId: targetWorkerId, ...cleanInput } = input as { workerId?: string } & Record<string, unknown>;
+
+      // If a specific worker is targeted, route directly to it
+      if (targetWorkerId && typeof targetWorkerId === 'string') {
+        return await this.workerDispatcher.executeToolOnSpecificWorker(
+          targetWorkerId,
+          toolName,
+          cleanInput,
+        );
+      }
+
+      // Browser tools require workers with browser capability.
+      // Session ID ensures all browser calls from the same agent use the
+      // same browser tab on the same worker (session affinity).
       const isBrowserTool = toolName.startsWith('browser_');
       const requiredCaps = isBrowserTool
-        ? { browserCapable: true, os: 'darwin' }
+        ? { browserCapable: true }
+        : undefined;
+
+      const browserSessionId = isBrowserTool
+        ? context.browserSessionId ?? context.workItemId ?? context.agentId
         : undefined;
 
       return await this.workerDispatcher.executeToolOnWorker(
         toolName,
-        input,
+        cleanInput,
         requiredCaps,
+        undefined,
+        browserSessionId,
       );
     }
 
@@ -184,5 +270,14 @@ export class ToolExecutor {
       success: false,
       output: `Unknown tool "${toolName}". Use discover_tools to find available tools.`,
     };
+  }
+
+  /**
+   * Release a browser session on the worker that owns it.
+   * Should be called when an agent/chat session finishes to ensure the
+   * browser tab is closed and the slot is freed for other agents.
+   */
+  releaseBrowserSession(browserSessionId: string): void {
+    this.workerDispatcher?.releaseBrowserSession(browserSessionId);
   }
 }

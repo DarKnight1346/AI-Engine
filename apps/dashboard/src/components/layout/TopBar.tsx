@@ -3,13 +3,15 @@
 import { useState, useEffect } from 'react';
 import {
   AppBar, Toolbar, Typography, IconButton, Badge, Avatar, Box, useMediaQuery, useTheme,
-  Menu, MenuItem, ListItemIcon, Divider,
+  Menu, MenuItem, ListItemIcon, Divider, Tooltip,
 } from '@mui/material';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import SearchIcon from '@mui/icons-material/Search';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import LogoutIcon from '@mui/icons-material/Logout';
 import PersonIcon from '@mui/icons-material/Person';
+import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
+import { useDashboardWS } from '@/hooks/useDashboardWS';
 
 export default function TopBar() {
   const theme = useTheme();
@@ -17,6 +19,11 @@ export default function TopBar() {
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [userName, setUserName] = useState('A');
   const [userEmail, setUserEmail] = useState('');
+
+  // Establish WebSocket connection as soon as any dashboard page loads.
+  // The singleton manager keeps a single connection regardless of how many
+  // components also call useDashboardWS (chat, planning, etc.).
+  const { connected: wsConnected } = useDashboardWS();
 
   useEffect(() => {
     try {
@@ -52,6 +59,16 @@ export default function TopBar() {
         )}
 
         <Box sx={{ flex: 1 }} />
+
+        <Tooltip title={wsConnected ? 'WebSocket connected' : 'WebSocket disconnected'}>
+          <FiberManualRecordIcon
+            sx={{
+              fontSize: 10,
+              color: wsConnected ? 'success.main' : 'text.disabled',
+              transition: 'color 0.3s ease',
+            }}
+          />
+        </Tooltip>
 
         <IconButton size="large" aria-label="search">
           <SearchIcon />

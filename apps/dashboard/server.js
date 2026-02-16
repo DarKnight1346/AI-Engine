@@ -1,12 +1,16 @@
 /**
  * Custom server entry point — serves HTTP (Next.js) and WebSocket on the same port.
  *
- * Workers connect via `wss://<tunnel-url>/ws/worker` and all data flows
- * through this hub. No direct DB/Redis access is required on worker nodes.
+ * Workers connect via `wss://<tunnel-url>/ws/worker` and browser clients via
+ * `wss://<tunnel-url>/ws/client`. All data flows through these WebSocket hubs.
+ * No direct DB/Redis access is required on worker nodes.
  *
- * Usage:
- *   NODE_ENV=production node server.js
- *   (or in dev: npx next dev — the hub only starts in production)
+ * This server is used for BOTH development and production:
+ *   Dev:  node server.js          (Next.js runs in dev mode with HMR)
+ *   Prod: NODE_ENV=production node server.js
+ *
+ * The `pnpm dev` script invokes this file directly so that WebSocket
+ * endpoints are available during development as well.
  */
 
 const { createServer } = require('http');

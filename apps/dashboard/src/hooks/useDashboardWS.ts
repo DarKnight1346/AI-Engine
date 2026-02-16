@@ -58,6 +58,8 @@ let _attempt = 0;
 let _stopped = true;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _authenticated = false;
+/** Monotonically increasing ID so stale onclose handlers can detect they belong to an old socket. */
+let _wsGeneration = 0;
 
 /** Set of all active listeners (one per hook instance). */
 const _listeners = new Set<Listener>();
@@ -78,11 +80,15 @@ function _connect() {
   if (_ws && (_ws.readyState === WebSocket.CONNECTING || _ws.readyState === WebSocket.OPEN)) return;
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${window.location.host}/ws/client`);
+  const url = `${protocol}//${window.location.host}/ws/client`;
+  console.log(`[ws] Connecting to ${url} ...`);
+
+  const gen = ++_wsGeneration;
+  const ws = new WebSocket(url);
   _ws = ws;
 
   ws.onopen = () => {
-    // Don't reset attempt counter yet — wait for auth:ok to confirm it's a real connection
+    console.log('[ws] Socket opened, waiting for auth:ok ...');
   };
 
   ws.onmessage = (e) => {
@@ -96,28 +102,32 @@ function _connect() {
 
       if (msg.type === 'auth:ok') {
         _authenticated = true;
-        _attempt = 0; // Only reset backoff after successful authentication
+        _attempt = 0;
+        console.log('[ws] Authenticated — WebSocket ready');
         _notifyState(true);
         return;
       }
 
       if (msg.type === 'error') {
         console.warn('[ws] Server error:', msg.message);
-        // If server says "starting up", don't spam reconnects — bump attempt counter
         if (msg.message?.includes('starting up')) {
-          _attempt = Math.max(_attempt, 3); // Start at a higher backoff level
+          _attempt = Math.max(_attempt, 3);
         }
         return;
       }
 
-      // Forward everything else to listeners
       _notifyMessage(msg);
     } catch (err) {
       console.error('[ws] Parse error:', err);
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
+    // Guard: if a newer socket has already replaced us, do nothing.
+    // This prevents the React Strict Mode double-mount race where an old
+    // socket's async onclose fires after _connect() already created a new one.
+    if (gen !== _wsGeneration) return;
+
     const wasAuthenticated = _authenticated;
     _authenticated = false;
     _ws = null;
@@ -128,15 +138,16 @@ function _connect() {
 
     if (!_stopped) {
       _attempt++;
-      // Base delay 3s, max 30s. If server said "starting up", _attempt is already >= 4
       const delay = Math.min(3_000 * Math.pow(1.5, _attempt - 1), 30_000);
-      console.log(`[ws] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${_attempt})`);
+      console.log(`[ws] Closed (code ${ev.code}). Reconnecting in ${Math.round(delay / 1000)}s (attempt ${_attempt})`);
       _reconnectTimer = setTimeout(_connect, delay);
+    } else {
+      console.log(`[ws] Closed (code ${ev.code}). Stopped — not reconnecting.`);
     }
   };
 
   ws.onerror = () => {
-    // Error is always followed by close — reconnect logic lives there
+    console.warn('[ws] Connection error (close event will follow)');
   };
 }
 
@@ -144,6 +155,7 @@ function _start() {
   if (!_stopped) return;
   _stopped = false;
   _attempt = 0;
+  console.log('[ws] Starting WebSocket connection manager');
   _connect();
 }
 
@@ -154,6 +166,8 @@ function _stop() {
     _reconnectTimer = null;
   }
   if (_ws) {
+    // Bump generation so the pending onclose from this socket is ignored
+    _wsGeneration++;
     _ws.close();
     _ws = null;
   }

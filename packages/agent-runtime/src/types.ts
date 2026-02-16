@@ -11,6 +11,13 @@ export interface ToolContext {
   nodeId: string;
   agentId: string;
   workItemId?: string;
+  /**
+   * Identifies a browser session across multiple tool calls.
+   * All browser tool calls sharing the same browserSessionId will operate
+   * on the same browser tab on the same worker node.
+   * Falls back to workItemId or agentId if not explicitly set.
+   */
+  browserSessionId?: string;
   capabilities: NodeCapabilities;
 }
 

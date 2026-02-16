@@ -266,6 +266,40 @@ export async function POST(request: NextRequest) {
       const { WorkerHub } = await import('@/lib/worker-hub');
       const workerHub = WorkerHub.getInstance();
 
+      // Build schedule tools deps so the agent can create/manage scheduled tasks
+      const { ScheduleService } = await import('@ai-engine/scheduler');
+      const scheduleService = new ScheduleService();
+      const scheduleDeps = {
+        createTask: async (params: any) => {
+          const t = await scheduleService.createTask(params.name, params.cronExpr ?? '', params.scheduleType, {
+            userPrompt: params.userPrompt,
+            agentId: params.agentId,
+            intervalMs: params.intervalMs,
+            runAt: params.runAt,
+            endAt: params.endAt,
+            maxRuns: params.maxRuns,
+            sessionId: session.id,
+          });
+          return { id: t.id, name: t.name, nextRunAt: t.nextRunAt, scheduleType: t.scheduleType };
+        },
+        listTasks: async (activeOnly: boolean) => {
+          const tasks = await scheduleService.listTasks(activeOnly);
+          return tasks.map((t: any) => ({
+            id: t.id, name: t.name, scheduleType: t.scheduleType, cronExpr: t.cronExpr,
+            userPrompt: t.userPrompt, intervalMs: t.intervalMs, nextRunAt: t.nextRunAt,
+            endAt: t.endAt, maxRuns: t.maxRuns, totalRuns: t.totalRuns,
+            isActive: t.isActive, agentId: t.agentId,
+          }));
+        },
+        updateTask: async (id: string, updates: Record<string, unknown>) => {
+          const t = await scheduleService.updateTask(id, updates as any);
+          return { id: t.id, name: t.name };
+        },
+        deleteTask: async (id: string) => {
+          await scheduleService.deleteTask(id);
+        },
+      };
+
       const executor = new ChatExecutor({
         llm: pool,
         tier: 'standard',
@@ -274,6 +308,7 @@ export async function POST(request: NextRequest) {
         teamId: contextMembership?.teamId,
         sessionId: session.id,
         workerDispatcher: workerHub,
+        scheduleDeps,
       });
 
       // Build conversation history from DB

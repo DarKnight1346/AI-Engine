@@ -2,7 +2,8 @@ export { AgentRunner } from './agent-runner.js';
 export { ToolRegistry } from './tool-registry.js';
 export { ToolIndex } from './tool-index.js';
 export { ToolExecutor, routeTool } from './tool-executor.js';
-export type { WorkerToolDispatcher } from './tool-executor.js';
+export type { WorkerToolDispatcher, WorkerInfo } from './tool-executor.js';
+export { createWorkerManagementTools } from './tools/worker-management-tools.js';
 export { ChatExecutor } from './chat-executor.js';
 export { EnvironmentTools } from './tools/environment.js';
 export { createMetaTools, getMetaToolDefinitions } from './tools/meta-tools.js';
@@ -27,6 +28,16 @@ export { ProjectOrchestrator } from './project-orchestrator.js';
 // Planning mode tools
 export { createPlanningTools, createPrdTools, createTaskTools, createWireframeTools, createProjectOverviewTools, getPlanningModeSystemPrompt } from './planning-tools.js';
 export type { PlanningDbClient } from './planning-tools.js';
+
+// Docker tools (build/SWARM mode only)
+export { createDockerTools } from './tools/docker-tools.js';
+
+// Schedule tools (agent-accessible scheduling)
+export { createScheduleTools, getScheduleToolManifest } from './tools/schedule-tools.js';
+export type { ScheduleToolsDeps } from './tools/schedule-tools.js';
+
+// CAPTCHA solving tools (CapSolver.com)
+export { createCaptchaTools, getCaptchaToolManifest } from './tools/captcha-tools.js';
 
 // Services
 export { SshKeyService } from './services/ssh-key-service.js';

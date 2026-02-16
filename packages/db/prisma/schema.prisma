@@ -685,6 +685,15 @@ model ScheduledTask {
   createdFromSessionId String?  @map("created_from_session_id")
   createdAt            DateTime @default(now()) @map("created_at")
 
+  // Enhanced scheduling fields
+  userPrompt           String?  @map("user_prompt")                                 // Prompt template for each run
+  intervalMs           BigInt?  @map("interval_ms")                                 // Interval in ms for 'interval' type
+  runAt                DateTime? @map("run_at")                                     // Specific run time for 'once' type
+  endAt                DateTime? @map("end_at")                                     // Recurring schedule end date
+  maxRuns              Int?      @map("max_runs")                                   // Max runs (null = unlimited)
+  totalRuns            Int       @default(0) @map("total_runs")                     // Completed run count
+  conversationHistory  Json      @default("[]") @map("conversation_history")        // Persistent LLMMessage[] across runs
+
   agent Agent? @relation(fields: [agentId], references: [id])
   runs  ScheduledTaskRun[]
 

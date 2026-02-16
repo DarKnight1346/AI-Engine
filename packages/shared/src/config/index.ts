@@ -33,7 +33,7 @@ export const DEFAULT_CONFIG = {
     embeddingDimension: 768,
   },
   browser: {
-    poolSize: 3,
+    poolSize: 20,
     defaultTimeoutMs: 30000,
     sessionIdleTimeoutMs: 300000,
   },

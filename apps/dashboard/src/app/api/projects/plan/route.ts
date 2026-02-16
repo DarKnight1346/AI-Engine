@@ -244,7 +244,7 @@ async function runPlanningAgentLoop(
   systemPrompt: string,
   toolDefs: LLMToolDefinition[],
   toolMap: Map<string, (input: Record<string, unknown>) => Promise<{ success: boolean; output: string }>>,
-  maxIterations = 10,
+  maxIterations = 100,
 ): Promise<PlanningLoopResult> {
   const workingMessages = [...messages];
   let totalInputTokens = 0;
@@ -464,7 +464,7 @@ ${memoryContext || 'No prior context yet - this is the beginning of our planning
       systemPrompt,
       toolDefs,
       toolMap,
-      20, // max tool iterations (higher to allow proactive research + memory + ask_user)
+      100, // max tool iterations (allow plenty of turns for research + memory + ask_user)
     );
 
     const aiResponse = result.content;

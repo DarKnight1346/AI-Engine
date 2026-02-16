@@ -50,7 +50,7 @@ export class AgentRunner {
   }
 
   async run(input: AgentTaskInput): Promise<AgentRunResult> {
-    const maxIterations = this.options.maxIterations ?? 20;
+    const maxIterations = this.options.maxIterations ?? 100;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let toolCallsCount = 0;

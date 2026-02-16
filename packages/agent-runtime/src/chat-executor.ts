@@ -7,6 +7,9 @@ import { createMetaTools, getMetaToolDefinitions, type MetaToolOptions } from '.
 import { createWebSearchTools, createXaiSearchTools } from './tools/web-search-tools.js';
 import { createDataForSeoTools, getDataForSeoManifest, getDataForSeoToolCount } from './tools/dataforseo-tools.js';
 import { createImageTools, getImageToolManifest } from './tools/image-tools.js';
+import { createWorkerManagementTools } from './tools/worker-management-tools.js';
+import { createScheduleTools, getScheduleToolManifest, type ScheduleToolsDeps } from './tools/schedule-tools.js';
+import { createCaptchaTools, getCaptchaToolManifest } from './tools/captcha-tools.js';
 import { WebSearchService, XaiSearchService, DataForSeoService, XaiImageService } from '@ai-engine/web-search';
 import { EmbeddingService } from '@ai-engine/memory';
 import type { Tool, ToolContext, ToolResult } from './types.js';
@@ -161,6 +164,13 @@ export interface ChatExecutorOptions {
    */
   dataForSeoPassword?: string;
   /**
+   * CapSolver API key for CAPTCHA solving.
+   * When provided, agents can solve reCAPTCHA v2/v3, hCaptcha, Turnstile,
+   * FunCaptcha, and image-based CAPTCHAs during browser automation.
+   * Get an API key from capsolver.com.
+   */
+  capsolverApiKey?: string;
+  /**
    * Per-execution tools (e.g. browser tools scoped to a task).
    * These are registered for both discovery and execution alongside
    * the built-in tools, ensuring workers have the same capabilities.
@@ -202,6 +212,12 @@ export interface ChatExecutorOptions {
   }) => void;
 
   // ── Orchestration / sub-agent support ────────────────────────────
+
+  /**
+   * Schedule tools dependency injection. When provided, the agent can
+   * create, list, update, and delete scheduled tasks.
+   */
+  scheduleDeps?: ScheduleToolsDeps;
 
   /**
    * Parent executor options — passed through so that the delegate_tasks
@@ -285,6 +301,13 @@ export class ChatExecutor {
   private currentTier: 'fast' | 'standard' | 'heavy';
 
   /**
+   * Unique identifier for the browser session tied to this executor.
+   * All browser tool calls from this executor share the same browser tab
+   * on the same worker node. Auto-generated from sessionId/workItemId/agentId.
+   */
+  private readonly browserSessionId: string;
+
+  /**
    * Dynamically switch the LLM tier used for subsequent calls.
    * Called by meta-tools (ask_user, delegate_tasks) to upgrade to Opus
    * for planning/orchestration, then drop back to Sonnet afterward.
@@ -298,9 +321,24 @@ export class ChatExecutor {
     return this.currentTier;
   }
 
+  /**
+   * Release resources held by this executor (browser sessions, etc.).
+   * MUST be called when the chat session / agent execution finishes to
+   * ensure browser tabs are closed and pool slots are freed.
+   */
+  public cleanup(): void {
+    this.toolExecutor.releaseBrowserSession(this.browserSessionId);
+  }
+
+  /** Get the browser session ID tied to this executor. */
+  public getBrowserSessionId(): string {
+    return this.browserSessionId;
+  }
+
   constructor(private options: ChatExecutorOptions) {
-    this.maxIterations = options.maxIterations ?? 25;
+    this.maxIterations = options.maxIterations ?? 100;
     this.currentTier = options.tier ?? 'standard';
+    this.browserSessionId = options.sessionId ?? options.workItemId ?? `browser_${crypto.randomUUID()}`;
 
     // Initialize tool index with built-in dashboard-safe tools
     this.toolIndex = new ToolIndex();
@@ -494,6 +532,7 @@ export class ChatExecutor {
             nodeId: this.options.nodeId ?? 'dashboard',
             agentId: this.options.agentId ?? 'chat',
             workItemId: this.options.workItemId,
+            browserSessionId: this.browserSessionId,
             capabilities: {
               os: process.platform as any,
               hasDisplay: false,
@@ -704,6 +743,7 @@ export class ChatExecutor {
               nodeId: this.options.nodeId ?? 'dashboard',
               agentId: this.options.agentId ?? 'chat',
               workItemId: this.options.workItemId,
+              browserSessionId: this.browserSessionId,
               capabilities: {
                 os: process.platform as any,
                 hasDisplay: false,
@@ -755,6 +795,7 @@ export class ChatExecutor {
             nodeId: this.options.nodeId ?? 'dashboard',
             agentId: this.options.agentId ?? 'chat',
             workItemId: this.options.workItemId,
+            browserSessionId: this.browserSessionId,
             capabilities: {
               os: process.platform as any,
               hasDisplay: false,
@@ -985,14 +1026,74 @@ export class ChatExecutor {
         executionTarget: 'dashboard',
         source: 'tool',
       },
+      // ── Worker Management (run on dashboard, query WorkerHub) ──
+      {
+        name: 'listWorkers',
+        description:
+          'List all connected worker nodes with their status, capabilities, load, active tasks, Docker/browser support, and uptime. ' +
+          'Use this to discover available workers before targeting a specific one with workerId.',
+        category: 'workers',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            filter: {
+              type: 'string',
+              description: 'Filter: "all" (default), "idle", "busy", "docker", or "browser".',
+            },
+          },
+        },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'getWorkerStatus',
+        description:
+          'Get detailed status for a specific worker node including capabilities, load, Docker status, SSH keys, and connection info. ' +
+          'Provide workerId (UUID) or hostname.',
+        category: 'workers',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workerId: { type: 'string', description: 'Worker UUID.' },
+            hostname: { type: 'string', description: 'Worker hostname (fallback if no workerId).' },
+          },
+        },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
+      {
+        name: 'disconnectWorker',
+        description:
+          'Disconnect a worker node by ID, closing its WebSocket connection. The worker will attempt to reconnect automatically.',
+        category: 'workers',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workerId: { type: 'string', description: 'Worker UUID to disconnect.' },
+            reason: { type: 'string', description: 'Optional reason for disconnecting.' },
+          },
+          required: ['workerId'],
+        },
+        executionTarget: 'dashboard',
+        source: 'tool',
+      },
     ];
+
+    // Worker tool schemas include an optional `workerId` so the agent can target a specific worker.
+    // When omitted, the system auto-selects the least-loaded compatible worker.
+    const workerIdProperty = {
+      workerId: {
+        type: 'string',
+        description: 'Optional: target a specific worker by UUID. Use listWorkers to find worker IDs. If omitted, auto-selects the best available worker.',
+      },
+    };
 
     const workerTools: ToolManifestEntry[] = [
       {
         name: 'browser_navigate',
         description: 'Navigate a browser to a URL for interactive web automation.',
         category: 'browser',
-        inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        inputSchema: { type: 'object', properties: { url: { type: 'string' }, ...workerIdProperty }, required: ['url'] },
         executionTarget: 'worker',
         source: 'tool',
       },
@@ -1000,7 +1101,7 @@ export class ChatExecutor {
         name: 'browser_screenshot',
         description: 'Take a screenshot of the current browser page.',
         category: 'browser',
-        inputSchema: { type: 'object', properties: {} },
+        inputSchema: { type: 'object', properties: { ...workerIdProperty } },
         executionTarget: 'worker',
         source: 'tool',
       },
@@ -1008,39 +1109,64 @@ export class ChatExecutor {
         name: 'browser_click',
         description: 'Click an element on the page by CSS selector or text.',
         category: 'browser',
-        inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'] },
+        inputSchema: { type: 'object', properties: { selector: { type: 'string' }, ...workerIdProperty }, required: ['selector'] },
         executionTarget: 'worker',
         source: 'tool',
       },
       {
         name: 'execShell',
-        description: 'Execute a shell command on a worker node.',
+        description:
+          'Execute a shell command on a worker node. Optionally specify workerId to target a specific worker, ' +
+          'or omit to auto-select the best available worker. Use listWorkers to see available workers.',
         category: 'system',
-        inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+        inputSchema: {
+          type: 'object',
+          properties: { command: { type: 'string', description: 'The shell command to execute.' }, ...workerIdProperty },
+          required: ['command'],
+        },
         executionTarget: 'worker',
         source: 'tool',
       },
       {
         name: 'readFile',
-        description: 'Read the contents of a file from the filesystem.',
+        description:
+          'Read the contents of a file from a worker node filesystem. Optionally specify workerId to target a specific worker.',
         category: 'filesystem',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+        inputSchema: {
+          type: 'object',
+          properties: { path: { type: 'string', description: 'Absolute file path to read.' }, ...workerIdProperty },
+          required: ['path'],
+        },
         executionTarget: 'worker',
         source: 'tool',
       },
       {
         name: 'writeFile',
-        description: 'Write content to a file on the filesystem.',
+        description:
+          'Write content to a file on a worker node filesystem. Optionally specify workerId to target a specific worker.',
         category: 'filesystem',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute file path to write.' },
+            content: { type: 'string', description: 'File content to write.' },
+            ...workerIdProperty,
+          },
+          required: ['path', 'content'],
+        },
         executionTarget: 'worker',
         source: 'tool',
       },
       {
         name: 'listFiles',
-        description: 'List files and directories at a given path.',
+        description:
+          'List files and directories at a given path on a worker node. Optionally specify workerId to target a specific worker.',
         category: 'filesystem',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+        inputSchema: {
+          type: 'object',
+          properties: { path: { type: 'string', description: 'Directory path to list.' }, ...workerIdProperty },
+          required: ['path'],
+        },
         executionTarget: 'worker',
         source: 'tool',
       },
@@ -1052,7 +1178,13 @@ export class ChatExecutor {
     // ── Image generation tools ──
     const imageGenTools = getImageToolManifest();
 
-    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dataForSeoTools, ...imageGenTools]);
+    // ── Scheduling tools (only available to Chat Agents with scheduleDeps) ──
+    const scheduleManifest = this.options.scheduleDeps ? getScheduleToolManifest() : [];
+
+    // ── CAPTCHA solving tools ──
+    const captchaManifest = getCaptchaToolManifest();
+
+    this.toolIndex.registerAll([...dashboardTools, ...workerTools, ...dataForSeoTools, ...imageGenTools, ...scheduleManifest, ...captchaManifest]);
   }
 
   /**
@@ -1063,6 +1195,12 @@ export class ChatExecutor {
     // Environment tools — lightweight, safe to run in dashboard
     const envTools = EnvironmentTools.getAll();
     this.toolExecutor.registerAllLocal(envTools);
+
+    // Worker management tools — query/control connected worker nodes
+    if (this.options.workerDispatcher) {
+      const workerMgmtTools = createWorkerManagementTools(this.options.workerDispatcher);
+      this.toolExecutor.registerAllLocal(workerMgmtTools);
+    }
 
     // Tier 1: Serper.dev web search tools — fast, cheap, structured results
     if (this.options.serperApiKey) {
@@ -1111,6 +1249,22 @@ export class ChatExecutor {
       } catch (err: any) {
         console.warn('[ChatExecutor] Failed to initialize DataForSEO tools:', err.message);
       }
+    }
+
+    // CAPTCHA solving: CapSolver.com integration
+    if (this.options.capsolverApiKey) {
+      try {
+        const captchaTools = createCaptchaTools(this.options.capsolverApiKey);
+        this.toolExecutor.registerAllLocal(captchaTools);
+      } catch (err: any) {
+        console.warn('[ChatExecutor] Failed to initialize CAPTCHA tools:', err.message);
+      }
+    }
+
+    // Scheduling tools — agent can create/manage scheduled tasks
+    if (this.options.scheduleDeps) {
+      const schedTools = createScheduleTools(this.options.scheduleDeps);
+      this.toolExecutor.registerAllLocal(schedTools);
     }
 
     // Skill search is handled by the execute_tool meta-tool (skill: prefix)

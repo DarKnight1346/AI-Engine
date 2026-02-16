@@ -113,6 +113,11 @@ export const createScheduledTaskSchema = z.object({
   agentId: z.string().uuid().optional(),
   workflowId: z.string().uuid().optional(),
   configJson: z.record(z.unknown()).optional(),
+  userPrompt: z.string().min(1).max(10000).optional(),
+  intervalMs: z.number().int().positive().optional(),
+  runAt: z.string().datetime().optional(),
+  endAt: z.string().datetime().optional(),
+  maxRuns: z.number().int().positive().optional(),
 });
 
 // ============================================================

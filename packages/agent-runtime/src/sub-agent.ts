@@ -344,7 +344,7 @@ export async function runSubAgent(
   const executorOptions: ChatExecutorOptions = {
     llm: options.parentOptions.llm,
     toolConfig: options.parentOptions.toolConfig,
-    maxIterations: 10, // Sub-agents get fewer iterations
+    maxIterations: 100, // Sub-agents get up to 100 iterations
     tier,
     searchMemory: options.parentOptions.searchMemory,
     userId: options.parentOptions.userId,
@@ -414,6 +414,9 @@ export async function runSubAgent(
       iterations: 0,
       modelUsed: tier,
     };
+  } finally {
+    // Release browser sessions (if any) so the tab is closed on the worker
+    executor.cleanup();
   }
 }
 

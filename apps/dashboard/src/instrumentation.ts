@@ -171,14 +171,16 @@ async function handleScheduledTask(event: {
   workflowId?: string;
   goalContextId?: string;
   configJson?: any;
+  userPrompt?: string;
   scheduledAt: string;
   recovered?: boolean;
 }) {
   const { getDb } = await import('@ai-engine/db');
   const db = getDb();
 
-  // Load the scheduled task for context
-  const task = await db.scheduledTask.findUnique({ where: { id: event.taskId } });
+  // Load the scheduled task for context (cast to any — new columns may not
+  // be in the generated Prisma client until `prisma generate` runs)
+  const task = await db.scheduledTask.findUnique({ where: { id: event.taskId } }) as any;
   if (!task) {
     console.warn(`[scheduler] Task ${event.taskId} not found in DB`);
     return;
@@ -204,7 +206,7 @@ async function handleScheduledTask(event: {
       const result = await hub.dispatchTask({
         taskId: event.taskId,
         agentId: agent.id,
-        input: `Execute scheduled task: ${task.name}`,
+        input: task.userPrompt ?? `Execute scheduled task: ${task.name}`,
         agentConfig: {
           name: agent.name,
           rolePrompt: agent.rolePrompt,
@@ -236,8 +238,94 @@ async function handleScheduledTask(event: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Token estimation & conversation summarisation
+// ---------------------------------------------------------------------------
+
+/** Rough token estimate: ~4 chars per token for English text */
+function estimateTokens(messages: Array<{ role: string; content: unknown }>): number {
+  let chars = 0;
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') {
+      chars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (typeof part === 'object' && part !== null && 'text' in part) {
+          chars += String((part as any).text).length;
+        }
+      }
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * Maximum estimated tokens for conversation history before summarisation.
+ * Conservative to leave room for system prompt + new prompt + agent response.
+ */
+const MAX_HISTORY_TOKENS = 80_000;
+
+/**
+ * Summarise the top 50% of conversation history into a single message.
+ * Returns: [summary_message, ...bottom_50_percent]
+ */
+async function summariseConversation(
+  messages: Array<{ role: string; content: unknown }>,
+  llmPool: any,
+): Promise<Array<{ role: string; content: unknown }>> {
+  if (messages.length <= 2) return messages;
+
+  const midpoint = Math.ceil(messages.length / 2);
+  const topHalf = messages.slice(0, midpoint);
+  const bottomHalf = messages.slice(midpoint);
+
+  const topHalfText = topHalf.map((m) => {
+    const role = m.role === 'user' ? 'User' : 'Assistant';
+    const content = typeof m.content === 'string'
+      ? m.content
+      : JSON.stringify(m.content);
+    return `${role}: ${content}`;
+  }).join('\n\n');
+
+  try {
+    const summaryResponse = await llmPool.call(
+      [{
+        role: 'user',
+        content:
+          'Summarise the following conversation history concisely. Preserve all key facts, ' +
+          'decisions, data points, and action items. This summary will be used as context ' +
+          'for future runs of a recurring scheduled task.\n\n---\n' +
+          topHalfText + '\n---\n\nProvide a clear, structured summary:',
+      }],
+      {
+        tier: 'fast',
+        systemPrompt:
+          'You are a precise summarisation assistant. Produce concise but complete ' +
+          'summaries that preserve all important information.',
+      },
+    );
+
+    const summaryMsg = {
+      role: 'user' as const,
+      content: `[Summary of previous ${topHalf.length} messages from earlier runs]\n\n${summaryResponse.content}`,
+    };
+
+    return [summaryMsg, ...bottomHalf];
+  } catch (err: any) {
+    console.warn(`[scheduler] Conversation summarisation failed: ${err.message}. Keeping full history.`);
+    return messages;
+  }
+}
+
 /**
  * Execute a scheduled task directly in the dashboard process using the LLM pool.
+ *
+ * Persistent conversation loop:
+ *   1. Load conversation history from previous runs (stored on the ScheduledTask)
+ *   2. Build the user prompt for this specific run
+ *   3. Pass full conversation (history + new prompt) to ChatExecutor
+ *   4. Save updated conversation (history + new prompt + agent response)
+ *   5. If conversation exceeds token limit, summarise top 50%, keep bottom 50%
  */
 async function executeTaskDirectly(
   task: any,
@@ -248,24 +336,47 @@ async function executeTaskDirectly(
   const { getDb } = await import('@ai-engine/db');
   const { LLMPool } = await import('@ai-engine/llm');
   const { ChatExecutor } = await import('@ai-engine/agent-runtime');
+  const { ScheduleService } = await import('@ai-engine/scheduler');
   const { MemoryService, EmbeddingService } = await import('@ai-engine/memory');
   const { withMemoryPrompt } = await import('@ai-engine/shared');
   const db = getDb();
+  const scheduleService = new ScheduleService();
   const startTime = Date.now();
 
-  // Build prompt from task config
+  // ── Build the user prompt for this run ──
   const config = (task.configJson as any) ?? {};
-  const taskPrompt = config.prompt ?? config.input ?? `Execute scheduled task: ${task.name}`;
-  const basePrompt = agent?.rolePrompt ?? 'You are a helpful AI assistant executing a scheduled task.';
-  const systemPrompt = withMemoryPrompt(basePrompt);
+  const baseTaskPrompt = task.userPrompt ?? config.prompt ?? config.input ?? `Execute scheduled task: ${task.name}`;
+  const runTimestamp = new Date(event.scheduledAt).toISOString();
+  const runNumber = (task.totalRuns ?? 0) + 1;
+  const taskPrompt = `[Scheduled Run #${runNumber} — ${runTimestamp}]\n\n${baseTaskPrompt}`;
 
-  // Load API keys
+  // ── Build the system prompt ──
+  const basePrompt = agent?.rolePrompt ?? 'You are a helpful AI assistant executing a scheduled task.';
+  const scheduleContext =
+    `\n\n## Scheduled Task Context\n` +
+    `You are executing a scheduled task: "${task.name}"\n` +
+    `Schedule type: ${task.scheduleType}\n` +
+    `Run #${runNumber}${task.maxRuns ? ` of ${task.maxRuns}` : ''}\n` +
+    `Scheduled at: ${runTimestamp}\n` +
+    (task.endAt ? `Schedule ends: ${new Date(task.endAt).toISOString()}\n` : '') +
+    `\nYou have access to the full conversation history from previous runs. ` +
+    `Build on your previous work and findings. If you notice patterns or ` +
+    `changes from previous runs, highlight them.`;
+  const systemPrompt = withMemoryPrompt(basePrompt + scheduleContext);
+
+  // ── Load conversation history from previous runs ──
+  let conversationHistory: Array<{ role: string; content: any }> =
+    ((task.conversationHistory as any[]) ?? []).map((msg: any) => ({
+      role: msg.role,
+      content: msg.content,
+    }));
+
+  // ── Load API keys ──
   const apiKeys = await db.apiKey.findMany({ where: { isActive: true } });
   if (apiKeys.length === 0) {
     throw new Error('No API keys configured');
   }
 
-  // Check for NVIDIA fallback key
   let nvidiaFallback: { provider: 'nvidia'; apiKey: string } | undefined;
   try {
     const nvidiaConfig = await db.config.findUnique({ where: { key: 'nvidiaApiKey' } });
@@ -289,7 +400,16 @@ async function executeTaskDirectly(
     fallback: nvidiaFallback,
   });
 
-  // Build memory search function so the agent can search during execution
+  // ── Summarise if conversation history is too long ──
+  if (estimateTokens(conversationHistory) > MAX_HISTORY_TOKENS) {
+    console.log(`[scheduler] Task "${task.name}" conversation exceeds token limit — summarising top 50%`);
+    conversationHistory = await summariseConversation(conversationHistory, pool);
+  }
+
+  // ── Append the new user prompt to the conversation ──
+  conversationHistory.push({ role: 'user', content: taskPrompt });
+
+  // ── Build memory search function ──
   const searchMemoryFn = async (query: string, scope: string, scopeOwnerId: string | null): Promise<string> => {
     try {
       const embeddings = new EmbeddingService();
@@ -305,8 +425,10 @@ async function executeTaskDirectly(
     }
   };
 
-  // Use ChatExecutor for full tool access (memory, discovery, skills, goals)
-  // Worker dispatch: scheduled tasks can also route tools to workers
+  // NOTE: No scheduleDeps here — scheduled task agents must NOT create new
+  // schedules. Only the Chat Agent (chat-queue, chat/send) can schedule.
+
+  // ── Execute the agent with full conversation context ──
   const { WorkerHub } = await import('./lib/worker-hub');
   const workerHub = WorkerHub.getInstance();
 
@@ -319,14 +441,23 @@ async function executeTaskDirectly(
     workerDispatcher: workerHub,
   });
 
-  const result = await executor.execute(
-    [{ role: 'user' as const, content: taskPrompt }],
-    systemPrompt,
-  );
+  let result;
+  try {
+    result = await executor.execute(
+      conversationHistory as any,
+      systemPrompt,
+    );
+  } finally {
+    executor.cleanup();
+  }
 
   const durationMs = Date.now() - startTime;
 
-  // Save execution log
+  // ── Save the agent's response to the conversation history ──
+  conversationHistory.push({ role: 'assistant', content: result.content });
+  await scheduleService.saveConversationHistory(task.id, conversationHistory);
+
+  // ── Save execution log ──
   if (agent) {
     await db.executionLog.create({
       data: {
@@ -340,7 +471,7 @@ async function executeTaskDirectly(
     });
   }
 
-  // Update the run status
+  // ── Update the run status ──
   if (runId) {
     await db.scheduledTaskRun.update({
       where: { id: runId },
@@ -352,7 +483,11 @@ async function executeTaskDirectly(
     });
   }
 
-  console.log(`[scheduler] Task ${task.name} executed directly (${durationMs}ms, ${result.usage.inputTokens + result.usage.outputTokens} tokens)`);
+  console.log(
+    `[scheduler] Task "${task.name}" run #${runNumber} executed ` +
+    `(${durationMs}ms, ${result.usage.inputTokens + result.usage.outputTokens} tokens, ` +
+    `${conversationHistory.length} messages in history)`
+  );
 }
 
 // ---------------------------------------------------------------------------

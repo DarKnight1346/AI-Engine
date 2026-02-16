@@ -291,19 +291,22 @@ You MUST search memory for user preferences before every response — this is yo
     let dataForSeoLogin: string | undefined;
     let dataForSeoPassword: string | undefined;
     let nvidiaApiKey: string | undefined;
+    let capsolverApiKey: string | undefined;
     try {
-      const [serperConfig, xaiConfig, dfsLoginConfig, dfsPasswordConfig, nvidiaConfig] = await Promise.all([
+      const [serperConfig, xaiConfig, dfsLoginConfig, dfsPasswordConfig, nvidiaConfig, capsolverConfig] = await Promise.all([
         db.config.findUnique({ where: { key: 'serperApiKey' } }),
         db.config.findUnique({ where: { key: 'xaiApiKey' } }),
         db.config.findUnique({ where: { key: 'dataForSeoLogin' } }),
         db.config.findUnique({ where: { key: 'dataForSeoPassword' } }),
         db.config.findUnique({ where: { key: 'nvidiaApiKey' } }),
+        db.config.findUnique({ where: { key: 'capsolverApiKey' } }),
       ]);
       if (serperConfig?.valueJson && typeof serperConfig.valueJson === 'string' && serperConfig.valueJson.trim()) serperApiKey = serperConfig.valueJson.trim();
       if (xaiConfig?.valueJson && typeof xaiConfig.valueJson === 'string' && xaiConfig.valueJson.trim()) xaiApiKey = xaiConfig.valueJson.trim();
       if (dfsLoginConfig?.valueJson && typeof dfsLoginConfig.valueJson === 'string' && dfsLoginConfig.valueJson.trim()) dataForSeoLogin = dfsLoginConfig.valueJson.trim();
       if (dfsPasswordConfig?.valueJson && typeof dfsPasswordConfig.valueJson === 'string' && dfsPasswordConfig.valueJson.trim()) dataForSeoPassword = dfsPasswordConfig.valueJson.trim();
       if (nvidiaConfig?.valueJson && typeof nvidiaConfig.valueJson === 'string' && nvidiaConfig.valueJson.trim()) nvidiaApiKey = nvidiaConfig.valueJson.trim();
+      if (capsolverConfig?.valueJson && typeof capsolverConfig.valueJson === 'string' && capsolverConfig.valueJson.trim()) capsolverApiKey = capsolverConfig.valueJson.trim();
     } catch { /* Config not found */ }
 
     // ── Build conversation history (shared across agents) ──────────
@@ -419,6 +422,40 @@ You MUST search memory for user preferences before every response — this is yo
       // Build the base executor options (reused for sub-agent creation).
       // Share the embedding service so sub-agents don't each load the ML model.
       const { embSvc: sharedEmbedding } = await getJobMemoryServices();
+      // Build schedule tools deps so the agent can create/manage scheduled tasks
+      const { ScheduleService } = await import('@ai-engine/scheduler');
+      const scheduleService = new ScheduleService();
+      const scheduleDeps = {
+        createTask: async (params: any) => {
+          const t = await scheduleService.createTask(params.name, params.cronExpr ?? '', params.scheduleType, {
+            userPrompt: params.userPrompt,
+            agentId: params.agentId,
+            intervalMs: params.intervalMs,
+            runAt: params.runAt,
+            endAt: params.endAt,
+            maxRuns: params.maxRuns,
+            sessionId: job.sessionId,
+          });
+          return { id: t.id, name: t.name, nextRunAt: t.nextRunAt, scheduleType: t.scheduleType };
+        },
+        listTasks: async (activeOnly: boolean) => {
+          const tasks = await scheduleService.listTasks(activeOnly);
+          return tasks.map((t: any) => ({
+            id: t.id, name: t.name, scheduleType: t.scheduleType, cronExpr: t.cronExpr,
+            userPrompt: t.userPrompt, intervalMs: t.intervalMs, nextRunAt: t.nextRunAt,
+            endAt: t.endAt, maxRuns: t.maxRuns, totalRuns: t.totalRuns,
+            isActive: t.isActive, agentId: t.agentId,
+          }));
+        },
+        updateTask: async (id: string, updates: Record<string, unknown>) => {
+          const t = await scheduleService.updateTask(id, updates as any);
+          return { id: t.id, name: t.name };
+        },
+        deleteTask: async (id: string) => {
+          await scheduleService.deleteTask(id);
+        },
+      };
+
       const baseExecutorOptions = {
         llm: pool,
         tier: 'standard' as const,
@@ -427,8 +464,9 @@ You MUST search memory for user preferences before every response — this is yo
         teamId: contextMembership?.teamId,
         sessionId: job.sessionId,
         workerDispatcher: workerHub,
-        serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword,
+        serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword, capsolverApiKey,
         sharedEmbeddingService: sharedEmbedding,
+        scheduleDeps,
       };
 
       const executor = new ChatExecutor({
@@ -530,18 +568,24 @@ You MUST search memory for user preferences before every response — this is yo
         },
       });
 
-      const result = await executor.executeStreaming(
-        [...llmMessages],  // Clone so concurrent agents don't interfere
-        systemPrompt,
-        (event) => {
-          // Best-effort forward — if the SSE stream is already closed (client
-          // disconnected) the send() try-catch in the route handler will
-          // silently swallow the error.  We intentionally do NOT gate this on
-          // signal.aborted so that events flow for as long as the stream is
-          // open, without coupling DB persistence to client connectivity.
-          try { job.onEvent({ ...event, slot } as any); } catch { /* stream closed */ }
-        },
-      );
+      let result;
+      try {
+        result = await executor.executeStreaming(
+          [...llmMessages],  // Clone so concurrent agents don't interfere
+          systemPrompt,
+          (event) => {
+            // Best-effort forward — if the SSE stream is already closed (client
+            // disconnected) the send() try-catch in the route handler will
+            // silently swallow the error.  We intentionally do NOT gate this on
+            // signal.aborted so that events flow for as long as the stream is
+            // open, without coupling DB persistence to client connectivity.
+            try { job.onEvent({ ...event, slot } as any); } catch { /* stream closed */ }
+          },
+        );
+      } finally {
+        // Release browser sessions (if any) so the tab is closed on the worker
+        executor.cleanup();
+      }
 
       // ── ALWAYS persist the AI response ──
       // The DB write must NOT be gated on signal.aborted.  The agent has

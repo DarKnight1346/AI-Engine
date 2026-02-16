@@ -129,7 +129,8 @@ export type WorkerWsMessage =
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; taskId?: string }
   | { type: 'keys:received'; fingerprint: string }
   | { type: 'docker:status'; containerId: string; taskId: string; status: DockerContainerStatus; output?: string }
-  | { type: 'docker:task:complete'; taskId: string; result: DockerTaskResult };
+  | { type: 'docker:task:complete'; taskId: string; result: DockerTaskResult }
+  | { type: 'docker:tool:result'; callId: string; success: boolean; output: string };
 
 /** Messages the dashboard sends to a worker. */
 export type DashboardWsMessage =
@@ -137,7 +138,8 @@ export type DashboardWsMessage =
   | { type: 'auth:error'; message: string }
   | { type: 'task:assign'; taskId: string; agentId: string; input: string; agentConfig: Record<string, unknown>; userId?: string; teamId?: string }
   | { type: 'task:cancel'; taskId: string }
-  | { type: 'tool:execute'; callId: string; toolName: string; input: Record<string, unknown> }
+  | { type: 'tool:execute'; callId: string; toolName: string; input: Record<string, unknown>; browserSessionId?: string }
+  | { type: 'browser:session:release'; browserSessionId: string }
   | { type: 'agent:call'; callId: string; fromAgentId: string; input: string; agentConfig: Record<string, unknown> }
   | { type: 'agent:response'; callId: string; output: string; error?: string }
   | { type: 'config:update'; config: Record<string, unknown> }
@@ -146,7 +148,8 @@ export type DashboardWsMessage =
   | { type: 'docker:task:assign'; taskId: string; projectId: string; agentId: string; containerConfig: DockerContainerConfig; taskPrompt: string; repoUrl: string }
   | { type: 'docker:task:finalize'; taskId: string; commitMessage: string }
   | { type: 'docker:task:cancel'; taskId: string; containerId: string }
-  | { type: 'docker:cleanup'; projectId: string };
+  | { type: 'docker:cleanup'; projectId: string }
+  | { type: 'docker:tool:execute'; callId: string; taskId: string; toolName: string; input: Record<string, unknown> };
 
 // ============================================================
 // Config
@@ -710,6 +713,28 @@ export interface ScheduledTask {
   isActive: boolean;
   createdFromSessionId: string | null;
   createdAt: Date;
+
+  // ── Enhanced scheduling fields ──
+
+  /** The user-facing prompt sent to the agent each time this schedule fires. */
+  userPrompt: string | null;
+  /** Interval in milliseconds for 'interval' schedule type. */
+  intervalMs: number | null;
+  /** Specific datetime for 'once' schedule type (alternative to cron). */
+  runAt: Date | null;
+  /** End date — recurring schedule deactivates after this time. */
+  endAt: Date | null;
+  /** Maximum number of runs (null = unlimited). Task deactivates after reaching this. */
+  maxRuns: number | null;
+  /** Total number of completed runs so far. */
+  totalRuns: number;
+  /**
+   * Persistent conversation history across runs (serialised LLMMessage[]).
+   * Each run appends its user prompt + agent response. When the token count
+   * exceeds the context window, the top 50% is summarised into a single
+   * message and the bottom 50% is kept verbatim.
+   */
+  conversationHistory: unknown[];
 }
 
 export interface ScheduledTaskRun {
@@ -889,6 +914,43 @@ export interface DockerTaskResult {
   output: string;
   filesChanged: number;
   commitsCreated: number;
+}
+
+/**
+ * DockerDispatcher — interface for routing Docker tool calls from the
+ * dashboard agent loop to the correct worker/container.
+ *
+ * Used by SwarmAgent (build mode only) to interact with Docker containers
+ * on remote worker nodes.
+ */
+export interface DockerDispatcher {
+  /** Execute a tool inside a Docker container on the worker that owns it. */
+  executeDockerTool(
+    taskId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<{ success: boolean; output: string }>;
+
+  /** Create a new Docker container on a worker. Respects project affinity. */
+  createContainer(opts: {
+    projectId: string;
+    taskId: string;
+    config: DockerContainerConfig;
+    repoUrl: string;
+  }): Promise<{ containerId: string; workerId: string }>;
+
+  /** Finalize a container: commit, push, merge, then destroy. */
+  finalizeContainer(
+    taskId: string,
+    commitMessage: string,
+  ): Promise<DockerTaskResult>;
+
+  /** Destroy a container without finalizing. */
+  destroyContainer(taskId: string): Promise<void>;
+
+  /** List all active containers for a project across all workers. */
+  listProjectContainers(projectId: string): Promise<DockerContainerInfo[]>;
 }
 
 // ============================================================

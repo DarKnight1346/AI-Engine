@@ -6,14 +6,17 @@ export const dynamic = 'force-dynamic';
  * GET /api/worker/install-script?token=<jwt>
  *
  * Returns a self-contained bash script that:
- *   1. Installs Node.js 20+ (if missing)
- *   2. Installs pnpm (if missing)
- *   3. Downloads the worker bundle from the dashboard
- *   4. Extracts to /opt/ai-engine-worker
- *   5. Installs npm dependencies
- *   6. Registers with the dashboard hub (receives a WebSocket auth token)
- *   7. Registers as a system service (systemd / launchd)
- *   8. Starts the worker
+ *   0. Cleans up any existing installation (stops service, removes old config)
+ *   1. Installs system build tools
+ *   2. Installs Node.js 20+ (if missing)
+ *   3. Installs pnpm (if missing)
+ *   4. Installs Docker Engine (required for build mode)
+ *   5. Downloads the worker bundle from the dashboard
+ *   6. Extracts to /opt/ai-engine-worker
+ *   7. Installs npm dependencies (skipped if pre-installed in bundle)
+ *   8. Registers with the dashboard hub (receives a WebSocket auth token)
+ *   9. Registers as a system service (systemd / launchd)
+ *  10. Starts the worker
  *
  * Workers connect via WebSocket — no database or Redis access needed.
  *
@@ -72,6 +75,7 @@ echo ""
 
 OS="\$(uname -s)"
 ARCH="\$(uname -m)"
+CURRENT_USER="\$(whoami)"
 
 info()  { echo "  [INFO]  \$*"; }
 ok()    { echo "  [OK]    \$*"; }
@@ -204,7 +208,58 @@ else
   ok "pnpm \$(pnpm -v)"
 fi
 
-# ── 4. Download worker bundle ───────────────────────────────────────────────
+# ── 4. Install Docker ────────────────────────────────────────────────────────
+# Docker is required for build mode — the worker creates isolated containers
+# for each task, clones the repo, and executes build/code changes inside them.
+
+install_docker_linux() {
+  info "Installing Docker Engine..."
+  # Use Docker's official convenience script (handles apt/yum/dnf)
+  curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+
+  # Start Docker daemon
+  sudo systemctl enable docker >/dev/null 2>&1
+  sudo systemctl start docker >/dev/null 2>&1
+
+  # Add current user to docker group so it can run without sudo
+  sudo usermod -aG docker "\$CURRENT_USER" 2>/dev/null || true
+}
+
+if command -v docker &>/dev/null; then
+  # Docker binary exists — check if daemon is accessible
+  if docker info &>/dev/null 2>&1; then
+    ok "Docker \$(docker --version | awk '{print \$3}' | tr -d ',')"
+  else
+    info "Docker installed but daemon not running or not accessible"
+    if [[ "\$OS" == "Linux" ]]; then
+      sudo systemctl enable docker >/dev/null 2>&1
+      sudo systemctl start docker >/dev/null 2>&1
+      sudo usermod -aG docker "\$CURRENT_USER" 2>/dev/null || true
+      if docker info &>/dev/null 2>&1; then
+        ok "Docker daemon started"
+      else
+        info "Docker daemon started — may require re-login for group membership"
+      fi
+    else
+      info "Please start Docker Desktop manually (macOS)"
+    fi
+  fi
+elif [[ "\$OS" == "Linux" ]]; then
+  install_docker_linux
+  if command -v docker &>/dev/null; then
+    ok "Docker \$(docker --version | awk '{print \$3}' | tr -d ',')"
+  else
+    info "Docker installation may require re-login — the worker will detect it on restart"
+  fi
+elif [[ "\$OS" == "Darwin" ]]; then
+  echo ""
+  echo "  ⚠️  Docker Desktop is required but must be installed manually on macOS."
+  echo "     Download it from: https://www.docker.com/products/docker-desktop/"
+  echo "     The worker will detect Docker on its next restart."
+  echo ""
+fi
+
+# ── 5. Download worker bundle ───────────────────────────────────────────────
 
 info "Downloading worker bundle from \$SERVER_URL..."
 sudo mkdir -p "\$INSTALL_DIR"
@@ -224,7 +279,7 @@ fi
 
 ok "Bundle downloaded (\$(( BUNDLE_SIZE / 1024 / 1024 )) MB)"
 
-# ── 5. Extract bundle ───────────────────────────────────────────────────────
+# ── 6. Extract bundle ───────────────────────────────────────────────────────
 
 info "Extracting worker bundle..."
 cd "\$INSTALL_DIR"
@@ -232,7 +287,7 @@ tar -xzf worker-bundle.tar.gz
 rm -f worker-bundle.tar.gz
 ok "Bundle extracted to \$INSTALL_DIR"
 
-# ── 6. Install dependencies ─────────────────────────────────────────────────
+# ── 7. Install dependencies ─────────────────────────────────────────────────
 
 cd "\$INSTALL_DIR"
 
@@ -246,7 +301,7 @@ else
   ok "Dependencies installed"
 fi
 
-# ── 7. Register with the dashboard ──────────────────────────────────────────
+# ── 8. Register with the dashboard ──────────────────────────────────────────
 
 info "Registering with the dashboard..."
 mkdir -p "\$CONFIG_DIR"
@@ -278,7 +333,7 @@ fi
 
 ok "Registered as worker \$WORKER_ID"
 
-# ── 8. Save configuration ───────────────────────────────────────────────────
+# ── 9. Save configuration ───────────────────────────────────────────────────
 
 cat > "\$CONFIG_DIR/worker.json" << WORKERCONF
 {
@@ -292,7 +347,7 @@ WORKERCONF
 chmod 600 "\$CONFIG_DIR/worker.json"
 ok "Config saved to \$CONFIG_DIR/worker.json"
 
-# ── 9. Create start script ──────────────────────────────────────────────────
+# ── 10. Create start script ─────────────────────────────────────────────────
 
 NODE_PATH=\$(which node)
 cat > "\$INSTALL_DIR/start-worker.sh" << 'STARTEOF'
@@ -313,17 +368,15 @@ exec node apps/worker/dist/index.js
 STARTEOF
 chmod 755 "\$INSTALL_DIR/start-worker.sh"
 
-# ── 10. Register as system service ──────────────────────────────────────────
-
-CURRENT_USER=\$(whoami)
+# ── 11. Register as system service ──────────────────────────────────────────
 
 if [[ "\$OS" == "Linux" ]]; then
   info "Registering systemd service..."
   sudo tee /etc/systemd/system/ai-engine-worker.service > /dev/null << SVCEOF
 [Unit]
 Description=AI Engine Worker (\$WORKER_ID)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target docker.service
+Wants=network-online.target docker.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

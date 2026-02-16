@@ -21,6 +21,7 @@ export interface DashboardClientOptions {
   onConfigUpdate: (msg: Extract<DashboardWsMessage, { type: 'config:update' }>) => void;
   onUpdateAvailable: (msg: Extract<DashboardWsMessage, { type: 'update:available' }>) => void;
   onKeysSync?: (msg: any) => void;
+  onBrowserSessionRelease?: (msg: any) => void;
   onDockerTaskAssign?: (msg: any) => void;
   /** Worker should finalize the Docker task (commit/merge/cleanup) */
   onDockerTaskFinalize?: (msg: any) => void;
@@ -28,6 +29,8 @@ export interface DashboardClientOptions {
   onDockerTaskCancel?: (msg: any) => void;
   /** Worker should clean up all Docker containers for a project */
   onDockerCleanup?: (msg: any) => void;
+  /** Execute a tool inside a Docker container (routed from dashboard agent) */
+  onDockerToolExecute?: (msg: any) => void;
 }
 
 export class DashboardClient {
@@ -208,6 +211,10 @@ export class DashboardClient {
     this.sendRaw({ type: 'docker:task:complete', taskId, result });
   }
 
+  sendDockerToolResult(callId: string, success: boolean, output: string): void {
+    this.sendRaw({ type: 'docker:tool:result', callId, success, output } as any);
+  }
+
   // -----------------------------------------------------------------------
   // Internal
   // -----------------------------------------------------------------------
@@ -267,6 +274,10 @@ export class DashboardClient {
         this.opts.onKeysSync?.(msg);
         break;
 
+      case 'browser:session:release':
+        this.opts.onBrowserSessionRelease?.(msg as any);
+        break;
+
       case 'docker:task:assign':
         this.opts.onDockerTaskAssign?.(msg);
         break;
@@ -281,6 +292,10 @@ export class DashboardClient {
 
       case 'docker:cleanup':
         this.opts.onDockerCleanup?.(msg);
+        break;
+
+      case 'docker:tool:execute' as any:
+        this.opts.onDockerToolExecute?.(msg);
         break;
 
       default: {

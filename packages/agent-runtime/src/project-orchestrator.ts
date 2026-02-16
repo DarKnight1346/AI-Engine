@@ -4,6 +4,8 @@ import { getDb } from '@ai-engine/db';
 import { AgentRunner, type AgentTaskInput } from './agent-runner.js';
 import { GitService } from './services/git-service.js';
 import { SshKeyService } from './services/ssh-key-service.js';
+import { createDockerTools } from './tools/docker-tools.js';
+import type { DockerDispatcher } from '@ai-engine/shared';
 import type Redis from 'ioredis';
 
 /** Sanitize a string into a valid Git branch name. */
@@ -44,7 +46,9 @@ export class ProjectOrchestrator {
     private llm: LLMPool,
     private contextBuilder: ContextBuilder,
     private redis: Redis,
-    private nodeId: string
+    private nodeId: string,
+    /** Optional DockerDispatcher for routing Docker tool calls to workers. */
+    private dockerDispatcher?: DockerDispatcher,
   ) {
     this.gitService = GitService.getInstance();
 
@@ -120,6 +124,7 @@ export class ProjectOrchestrator {
       this.nodeId,
       config,
       repoPath,
+      this.dockerDispatcher,
     );
 
     this.activeProjects.set(projectId, swarm);
@@ -203,6 +208,7 @@ class ProjectSwarm {
     private nodeId: string,
     private config: any,
     private repoPath: string,
+    private dockerDispatcher?: DockerDispatcher,
   ) {}
 
   async start() {
@@ -245,6 +251,7 @@ class ProjectSwarm {
         this.nodeId,
         this.config,
         this.repoPath,
+        this.dockerDispatcher,
       );
 
       this.agents.push(agent);
@@ -354,6 +361,7 @@ class SwarmAgent {
     private nodeId: string,
     private config: any,
     private repoPath: string,
+    private dockerDispatcher?: DockerDispatcher,
   ) {}
 
   async run() {
@@ -594,6 +602,11 @@ class SwarmAgent {
       await this.updateStats({ input: 0, output: 0 }, Date.now() - startTime, false);
 
       // Tell workers to clean up the container for this task (best effort)
+      if (this.dockerDispatcher) {
+        try {
+          await this.dockerDispatcher.destroyContainer(task.id);
+        } catch { /* best effort */ }
+      }
       try {
         await this.redisPub.publish('docker:task:cleanup', JSON.stringify({
           taskId: task.id,
@@ -606,55 +619,71 @@ class SwarmAgent {
   }
 
   /**
-   * Dispatch a task to a Docker-capable worker via Redis.
+   * Dispatch a task to a Docker container on a worker, with the agent loop
+   * running on the dashboard (not the worker). Docker tools are registered
+   * as additional tools so the agent can exec commands, read/write files,
+   * and finalize inside the container.
    *
    * Flow:
-   *   1. Publish `docker:task:dispatch` → WorkerHub picks it up
-   *   2. WorkerHub sends `docker:task:assign` to a worker via WebSocket
-   *   3. Worker creates a Docker container, clones repo, creates branch
-   *   4. Worker runs the AgentRunner loop inside the container
-   *   5. Worker commits, merges, cleans up, and reports `docker:task:complete`
-   *   6. WorkerHub publishes `docker:task:result:{taskId}` on Redis
-   *   7. This method picks up the result and returns
+   *   1. DockerDispatcher creates a container on a worker (with affinity)
+   *   2. AgentRunner runs on the dashboard with Docker tools registered
+   *   3. Agent uses docker_exec, docker_read_file, docker_write_file
+   *   4. When done, agent calls docker_finalize to commit/merge
+   *   5. Container is cleaned up
    *
-   * Returns true if the task was dispatched and completed on a worker,
-   * or false if no Docker workers are available (caller should fall back).
+   * Returns true if the task completed via Docker, or false if no
+   * DockerDispatcher / no Docker workers are available (caller falls back).
    */
   private async tryDispatchToWorker(task: any, project: any, startTime: number): Promise<boolean> {
+    if (!this.dockerDispatcher) {
+      return false; // No dispatcher → fall back to direct mode
+    }
+
     const db = getDb();
     const branchName = sanitizeBranchName(`task/${task.id.slice(0, 8)}-${task.title}`);
 
-    // Build the config the worker needs to create the container
-    const containerConfig = {
-      image: (this.config?.docker?.image as string) ?? 'ai-engine-worker:latest',
-      repoPath: this.repoPath,
-      workDir: '/workspace',
-      branchName,
-      envVars: {
-        PROJECT_NAME: project?.name ?? 'unknown',
-        TASK_TITLE: task.title,
-        TASK_TYPE: task.taskType,
-      },
-      memoryLimit: (this.config?.docker?.memoryLimit as string) ?? '4g',
-      cpuLimit: (this.config?.docker?.cpuLimit as string) ?? '2.0',
-    };
+    const image = (this.config?.docker?.image as string) ?? 'ai-engine-worker:latest';
 
-    // Build the prompt the worker's agent will use
-    const taskPrompt = this.buildTaskPrompt(task, project);
-    const rolePrompt = this.getRolePrompt();
+    // Create Docker tools bound to this dispatcher and project
+    const dockerTools = createDockerTools(this.dockerDispatcher, this.projectId, this.repoPath);
 
-    const dockerTaskPrompt = `${taskPrompt}
+    // Step 1: Create the container on a worker
+    let containerId: string;
+    let workerId: string;
+    try {
+      const containerResult = await this.dockerDispatcher.createContainer({
+        projectId: this.projectId,
+        taskId: task.id,
+        config: {
+          image,
+          repoPath: this.repoPath,
+          workDir: '/workspace',
+          branchName,
+          envVars: {
+            PROJECT_NAME: project?.name ?? 'unknown',
+            TASK_TITLE: task.title,
+            TASK_TYPE: task.taskType,
+          },
+          memoryLimit: (this.config?.docker?.memoryLimit as string) ?? '4g',
+          cpuLimit: (this.config?.docker?.cpuLimit as string) ?? '2.0',
+        },
+        repoUrl: this.repoPath,
+      });
 
-## Git Workflow
-- You are working on branch: **${branchName}**
-- Your working directory is: /workspace/project
-- All changes will be committed and merged to main when the task is complete
-- You are running inside an isolated Docker container — install any dependencies you need
-
-## Container Info
-- Image: ${containerConfig.image}
-- Branch: ${branchName}
-`;
+      containerId = containerResult.containerId;
+      workerId = containerResult.workerId;
+    } catch (err: any) {
+      await db.projectLog.create({
+        data: {
+          projectId: this.projectId,
+          agentId: this.agentId,
+          taskId: task.id,
+          level: 'warn',
+          message: `Docker container creation failed: ${err.message}. Falling back to direct mode.`,
+        },
+      });
+      return false;
+    }
 
     await db.projectLog.create({
       data: {
@@ -662,76 +691,112 @@ class SwarmAgent {
         agentId: this.agentId,
         taskId: task.id,
         level: 'info',
-        message: `Dispatching task to Docker worker: ${task.title} (branch: ${branchName})`,
+        message: `Docker container created on worker ${workerId}: ${task.title} (branch: ${branchName})`,
       },
     });
 
-    // Subscribe to the result channel for this task BEFORE dispatching
-    const resultChannel = `docker:task:result:${task.id}`;
-    const resultPromise = this.waitForRedisMessage(resultChannel, 600_000); // 10 min timeout
+    // Step 2: Run the agent loop on the dashboard with Docker tools
+    const taskPrompt = this.buildTaskPrompt(task, project);
+    const rolePrompt = this.getRolePrompt();
 
-    // Publish the dispatch event — the WorkerHub will route it to a worker
-    await this.redisPub.publish('docker:task:dispatch', JSON.stringify({
-      taskId: task.id,
-      projectId: this.projectId,
-      agentId: this.agentId,
-      rolePrompt,
-      containerConfig,
-      taskPrompt: dockerTaskPrompt,
-      repoUrl: this.repoPath, // local bare repo path or remote URL
-    }));
+    const dockerTaskPrompt = `${taskPrompt}
 
-    // Wait for the worker to report back
-    let result: any;
+## Docker Container Environment
+- You are working inside an isolated Docker container on a remote worker (${workerId})
+- Task ID: ${task.id}
+- Branch: **${branchName}**
+- Working directory: /workspace/project
+
+## Available Docker Tools
+You have access to Docker tools to interact with the container:
+- **docker_exec**: Run shell commands inside the container (install deps, compile, test, etc.)
+- **docker_read_file**: Read file contents from the container
+- **docker_write_file**: Write/create files inside the container
+- **docker_list_files**: List directory contents
+- **docker_finalize**: When done, commit all changes, push, and merge to main
+- **docker_destroy**: Destroy the container without finalizing (for cleanup on failure)
+
+## Workflow
+1. Use docker_exec to explore the codebase and understand the current state
+2. Make changes using docker_write_file or docker_exec
+3. Test your changes with docker_exec
+4. When everything works, call docker_finalize with a descriptive commit message
+
+IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
+`;
+
+    const agentRunner = new AgentRunner(
+      this.llm,
+      this.contextBuilder,
+      {
+        nodeId: this.nodeId,
+        maxIterations: 100,
+        llmTier: 'standard',
+        capabilities: {
+          os: 'linux' as const,
+          hasDisplay: false,
+          browserCapable: false,
+          environment: 'cloud' as const,
+          customTags: ['swarm-agent', 'docker'],
+        },
+      },
+      this.redis,
+    );
+
     try {
-      result = await resultPromise;
+      const result = await agentRunner.run({
+        agent: {
+          id: this.agentId,
+          name: `Project Agent ${this.agentId} (${this.role.type})`,
+          rolePrompt,
+          toolConfig: { enabledTools: [], disabledTools: [], customToolConfigs: {} },
+          requiredCapabilities: null,
+          workflowStageIds: [],
+        },
+        taskDetails: dockerTaskPrompt,
+        workItemId: task.id,
+        additionalTools: dockerTools,
+      });
+
+      const duration = Date.now() - startTime;
+
+      if (result.success) {
+        await db.projectTask.update({
+          where: { id: task.id },
+          data: {
+            status: 'completed',
+            completedAt: new Date(),
+            result: result.output,
+          },
+        });
+
+        await db.projectLog.create({
+          data: {
+            projectId: this.projectId,
+            agentId: this.agentId,
+            taskId: task.id,
+            level: 'success',
+            message: `Completed task via Docker: ${task.title} (${(duration / 1000).toFixed(1)}s, worker: ${workerId})`,
+            metadata: { branchName, workerId },
+          },
+        });
+
+        await this.updateStats(result.tokensUsed, duration, true);
+      } else {
+        // Agent loop failed — clean up the container
+        try {
+          await this.dockerDispatcher!.destroyContainer(task.id);
+        } catch { /* best effort */ }
+
+        throw new Error(result.output);
+      }
     } catch (err: any) {
-      // Timeout or no worker picked it up
-      await db.projectLog.create({
-        data: {
-          projectId: this.projectId,
-          agentId: this.agentId,
-          taskId: task.id,
-          level: 'warn',
-          message: `Docker dispatch failed or timed out: ${err.message}. Falling back to direct mode.`,
-        },
-      });
-      return false;
-    }
+      // Ensure container is cleaned up on any error
+      try {
+        await this.dockerDispatcher!.destroyContainer(task.id);
+      } catch { /* best effort */ }
 
-    // Process the result from the worker
-    const duration = Date.now() - startTime;
-
-    if (result.error === 'no_docker_workers') {
-      // No Docker workers available, fall back
-      return false;
-    }
-
-    if (result.success) {
-      await db.projectTask.update({
-        where: { id: task.id },
-        data: {
-          status: result.merged ? 'completed' : 'failed',
-          completedAt: new Date(),
-          result: `${result.output ?? ''}\n\n[Git: ${result.filesChanged ?? 0} files changed, ${result.commitsCreated ?? 0} commits, merged: ${result.merged ?? false}]`,
-          errorMessage: result.merged ? null : 'Branch merge failed — manual resolution may be needed',
-        },
-      });
-
-      await db.projectLog.create({
-        data: {
-          projectId: this.projectId,
-          agentId: this.agentId,
-          taskId: task.id,
-          level: result.merged ? 'success' : 'warn',
-          message: `Completed task on worker: ${task.title} (${(duration / 1000).toFixed(1)}s, worker: ${result.workerId ?? 'unknown'}, merged: ${result.merged ?? false})`,
-          metadata: { branchName, workerId: result.workerId, filesChanged: result.filesChanged, commitsCreated: result.commitsCreated },
-        },
-      });
-
-      await this.updateStats(result.tokensUsed ?? { input: 0, output: 0 }, duration, result.merged ?? false);
-    } else {
-      throw new Error(result.error ?? 'Docker task failed on worker');
+      throw err;
     }
 
     return true;
@@ -803,7 +868,7 @@ class SwarmAgent {
       this.contextBuilder,
       {
         nodeId: this.nodeId,
-        maxIterations: 50,
+        maxIterations: 100,
         llmTier: 'standard',
         capabilities: {
           os: 'linux' as const,

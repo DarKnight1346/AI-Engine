@@ -785,6 +785,55 @@ export default function SettingsPage() {
           </Paper>
 
           <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>Browser Automation</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Tools that enhance browser automation capabilities for agents. When configured,
+              agents can automatically solve CAPTCHAs encountered during web interactions.
+            </Typography>
+
+            <Divider sx={{ my: 2 }} />
+
+            <Stack spacing={1.5}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip label="CAPTCHA" size="small" color="warning" variant="outlined" />
+                <Typography variant="subtitle1" fontWeight={600}>CapSolver — CAPTCHA Solving</Typography>
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                Enables agents to solve reCAPTCHA v2/v3, hCaptcha, Turnstile, FunCaptcha, and image-based CAPTCHAs
+                during browser automation tasks. Uses the CapSolver API (pay-per-solve).
+                Get an API key from{' '}
+                <a href="https://www.capsolver.com" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>capsolver.com</a>.
+              </Typography>
+              <TextField
+                label="CapSolver API Key"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('capsolverApiKey', '')}
+                onChange={(e) => setConfig('capsolverApiKey', e.target.value)}
+                placeholder="Enter your CapSolver API key (CAP-...)..."
+                inputProps={{ spellCheck: false }}
+              />
+              {getConfig('capsolverApiKey', '') !== '' && configEdits.capsolverApiKey === undefined && (
+                <Chip label="Configured" size="small" color="success" variant="outlined" sx={{ alignSelf: 'flex-start' }} />
+              )}
+            </Stack>
+
+            {configEdits.capsolverApiKey !== undefined && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
+                onClick={() => saveConfig()}
+                disabled={savingConfig}
+                sx={{ mt: 2 }}
+              >
+                Save CapSolver Key
+              </Button>
+            )}
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>Claude Max Accounts</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               Manage Claude Max subscriptions for load-balanced, flat-rate AI access.
