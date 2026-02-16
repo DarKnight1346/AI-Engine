@@ -16,6 +16,7 @@ export async function middleware(request: NextRequest) {
   // Always allow these paths through
   if (
     pathname.startsWith('/api/') ||
+    pathname.startsWith('/ws/') ||
     pathname.startsWith('/setup') ||
     pathname.startsWith('/login') ||
     pathname.startsWith('/_next/') ||
@@ -68,6 +69,6 @@ export const config = {
      * - _next (static files)
      * - static assets
      */
-    '/((?!api|_next/static|_next/image|favicon.ico|manifest.json|icon-.*\\.png).*)',
+    '/((?!api|ws/|_next/static|_next/image|favicon.ico|manifest.json|icon-.*\\.png).*)',
   ],
 };

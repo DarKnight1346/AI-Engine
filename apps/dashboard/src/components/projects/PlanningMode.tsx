@@ -73,6 +73,19 @@ interface PlanningQuestion {
   allowFreeText?: boolean;
 }
 
+/** Safely parse a fetch response as JSON, throwing a clear error if the body is HTML or non-JSON. */
+async function safeJsonResponse<T = any>(response: Response): Promise<T> {
+  const ct = response.headers.get('content-type') ?? '';
+  if (!ct.includes('application/json')) {
+    const body = await response.text().catch(() => '');
+    if (body.trimStart().startsWith('<')) {
+      throw new Error(`Server returned an HTML page instead of JSON (HTTP ${response.status}). The request may have timed out.`);
+    }
+    throw new Error(body.slice(0, 300) || `Unexpected response (HTTP ${response.status})`);
+  }
+  return response.json();
+}
+
 // Color map for task types
 const TASK_TYPE_COLORS: Record<string, string> = {
   feature: '#818cf8',
@@ -165,7 +178,7 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
   const loadPrdAndTasks = async () => {
     try {
       const res = await fetch(`/api/projects/plan?projectId=${projectId}`);
-      const data = await res.json();
+      const data = await safeJsonResponse(res);
       if (data.prd) setPrd(data.prd);
       if (data.tasks?.length > 0) setTasks(data.tasks);
     } catch (err) {
@@ -177,7 +190,7 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
   const loadWireframes = async () => {
     try {
       const res = await fetch(`/api/projects/wireframes?projectId=${projectId}`);
-      const data = await res.json();
+      const data = await safeJsonResponse(res);
       if (data.wireframes) setWireframes(data.wireframes);
     } catch (err) {
       console.warn('Failed to load wireframes:', err);
@@ -187,7 +200,7 @@ export default function PlanningMode({ projectId, projectName, onComplete, onCan
   const loadConversationHistory = async () => {
     try {
       const res = await fetch(`/api/projects/conversations?projectId=${projectId}`);
-      const data = await res.json();
+      const data = await safeJsonResponse(res);
       if (data.conversations?.length > 0) {
         setMessages(
           data.conversations.map((c: any) => ({
@@ -240,7 +253,7 @@ The more context you provide, the better I can help you build exactly what you e
   const loadAttachments = async () => {
     try {
       const res = await fetch(`/api/projects/attachments?projectId=${projectId}`);
-      const data = await res.json();
+      const data = await safeJsonResponse(res);
       setAttachments(data.attachments || []);
     } catch (error) {
       console.error('Failed to load attachments:', error);
@@ -266,7 +279,7 @@ The more context you provide, the better I can help you build exactly what you e
         method: 'POST',
         body: formData,
       });
-      const data = await res.json();
+      const data = await safeJsonResponse(res);
       return data.attachment;
     } catch (error) {
       console.error('Failed to upload:', error);
@@ -388,6 +401,19 @@ The more context you provide, the better I can help you build exactly what you e
           body: JSON.stringify(payload),
         });
         setProgress(60);
+
+        // Guard against non-JSON responses (e.g. HTML error pages from proxy timeouts)
+        const ct = response.headers.get('content-type') ?? '';
+        if (!response.ok || !ct.includes('application/json')) {
+          const bodyPreview = await response.text().catch(() => '');
+          const isHtml = bodyPreview.trimStart().startsWith('<');
+          throw new Error(
+            isHtml
+              ? `The planning request timed out (HTTP ${response.status}). Try a simpler message or break your request into smaller steps.`
+              : (bodyPreview.slice(0, 300) || `HTTP ${response.status} ${response.statusText}`),
+          );
+        }
+
         data = await response.json();
         if (data.error) throw new Error(data.error);
       }

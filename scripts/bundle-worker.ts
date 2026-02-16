@@ -11,6 +11,7 @@
 //   - packages/db/                 (stub — satisfies imports without needing Prisma)
 //   - package.json                 (root — external dependencies only)
 //   - pnpm-workspace.yaml          (generated — lists only bundled packages)
+//   - node_modules/                (pre-installed production dependencies)
 //   - start-worker.sh              (entry point)
 //   - VERSION                      (version + build timestamp)
 //
@@ -214,6 +215,44 @@ export class PrismaClient {
     join(BUNDLE_DIR, 'package.json'),
     JSON.stringify(bundlePkg, null, 2),
   );
+
+  // --- Generate .npmrc (match monorepo settings) ---
+  writeFileSync(join(BUNDLE_DIR, '.npmrc'), 'shamefully-hoist=true\n');
+
+  // --- Pre-install dependencies into the bundle ---
+  // This makes the bundle fully self-contained — workers don't need pnpm or
+  // network access to install npm dependencies. The node_modules/ folder is
+  // included in the tar.gz.
+  console.log('Installing production dependencies into bundle...');
+  try {
+    execSync('pnpm install --prod --no-frozen-lockfile', {
+      cwd: BUNDLE_DIR,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        // Don't download Chromium — workers that need it will have it installed separately
+        PUPPETEER_SKIP_DOWNLOAD: '1',
+        PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: '1',
+      },
+    });
+    console.log('  Dependencies installed successfully');
+  } catch (err: any) {
+    console.error('  WARNING: pnpm install failed, trying npm fallback...');
+    try {
+      execSync('npm install --production --no-package-lock', {
+        cwd: BUNDLE_DIR,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          PUPPETEER_SKIP_DOWNLOAD: '1',
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: '1',
+        },
+      });
+      console.log('  Dependencies installed via npm fallback');
+    } catch {
+      console.error('  ERROR: Could not install dependencies. Bundle will require pnpm install on the worker.');
+    }
+  }
 
   // --- Create start-worker.sh entry point ---
   // Workers load config from ~/.ai-engine/worker.json (serverUrl, workerSecret)

@@ -77,6 +77,51 @@ info()  { echo "  [INFO]  \$*"; }
 ok()    { echo "  [OK]    \$*"; }
 fail()  { echo "  [ERROR] \$*"; exit 1; }
 
+# ── 0. Clean up any existing installation ───────────────────────────────────
+# Stop existing service, remove old config/token, and clean install directory.
+# This prevents stale tokens from conflicting with the new registration.
+
+info "Checking for existing installation..."
+
+# Stop existing service
+if [[ "\$OS" == "Linux" ]]; then
+  if systemctl is-active ai-engine-worker &>/dev/null; then
+    info "Stopping existing worker service..."
+    sudo systemctl stop ai-engine-worker 2>/dev/null || true
+    ok "Existing service stopped"
+  fi
+  if systemctl is-enabled ai-engine-worker &>/dev/null; then
+    sudo systemctl disable ai-engine-worker 2>/dev/null || true
+  fi
+elif [[ "\$OS" == "Darwin" ]]; then
+  PLIST="/Library/LaunchDaemons/com.ai-engine.worker.plist"
+  if [[ -f "\$PLIST" ]]; then
+    info "Stopping existing worker daemon..."
+    sudo launchctl unload "\$PLIST" 2>/dev/null || true
+    ok "Existing daemon stopped"
+  fi
+fi
+
+# Remove old config (stale token/workerId)
+if [[ -f "\$CONFIG_DIR/worker.json" ]]; then
+  OLD_WORKER_ID=\$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('\$CONFIG_DIR/worker.json','utf8')).workerId)}catch{console.log('')}" 2>/dev/null)
+  info "Removing old config (worker \$OLD_WORKER_ID)..."
+  rm -f "\$CONFIG_DIR/worker.json"
+  ok "Old config removed"
+fi
+
+# Clean install directory (preserves Node.js deps cache for faster reinstall)
+if [[ -d "\$INSTALL_DIR" ]]; then
+  info "Cleaning install directory..."
+  # Keep node_modules to speed up dependency install, remove everything else
+  if [[ -d "\$INSTALL_DIR/node_modules" ]]; then
+    find "\$INSTALL_DIR" -maxdepth 1 -not -name node_modules -not -name "." -not -name ".." -exec rm -rf {} + 2>/dev/null || true
+  else
+    rm -rf "\$INSTALL_DIR"
+  fi
+  ok "Install directory cleaned"
+fi
+
 # ── 1. Install system build tools ───────────────────────────────────────────
 
 info "Checking system prerequisites..."
@@ -189,12 +234,17 @@ ok "Bundle extracted to \$INSTALL_DIR"
 
 # ── 6. Install dependencies ─────────────────────────────────────────────────
 
-info "Installing Node.js dependencies..."
 cd "\$INSTALL_DIR"
-# The bundle ships without a lockfile (the monorepo lockfile doesn't match the
-# worker's trimmed package.json), so we skip --frozen-lockfile entirely.
-pnpm install --prod --no-frozen-lockfile 2>&1 | tail -5 || npm install --production 2>&1 | tail -5
-ok "Dependencies installed"
+
+if [[ -d "\$INSTALL_DIR/node_modules" ]] && [[ -d "\$INSTALL_DIR/node_modules/.pnpm" || -d "\$INSTALL_DIR/node_modules/ws" ]]; then
+  ok "Dependencies pre-installed in bundle (skipping install)"
+else
+  info "Installing Node.js dependencies..."
+  # The bundle ships without a lockfile (the monorepo lockfile doesn't match the
+  # worker's trimmed package.json), so we skip --frozen-lockfile entirely.
+  PUPPETEER_SKIP_DOWNLOAD=1 pnpm install --prod --no-frozen-lockfile 2>&1 | tail -5 || npm install --production 2>&1 | tail -5
+  ok "Dependencies installed"
+fi
 
 # ── 7. Register with the dashboard ──────────────────────────────────────────
 

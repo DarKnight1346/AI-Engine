@@ -106,7 +106,9 @@ export class DashboardClient {
         .replace(/\/$/, '') + '/ws/worker';
 
       console.log(`[client] Connecting to ${wsUrl}...`);
-      this.ws = new WebSocket(wsUrl);
+      // Disable perMessageDeflate — Cloudflare tunnels can corrupt compressed
+      // frames, causing "RSV1 must be clear" errors.
+      this.ws = new WebSocket(wsUrl, { perMessageDeflate: false });
 
       const timeout = setTimeout(() => {
         reject(new Error('Connection timeout'));

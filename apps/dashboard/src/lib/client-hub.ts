@@ -83,11 +83,13 @@ export class ClientHub {
 
     this.send(ws, { type: 'auth:ok' });
 
-    // Ping every 10s — keeps Cloudflare tunnel alive
+    // Ping every 10s — keeps Cloudflare tunnel alive.
+    // Only use application-level JSON pings; WebSocket protocol-level ping
+    // frames (ws.ping()) can be corrupted by Cloudflare tunnels, causing
+    // "Invalid frame header" errors on the browser side.
     const pingTimer = setInterval(() => {
       if (ws.readyState === 1) {
         this.send(ws, { type: 'ping' });
-        (ws as any).ping?.();
       }
     }, 10_000);
 
@@ -345,6 +347,19 @@ export class ClientHub {
       });
 
       clearInterval(progressTimer);
+
+      // Guard against non-JSON responses (e.g. HTML error pages from timeouts or proxy errors)
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!response.ok || !contentType.includes('application/json')) {
+        const statusText = response.statusText || `HTTP ${response.status}`;
+        const bodyPreview = await response.text().catch(() => '');
+        const isHtml = bodyPreview.trimStart().startsWith('<');
+        const detail = isHtml
+          ? `Server returned an HTML error page (${statusText}). The planning request likely timed out — try a simpler message or break it into smaller steps.`
+          : (bodyPreview.slice(0, 200) || statusText);
+        this.send(client.ws, { type: 'plan:error', message: detail });
+        return;
+      }
 
       const data = await response.json();
       if (data.error) {

@@ -27,38 +27,59 @@ export async function POST(req: NextRequest) {
     }
 
     const db = getDb();
-    const workerId = crypto.randomUUID();
     const secret = process.env.INSTANCE_SECRET ?? 'dev-secret';
-
-    // Create the node record
     const resolvedOs = nodeOs ?? 'linux';
     const resolvedEnv = capabilities?.environment ?? 'local';
-    await db.node.create({
-      data: {
-        id: workerId,
-        hostname,
-        ip: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? '0.0.0.0',
-        os: resolvedOs,
-        environment: resolvedEnv,
-        capabilities: (capabilities ?? {
-          os: resolvedOs,
-          hasDisplay: false,
-          browserCapable: false,
-          environment: resolvedEnv,
-          customTags: [],
-        }) as any,
-        lastHeartbeat: new Date(),
-      },
-    });
+    const clientIp = req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? '0.0.0.0';
 
-    // Sign a long-lived JWT for the worker
+    const capsData = (capabilities ?? {
+      os: resolvedOs,
+      hasDisplay: false,
+      browserCapable: false,
+      environment: resolvedEnv,
+      customTags: [],
+    }) as any;
+
+    // Check if a worker with this hostname already exists. If so, reuse it
+    // instead of creating an orphaned duplicate. This makes reinstalls clean.
+    let workerId: string;
+    const existing = await db.node.findFirst({ where: { hostname } });
+
+    if (existing) {
+      workerId = existing.id;
+      await db.node.update({
+        where: { id: workerId },
+        data: {
+          ip: clientIp,
+          os: resolvedOs,
+          environment: resolvedEnv,
+          capabilities: capsData,
+          lastHeartbeat: new Date(),
+        },
+      });
+    } else {
+      workerId = crypto.randomUUID();
+      await db.node.create({
+        data: {
+          id: workerId,
+          hostname,
+          ip: clientIp,
+          os: resolvedOs,
+          environment: resolvedEnv,
+          capabilities: capsData,
+          lastHeartbeat: new Date(),
+        },
+      });
+    }
+
+    // Sign a fresh long-lived JWT for the worker (replaces any old token)
     const token = jwt.sign(
       { workerId, hostname, type: 'worker' },
       secret,
       { expiresIn: '365d' },
     );
 
-    return NextResponse.json({ workerId, token });
+    return NextResponse.json({ workerId, token, reused: !!existing });
   } catch (err: any) {
     return NextResponse.json(
       { error: err.message },

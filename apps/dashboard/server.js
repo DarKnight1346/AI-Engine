@@ -26,12 +26,22 @@ const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
   const server = createServer((req, res) => {
+    // Don't let Next.js handle WebSocket upgrade requests — they are routed by
+    // the 'upgrade' event below.  If Next.js processes an upgrade request it
+    // writes HTTP response bytes (404 page / middleware redirect) to the same
+    // socket that the ws library uses for WebSocket frames, causing the browser
+    // to see "Invalid frame header" (especially through Cloudflare tunnels).
+    if (req.headers['upgrade']?.toLowerCase() === 'websocket') return;
+
     handle(req, res, parse(req.url || '/', true));
   });
 
   // ── WebSocket servers (noServer mode — we handle upgrade ourselves) ──
-  const wss = new WebSocketServer({ noServer: true });       // workers
-  const wssClient = new WebSocketServer({ noServer: true }); // browser clients
+  // perMessageDeflate MUST be off: Cloudflare tunnels can corrupt compressed
+  // frames (RSV1 bit set without negotiation), causing "RSV1 must be clear"
+  // and "Invalid frame header" errors on both workers and browsers.
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });       // workers
+  const wssClient = new WebSocketServer({ noServer: true, perMessageDeflate: false }); // browser clients
 
   server.on('upgrade', (request, socket, head) => {
     const { pathname } = parse(request.url || '');
