@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Analyze if it's an image or PDF
-    let analysis: Record<string, unknown> | null = null;
+    let analysis: Record<string, string | number | boolean | null> | null = null;
     if (attachmentType === 'image' && !storage) {
       // Only store base64 in analysis when using local storage (no object storage)
       const base64 = buffer.toString('base64');
