@@ -4,12 +4,39 @@
  * Runs once when the Node.js server starts.
  *
  * Responsibilities:
- *   1. Start the Cloudflare tunnel (fallback if server.js doesn't)
- *   2. Start Claude Max proxy instances
- *   3. Start the task scheduler with Redis integration
+ *   1. Initialise WebSocket hubs (worker + client) on globalThis
+ *   2. Start the Cloudflare tunnel (fallback if server.js doesn't)
+ *   3. Start Claude Max proxy instances
+ *   4. Start the task scheduler with Redis integration
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // ── Worker Hub (WebSocket hub for worker connections) ──────────
+    // Must initialise early so it's available on globalThis before
+    // server.js starts accepting WebSocket connections.
+    if (!(globalThis as any).__workerHub) {
+      try {
+        const { WorkerHub } = await import('./lib/worker-hub');
+        (globalThis as any).__workerHub = WorkerHub.getInstance();
+        console.log('[ws] Worker hub initialised');
+      } catch (err: any) {
+        console.warn('[ws] Worker hub init failed:', err.message);
+      }
+    }
+
+    // ── Client Hub (WebSocket hub for browser connections) ─────────
+    if (!(globalThis as any).__clientHub) {
+      try {
+        const { ClientHub } = await import('./lib/client-hub');
+        const hub = ClientHub.getInstance();
+        hub.setPort(parseInt(process.env.DASHBOARD_PORT || process.env.PORT || '3000', 10));
+        (globalThis as any).__clientHub = hub;
+        console.log('[ws] Client hub initialised');
+      } catch (err: any) {
+        console.warn('[ws] Client hub init failed:', err.message);
+      }
+    }
+
     // ── Cloudflare Tunnel ──────────────────────────────────────────
     if (!(globalThis as any).__tunnelStarted) {
       try {
@@ -56,6 +83,23 @@ export async function register() {
       setTimeout(() => {
         startConsolidationLoop();
       }, 60000);
+    }
+
+    // ── Client WebSocket Hub ───────────────────────────────────────
+    // Initialize the browser client WebSocket hub so it's available to
+    // server.js via globalThis. This import also ensures the module is
+    // included in the Next.js compilation (server.js can't load .ts directly).
+    if (!(globalThis as any).__clientHub) {
+      try {
+        const { ClientHub } = await import('./lib/client-hub');
+        const hub = ClientHub.getInstance();
+        const port = parseInt(process.env.DASHBOARD_PORT || process.env.PORT || '3000', 10);
+        hub.setPort(port);
+        (globalThis as any).__clientHub = hub;
+        console.log('[ws] Client hub initialised via instrumentation');
+      } catch (err: any) {
+        console.warn('[ws] Client hub init skipped:', err.message);
+      }
     }
   }
 }

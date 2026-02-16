@@ -52,57 +52,36 @@ app.prepare().then(() => {
     }
   });
 
-  // ── Initialise the hub after Next.js is ready ──
-  let hubReady = false;
-
-  async function initHub() {
-    try {
-      const hubMod = require('./src/lib/worker-hub');
-      const { WorkerHub } = hubMod;
-      const hub = WorkerHub.getInstance();
-
-      wss.on('connection', (ws, req) => {
-        hub.handleConnection(ws, req);
-      });
-
-      globalThis.__workerHub = hub;
-      hubReady = true;
-      console.log('[ws] Worker hub initialised');
-    } catch (err) {
-      console.warn('[ws] Hub not ready yet (expected during first build):', err.message);
-      wss.on('connection', (ws) => {
-        ws.send(JSON.stringify({ type: 'auth:error', message: 'Server starting up — retry in a moment' }));
-        ws.close();
-      });
+  // ── Worker hub — delegates to globalThis.__workerHub set by instrumentation ──
+  // The worker-hub.ts module is compiled by Next.js (imported via instrumentation.ts)
+  // and stored on globalThis.__workerHub. We can't require() .ts files directly from
+  // server.js, so we use a lazy lookup on each connection instead.
+  wss.on('connection', (ws, req) => {
+    const hub = globalThis.__workerHub;
+    if (hub) {
+      hub.handleConnection(ws, req);
+    } else {
+      ws.send(JSON.stringify({ type: 'auth:error', message: 'Server starting up — retry in a moment' }));
+      setTimeout(() => { try { ws.close(1013, 'try_again_later'); } catch {} }, 500);
     }
-  }
+  });
 
-  initHub();
-
-  // ── Initialise the client hub for browser WebSocket connections ──
-  async function initClientHub() {
-    try {
-      const clientHubMod = require('./src/lib/client-hub');
-      const { ClientHub } = clientHubMod;
-      const hub = ClientHub.getInstance();
-      hub.setPort(port);
-
-      wssClient.on('connection', (ws, req) => {
-        hub.handleConnection(ws, req);
-      });
-
-      globalThis.__clientHub = hub;
-      console.log('[ws] Client hub initialised');
-    } catch (err) {
-      console.warn('[ws] Client hub not ready yet:', err.message);
-      wssClient.on('connection', (ws) => {
-        ws.send(JSON.stringify({ type: 'error', message: 'Server starting up — retry in a moment' }));
-        ws.close();
-      });
+  // ── Client hub — delegates to globalThis.__clientHub set by instrumentation ──
+  // The client-hub.ts module is compiled by Next.js (imported via instrumentation.ts)
+  // and stored on globalThis.__clientHub. We can't require() .ts files directly from
+  // server.js, so we use a lazy lookup on each connection instead.
+  wssClient.on('connection', (ws, req) => {
+    const hub = globalThis.__clientHub;
+    if (hub) {
+      hub.handleConnection(ws, req);
+    } else {
+      // Hub not ready yet (instrumentation hasn't run). Tell the client to retry
+      // and close after a short delay to avoid "Invalid frame header" errors when
+      // the send and close frames arrive simultaneously through Cloudflare.
+      ws.send(JSON.stringify({ type: 'error', message: 'Server starting up — retry in a moment' }));
+      setTimeout(() => { try { ws.close(1013, 'try_again_later'); } catch {} }, 500);
     }
-  }
-
-  initClientHub();
+  });
 
   // ── Start the Cloudflare tunnel ──
   (async () => {
