@@ -2401,7 +2401,7 @@ export default function ChatPage() {
     // Send via WebSocket (preferred — survives Cloudflare tunnel)
     if (wsConnected) {
       const sent = sendChat({
-        sessionId,
+        sessionId: sessionId ?? undefined,
         message: currentInput,
         agentIds: agentIds.length > 0 ? agentIds : undefined,
         attachments: currentAttachments.length > 0
