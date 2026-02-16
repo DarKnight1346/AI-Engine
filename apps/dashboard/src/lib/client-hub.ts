@@ -268,6 +268,18 @@ export class ClientHub {
         eventType = 'screenshot';
         data = { slot, base64: event.base64, toolCallId: event.toolCallId };
         break;
+      case 'artifact':
+        eventType = 'artifact';
+        data = {
+          slot,
+          url: (event as any).url,
+          artifactType: (event as any).artifactType,
+          toolCallId: (event as any).toolCallId,
+          filename: (event as any).filename,
+          mimeType: (event as any).mimeType,
+          size: (event as any).size,
+        };
+        break;
       case 'background_task_start':
         eventType = 'background_task';
         data = { slot, taskId: event.taskId, toolName: event.toolName };

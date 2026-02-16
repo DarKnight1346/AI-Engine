@@ -246,6 +246,7 @@ export class BrowserPool {
     const context = await this.browser!.createBrowserContext();
     const page = await context.newPage();
     page.setDefaultTimeout(this.options.defaultTimeoutMs);
+    await page.setViewport({ width: 1920, height: 1080 });
 
     const session: BrowserSession = {
       id: crypto.randomUUID(),

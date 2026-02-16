@@ -309,6 +309,31 @@ You MUST search memory for user preferences before every response — this is yo
       if (capsolverConfig?.valueJson && typeof capsolverConfig.valueJson === 'string' && capsolverConfig.valueJson.trim()) capsolverApiKey = capsolverConfig.valueJson.trim();
     } catch { /* Config not found */ }
 
+    // ── Load object storage config ───────────────────────────────────
+    let objectStorage: import('@ai-engine/object-storage').ObjectStorageService | null = null;
+    try {
+      const [osEndpoint, osBucket, osAccessKey, osSecretKey, osRegion] = await Promise.all([
+        db.config.findUnique({ where: { key: 'objectStorageEndpoint' } }),
+        db.config.findUnique({ where: { key: 'objectStorageBucket' } }),
+        db.config.findUnique({ where: { key: 'objectStorageAccessKey' } }),
+        db.config.findUnique({ where: { key: 'objectStorageSecretKey' } }),
+        db.config.findUnique({ where: { key: 'objectStorageRegion' } }),
+      ]);
+      const endpoint = (osEndpoint?.valueJson as string)?.trim();
+      const bucket = (osBucket?.valueJson as string)?.trim();
+      const accessKey = (osAccessKey?.valueJson as string)?.trim();
+      const secretKey = (osSecretKey?.valueJson as string)?.trim();
+      const region = (osRegion?.valueJson as string)?.trim() || undefined;
+
+      if (endpoint && bucket && accessKey && secretKey) {
+        const { ObjectStorageService } = await import('@ai-engine/object-storage');
+        objectStorage = new ObjectStorageService({ endpoint, bucket, accessKey, secretKey, region });
+        console.log('[ChatQueue] Object storage configured');
+      }
+    } catch (err: any) {
+      console.warn('[ChatQueue] Failed to initialize object storage:', err.message);
+    }
+
     // ── Build conversation history (shared across agents) ──────────
     const history = await db.chatMessage.findMany({
       where: { sessionId: job.sessionId },
@@ -323,18 +348,34 @@ You MUST search memory for user preferences before every response — this is yo
       if (!attachmentList || attachmentList.length === 0) return text;
       const blocks: Array<any> = [];
       for (const att of attachmentList) {
+        const isDataUrl = att.url.startsWith('data:');
+        const isStorageUrl = att.url.startsWith('http://') || att.url.startsWith('https://');
+
         if (att.type.startsWith('image/')) {
-          const match = att.url.match(/^data:([^;]+);base64,(.+)$/);
-          if (match) blocks.push({ type: 'image', source: { type: 'base64', mediaType: match[1], data: match[2] } });
+          if (isDataUrl) {
+            const match = att.url.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) blocks.push({ type: 'image', source: { type: 'base64', mediaType: match[1], data: match[2] } });
+          } else if (isStorageUrl) {
+            // Storage URL — include as a URL reference for the LLM
+            blocks.push({ type: 'text', text: `[Attached image: ${att.name}]\nURL: ${att.url}` });
+          }
+        } else if (att.type.startsWith('video/')) {
+          if (isStorageUrl) {
+            blocks.push({ type: 'text', text: `[Attached video: ${att.name}]\nURL: ${att.url}` });
+          }
         } else {
-          const match = att.url.match(/^data:[^;]+;base64,(.+)$/);
-          if (match) {
-            try {
-              const decoded = Buffer.from(match[1], 'base64').toString('utf-8');
-              blocks.push({ type: 'text', text: `[Attached file: ${att.name}]\n${decoded.slice(0, 50000)}` });
-            } catch {
-              blocks.push({ type: 'text', text: `[Attached file: ${att.name} — binary file, cannot display as text]` });
+          if (isDataUrl) {
+            const match = att.url.match(/^data:[^;]+;base64,(.+)$/);
+            if (match) {
+              try {
+                const decoded = Buffer.from(match[1], 'base64').toString('utf-8');
+                blocks.push({ type: 'text', text: `[Attached file: ${att.name}]\n${decoded.slice(0, 50000)}` });
+              } catch {
+                blocks.push({ type: 'text', text: `[Attached file: ${att.name} — binary file, cannot display as text]` });
+              }
             }
+          } else if (isStorageUrl) {
+            blocks.push({ type: 'text', text: `[Attached file: ${att.name} (${att.type})]\nURL: ${att.url}` });
           }
         }
       }
@@ -456,6 +497,22 @@ You MUST search memory for user preferences before every response — this is yo
         },
       };
 
+      // Build artifact uploader if object storage is configured
+      const artifactUploader = objectStorage
+        ? async (data: Buffer | string, meta: { type: 'screenshot' | 'image' | 'video'; sessionId: string; filename: string; contentType: string }) => {
+            const { ObjectStorageService } = await import('@ai-engine/object-storage');
+            const key = ObjectStorageService.artifactKey(meta.sessionId, meta.type, meta.filename);
+            if (typeof data === 'string') {
+              // Could be base64 (screenshots) or a URL (image/video generation)
+              if (data.startsWith('http://') || data.startsWith('https://')) {
+                return await objectStorage!.uploadFromUrl(data, key, meta.contentType);
+              }
+              return await objectStorage!.uploadFromBase64(data, key, meta.contentType);
+            }
+            return await objectStorage!.upload(key, data, meta.contentType);
+          }
+        : undefined;
+
       const baseExecutorOptions = {
         llm: pool,
         tier: 'standard' as const,
@@ -467,6 +524,8 @@ You MUST search memory for user preferences before every response — this is yo
         serperApiKey, xaiApiKey, dataForSeoLogin, dataForSeoPassword, capsolverApiKey,
         sharedEmbeddingService: sharedEmbedding,
         scheduleDeps,
+        artifactUploader,
+        artifactSessionId: job.sessionId,
       };
 
       const executor = new ChatExecutor({
@@ -568,12 +627,27 @@ You MUST search memory for user preferences before every response — this is yo
         },
       });
 
+      // Collect artifact events during streaming for persistence
+      const collectedArtifacts: Array<{
+        id: string; name: string; type: string; url: string; size?: number;
+      }> = [];
+
       let result;
       try {
         result = await executor.executeStreaming(
           [...llmMessages],  // Clone so concurrent agents don't interfere
           systemPrompt,
           (event) => {
+            // Collect artifact events for DB persistence
+            if (event.type === 'artifact') {
+              collectedArtifacts.push({
+                id: crypto.randomUUID(),
+                name: (event as any).filename || 'artifact',
+                type: (event as any).mimeType || 'application/octet-stream',
+                url: (event as any).url,
+                size: (event as any).size,
+              });
+            }
             // Best-effort forward — if the SSE stream is already closed (client
             // disconnected) the send() try-catch in the route handler will
             // silently swallow the error.  We intentionally do NOT gate this on
@@ -593,13 +667,18 @@ You MUST search memory for user preferences before every response — this is yo
       // the frontend is still connected.  This is the core fix for responses
       // vanishing on page refresh / navigation.
       try {
+        const embedsData: Record<string, any> = {};
+        if (agentId) { embedsData.agentId = agentId; embedsData.agentName = agentName; }
+        if (collectedArtifacts.length > 0) { embedsData.attachments = collectedArtifacts; }
+        const hasEmbeds = Object.keys(embedsData).length > 0;
+
         await db.chatMessage.create({
           data: {
             sessionId: job.sessionId,
             senderType: 'ai',
             content: result.content,
             aiResponded: true,
-            embedsJson: agentId ? { agentId, agentName } : undefined,
+            embedsJson: hasEmbeds ? embedsData : undefined,
           },
         });
       } catch (dbErr: any) {

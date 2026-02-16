@@ -19,7 +19,6 @@ const DASHBOARD_SAFE_TOOLS = new Set([
   'create_skill',
   // Environment
   'getDateTime',
-  'getSystemInfo',
   'getTaskContext',
   'wait',
   // Skills
@@ -64,6 +63,8 @@ const WORKER_TOOLS = new Set([
   'browser_getConsoleLogs', 'browser_getNetworkRequests', 'browser_getOpenTabs',
   'browser_newTab', 'browser_getCookies', 'browser_waitForSelector',
   'browser_pressKey', 'browser_close',
+  // Environment (must run on worker to reflect worker's actual hardware)
+  'getSystemInfo',
   // File operations
   'readFile', 'writeFile', 'listFiles',
   // Shell

@@ -240,6 +240,23 @@ export interface ChatExecutorOptions {
     questions: Array<{ id: string; prompt: string; options?: Array<{ id: string; label: string }>; allowFreeText?: boolean }>,
     resolve: (answers: Record<string, string>) => void,
   ) => void;
+
+  // ── Artifact storage ────────────────────────────────────────────
+
+  /**
+   * Optional uploader for persisting artifacts (screenshots, generated images/videos)
+   * to object storage. When provided, artifacts are uploaded and permanent URLs
+   * are emitted via 'artifact' events instead of raw base64.
+   *
+   * Returns the permanent public URL of the uploaded artifact.
+   */
+  artifactUploader?: (
+    data: Buffer | string,
+    meta: { type: 'screenshot' | 'image' | 'video'; sessionId: string; filename: string; contentType: string },
+  ) => Promise<string>;
+
+  /** Session ID for artifact storage key generation. */
+  artifactSessionId?: string;
 }
 
 export interface ChatExecutorResult {
@@ -263,6 +280,7 @@ export type ChatStreamEvent =
   | { type: 'iteration'; iteration: number; maxIterations: number }
   | { type: 'background_task_start'; taskId: string; toolName: string }
   | { type: 'screenshot'; base64: string; toolCallId: string }
+  | { type: 'artifact'; url: string; artifactType: 'screenshot' | 'image' | 'video'; toolCallId: string; filename: string; mimeType: string; size?: number }
   | { type: 'done'; result: ChatExecutorResult }
   | { type: 'error'; message: string }
   // ── Orchestration / sub-agent events ──
@@ -837,8 +855,111 @@ export class ChatExecutor {
           ? String((toolCall.input as Record<string, unknown>)?.tool ?? '')
           : toolCall.name;
         if (innerToolName === 'browser_screenshot' && result.success) {
-          onEvent({ type: 'screenshot', base64: result.output, toolCallId: toolCall.id });
+          const uploader = this.options.artifactUploader;
+          if (uploader) {
+            try {
+              const url = await uploader(result.output, {
+                type: 'screenshot',
+                sessionId: this.options.artifactSessionId || 'unknown',
+                filename: 'screenshot.png',
+                contentType: 'image/png',
+              });
+              onEvent({
+                type: 'artifact',
+                url,
+                artifactType: 'screenshot',
+                toolCallId: toolCall.id,
+                filename: 'screenshot.png',
+                mimeType: 'image/png',
+              });
+            } catch (uploadErr: any) {
+              console.warn('[ChatExecutor] Failed to upload screenshot to storage, falling back to base64:', uploadErr.message);
+              onEvent({ type: 'screenshot', base64: result.output, toolCallId: toolCall.id });
+            }
+          } else {
+            onEvent({ type: 'screenshot', base64: result.output, toolCallId: toolCall.id });
+          }
           result = { ...result, output: 'Screenshot captured successfully and sent to the user.' };
+        }
+
+        // If this was an image/video generation tool, upload artifacts to storage
+        // and emit artifact events with permanent URLs.
+        const imageGenTools = ['xaiGenerateImage', 'xaiGenerateImagePro'];
+        const videoGenTools = ['xaiGenerateVideo'];
+        const resultData = result.data;
+        if (result.success && resultData && this.options.artifactUploader) {
+          const uploader = this.options.artifactUploader;
+          const sessionId = this.options.artifactSessionId || 'unknown';
+
+          if (imageGenTools.includes(innerToolName) && resultData.imageUrls) {
+            const originalUrls = resultData.imageUrls as string[];
+            const uploadedUrls: string[] = [];
+            for (let i = 0; i < originalUrls.length; i++) {
+              try {
+                const ext = originalUrls[i].match(/\.(png|jpg|jpeg|webp|gif)/i)?.[1] || 'png';
+                const url = await uploader(originalUrls[i], {
+                  type: 'image',
+                  sessionId,
+                  filename: `generated-image-${i + 1}.${ext}`,
+                  contentType: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+                });
+                uploadedUrls.push(url);
+                onEvent({
+                  type: 'artifact',
+                  url,
+                  artifactType: 'image',
+                  toolCallId: toolCall.id,
+                  filename: `generated-image-${i + 1}.${ext}`,
+                  mimeType: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+                });
+              } catch (uploadErr: any) {
+                console.warn(`[ChatExecutor] Failed to upload generated image ${i + 1}:`, uploadErr.message);
+                uploadedUrls.push(originalUrls[i]);
+              }
+            }
+            // Replace temporary URLs with permanent ones in the output
+            let updatedOutput = result.output;
+            for (let i = 0; i < originalUrls.length; i++) {
+              if (uploadedUrls[i] !== originalUrls[i]) {
+                updatedOutput = updatedOutput.replace(originalUrls[i], uploadedUrls[i]);
+              }
+            }
+            result = { ...result, output: updatedOutput };
+          }
+
+          if (videoGenTools.includes(innerToolName)) {
+            const videoUrls = (resultData.videoUrls as string[] | undefined) || (resultData.videoUrl ? [resultData.videoUrl as string] : []);
+            const uploadedUrls: string[] = [];
+            for (let i = 0; i < videoUrls.length; i++) {
+              try {
+                const url = await uploader(videoUrls[i], {
+                  type: 'video',
+                  sessionId,
+                  filename: `generated-video-${i + 1}.mp4`,
+                  contentType: 'video/mp4',
+                });
+                uploadedUrls.push(url);
+                onEvent({
+                  type: 'artifact',
+                  url,
+                  artifactType: 'video',
+                  toolCallId: toolCall.id,
+                  filename: `generated-video-${i + 1}.mp4`,
+                  mimeType: 'video/mp4',
+                });
+              } catch (uploadErr: any) {
+                console.warn(`[ChatExecutor] Failed to upload generated video ${i + 1}:`, uploadErr.message);
+                uploadedUrls.push(videoUrls[i]);
+              }
+            }
+            let updatedOutput = result.output;
+            for (let i = 0; i < videoUrls.length; i++) {
+              if (uploadedUrls[i] !== videoUrls[i]) {
+                updatedOutput = updatedOutput.replace(videoUrls[i], uploadedUrls[i]);
+              }
+            }
+            result = { ...result, output: updatedOutput };
+          }
         }
 
         onEvent({ type: 'tool_call_end', name: toolCall.name, id: toolCall.id, success: result.success, output: result.output });
@@ -884,14 +1005,6 @@ export class ChatExecutor {
         description: 'Get the current date, time, timezone, day of week, and Unix timestamp.',
         category: 'environment',
         inputSchema: { type: 'object', properties: { timezone: { type: 'string' } } },
-        executionTarget: 'dashboard',
-        source: 'tool',
-      },
-      {
-        name: 'getSystemInfo',
-        description: 'Get system information: OS, hostname, CPU, memory, capabilities.',
-        category: 'environment',
-        inputSchema: { type: 'object', properties: {} },
         executionTarget: 'dashboard',
         source: 'tool',
       },
@@ -1114,6 +1227,15 @@ export class ChatExecutor {
     };
 
     const workerTools: ToolManifestEntry[] = [
+      {
+        name: 'getSystemInfo',
+        description: 'Get system information from a worker node: OS, hostname, CPU count, memory, uptime, and capabilities. ' +
+          'This runs on the actual worker, not the dashboard. Optionally specify workerId to target a specific worker.',
+        category: 'environment',
+        inputSchema: { type: 'object', properties: { ...workerIdProperty } },
+        executionTarget: 'worker',
+        source: 'tool',
+      },
       {
         name: 'browser_navigate',
         description: 'Navigate a browser to a URL for interactive web automation, scraping, or testing. Opens a real browser on the worker.',
@@ -1390,8 +1512,10 @@ export class ChatExecutor {
    * in the ToolExecutor.
    */
   private registerBuiltInExecutables(): void {
-    // Environment tools — lightweight, safe to run in dashboard
-    const envTools = EnvironmentTools.getAll();
+    // Environment tools — lightweight, safe to run in dashboard.
+    // Exclude getSystemInfo: it must run on the worker so it reports the
+    // worker's actual hostname/CPU/memory, not the dashboard's.
+    const envTools = EnvironmentTools.getAll().filter(t => t.name !== 'getSystemInfo');
     this.toolExecutor.registerAllLocal(envTools);
 
     // Worker management tools — query/control connected worker nodes

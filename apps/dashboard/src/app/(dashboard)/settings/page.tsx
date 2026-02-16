@@ -834,6 +834,95 @@ export default function SettingsPage() {
           </Paper>
 
           <Paper sx={{ p: 3 }}>
+            <Typography variant="h3" sx={{ mb: 2 }}>Object Storage</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              S3-compatible object storage for persisting screenshots, generated images, videos, and uploaded files.
+              Artifacts stored here survive page refreshes and are accessible via pre-signed URLs.
+              Works with <strong>Vultr Object Storage</strong>, AWS S3, MinIO, or any S3-compatible provider.
+            </Typography>
+
+            <Divider sx={{ my: 2 }} />
+
+            <Stack spacing={1.5}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip label="Storage" size="small" color="primary" variant="outlined" />
+                <Typography variant="subtitle1" fontWeight={600}>S3-Compatible Object Storage</Typography>
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                Configure your object storage endpoint and credentials. For Vultr, find these in the{' '}
+                <a href="https://my.vultr.com/objectstorage/" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', fontWeight: 600 }}>Vultr dashboard</a>{' '}
+                under your object storage instance.
+              </Typography>
+              <TextField
+                label="Storage Endpoint"
+                fullWidth
+                size="small"
+                value={getConfig('objectStorageEndpoint', '')}
+                onChange={(e) => setConfig('objectStorageEndpoint', e.target.value)}
+                placeholder="https://ewr1.vultrobjects.com"
+                inputProps={{ spellCheck: false }}
+              />
+              <TextField
+                label="Bucket Name"
+                fullWidth
+                size="small"
+                value={getConfig('objectStorageBucket', '')}
+                onChange={(e) => setConfig('objectStorageBucket', e.target.value)}
+                placeholder="ai-engine-artifacts"
+                inputProps={{ spellCheck: false }}
+              />
+              <TextField
+                label="Access Key"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('objectStorageAccessKey', '')}
+                onChange={(e) => setConfig('objectStorageAccessKey', e.target.value)}
+                placeholder="Enter your access key..."
+                inputProps={{ spellCheck: false }}
+              />
+              <TextField
+                label="Secret Key"
+                fullWidth
+                type="password"
+                size="small"
+                value={getConfig('objectStorageSecretKey', '')}
+                onChange={(e) => setConfig('objectStorageSecretKey', e.target.value)}
+                placeholder="Enter your secret key..."
+                inputProps={{ spellCheck: false }}
+              />
+              <TextField
+                label="Region (optional)"
+                fullWidth
+                size="small"
+                value={getConfig('objectStorageRegion', '')}
+                onChange={(e) => setConfig('objectStorageRegion', e.target.value)}
+                placeholder="us-east-1 (leave blank for default)"
+                inputProps={{ spellCheck: false }}
+              />
+              {getConfig('objectStorageEndpoint', '') !== '' && getConfig('objectStorageAccessKey', '') !== '' &&
+               configEdits.objectStorageEndpoint === undefined && configEdits.objectStorageAccessKey === undefined && (
+                <Chip label="Configured" size="small" color="success" variant="outlined" sx={{ alignSelf: 'flex-start' }} />
+              )}
+            </Stack>
+
+            {(configEdits.objectStorageEndpoint !== undefined || configEdits.objectStorageBucket !== undefined ||
+              configEdits.objectStorageAccessKey !== undefined || configEdits.objectStorageSecretKey !== undefined ||
+              configEdits.objectStorageRegion !== undefined) && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={savingConfig ? <CircularProgress size={16} /> : <SaveIcon />}
+                onClick={() => saveConfig()}
+                disabled={savingConfig}
+                sx={{ mt: 2 }}
+              >
+                Save Storage Settings
+              </Button>
+            )}
+          </Paper>
+
+          <Paper sx={{ p: 3 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>Claude Max Accounts</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               Manage Claude Max subscriptions for load-balanced, flat-rate AI access.

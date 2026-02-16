@@ -168,6 +168,15 @@ export class BrowserTools {
     return el ? el.boundingBox() : null;
   }
 
+  async setViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewport({ width, height });
+  }
+
+  async getViewport(): Promise<{ width: number; height: number }> {
+    const vp = this.page.viewport();
+    return vp ? { width: vp.width, height: vp.height } : { width: 1920, height: 1080 };
+  }
+
   // ---------------------------------------------------------------------------
   // Clicking
   // ---------------------------------------------------------------------------

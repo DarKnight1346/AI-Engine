@@ -236,6 +236,17 @@ export async function POST(request: NextRequest) {
                     toolCallId: (event as any).toolCallId,
                   });
                   break;
+                case 'artifact':
+                  send('artifact', {
+                    slot,
+                    url: (event as any).url,
+                    artifactType: (event as any).artifactType,
+                    toolCallId: (event as any).toolCallId,
+                    filename: (event as any).filename,
+                    mimeType: (event as any).mimeType,
+                    size: (event as any).size,
+                  });
+                  break;
                 case 'background_task_start':
                   send('background_task', {
                     slot,

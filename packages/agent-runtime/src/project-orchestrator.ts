@@ -696,7 +696,7 @@ class SwarmAgent {
     });
 
     // Step 2: Run the agent loop on the dashboard with Docker tools
-    const taskPrompt = this.buildTaskPrompt(task, project);
+    const taskPrompt = await this.buildTaskPrompt(task, project);
     const rolePrompt = this.getRolePrompt();
 
     const dockerTaskPrompt = `${taskPrompt}
@@ -882,7 +882,7 @@ IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
     );
 
     // Build task prompt
-    const taskPrompt = this.buildTaskPrompt(task, project);
+    const taskPrompt = await this.buildTaskPrompt(task, project);
 
     // Build role-specific prompt
     const rolePrompt = this.getRolePrompt();
@@ -992,12 +992,31 @@ Key principles:
     return prompts[this.role.type] || prompts.general;
   }
 
-  private buildTaskPrompt(task: any, project: any): string {
+  private async buildTaskPrompt(task: any, project: any): Promise<string> {
+    // Load project attachments for reference
+    let attachmentsSection = '';
+    try {
+      const db = getDb();
+      const attachments = await db.projectAttachment.findMany({
+        where: { projectId: this.projectId },
+        orderBy: { uploadedAt: 'desc' },
+      });
+      if (attachments.length > 0) {
+        const lines = attachments.map((a: any) => {
+          const isUrl = a.storageUrl?.startsWith('http://') || a.storageUrl?.startsWith('https://');
+          return `- ${a.filename} (${a.mimeType})${isUrl ? `: ${a.storageUrl}` : ''}`;
+        });
+        attachmentsSection = `\n## Project Attachments\nThe following reference files have been uploaded for this project:\n${lines.join('\n')}\n`;
+      }
+    } catch {
+      // Attachments not available
+    }
+
     return `
 # Project: ${project?.name ?? 'Unknown'}
 
 ${project?.prd ? `## PRD\n${project.prd}\n\n` : ''}
-
+${attachmentsSection}
 ## Your Role
 You are an autonomous agent working as part of a swarm on this project. Multiple agents are working in parallel on different tasks. Your job is to complete your assigned task with high quality, then you'll automatically receive the next task.
 

@@ -15,6 +15,7 @@
     "@ai-engine/auth": "workspace:*",
     "@ai-engine/cluster": "workspace:*",
     "@ai-engine/db": "workspace:*",
+    "@ai-engine/object-storage": "workspace:*",
     "@ai-engine/llm": "workspace:*",
     "@ai-engine/memory": "workspace:*",
     "@ai-engine/planner": "workspace:*",

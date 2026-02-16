@@ -359,7 +359,7 @@ async function runPlanningAgentLoop(
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { projectId, userMessage } = body;
+    const { projectId, userMessage, attachments: attachmentIds } = body;
 
     if (!projectId || !userMessage) {
       return NextResponse.json({ error: 'projectId and userMessage are required' }, { status: 400 });
@@ -371,6 +371,55 @@ export async function POST(request: NextRequest) {
     const project = await db.project.findUnique({ where: { id: projectId } });
     if (!project) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    }
+
+    // Load project attachments if IDs were provided
+    let attachmentContentBlocks: LLMMessageContent[] = [];
+    if (Array.isArray(attachmentIds) && attachmentIds.length > 0) {
+      try {
+        const projectAttachments = await db.projectAttachment.findMany({
+          where: { id: { in: attachmentIds }, projectId },
+        });
+
+        for (const att of projectAttachments) {
+          const isStorageUrl = att.storageUrl.startsWith('http://') || att.storageUrl.startsWith('https://');
+
+          if (att.mimeType.startsWith('image/')) {
+            if (isStorageUrl) {
+              // For storage URLs, reference the image by URL
+              attachmentContentBlocks.push({
+                type: 'text',
+                text: `[Attached image: ${att.filename} (${att.mimeType})]\nURL: ${att.storageUrl}`,
+              } as LLMMessageContent);
+            } else {
+              // For local storage, try to use base64 from analysis
+              const analysis = att.analysis as Record<string, unknown> | null;
+              if (analysis?.base64Data) {
+                attachmentContentBlocks.push({
+                  type: 'image',
+                  source: { type: 'base64', mediaType: att.mimeType, data: analysis.base64Data as string },
+                } as LLMMessageContent);
+              }
+            }
+          } else {
+            // Non-image files — include as text reference
+            const label = att.attachmentType === 'pdf' ? 'PDF' : 'file';
+            if (isStorageUrl) {
+              attachmentContentBlocks.push({
+                type: 'text',
+                text: `[Attached ${label}: ${att.filename} (${att.mimeType})]\nURL: ${att.storageUrl}`,
+              } as LLMMessageContent);
+            } else {
+              attachmentContentBlocks.push({
+                type: 'text',
+                text: `[Attached ${label}: ${att.filename} (${att.mimeType})] — stored locally at ${att.storageUrl}`,
+              } as LLMMessageContent);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('[plan/route] Failed to load attachments:', err.message);
+      }
     }
 
     // Extract authenticated userId from JWT cookie (not from request body)
@@ -453,8 +502,16 @@ ${memoryContext || 'No prior context yet - this is the beginning of our planning
         content: conv.content,
       });
     }
-    // Append the current user message
-    llmMessages.push({ role: 'user', content: userMessage });
+    // Append the current user message (with attachment content blocks if any)
+    if (attachmentContentBlocks.length > 0) {
+      const contentBlocks: LLMMessageContent[] = [
+        ...attachmentContentBlocks,
+        { type: 'text', text: userMessage } as LLMMessageContent,
+      ];
+      llmMessages.push({ role: 'user', content: contentBlocks as any });
+    } else {
+      llmMessages.push({ role: 'user', content: userMessage });
+    }
 
     // Create LLM pool and run the planning agent loop
     const llm = await createLLMPool();

@@ -7,6 +7,34 @@ import { existsSync } from 'fs';
 export const dynamic = 'force-dynamic';
 
 /**
+ * Helper to get an ObjectStorageService instance from DB config.
+ * Returns null if object storage is not configured.
+ */
+async function getObjectStorage() {
+  try {
+    const db = getDb();
+    const [osEndpoint, osBucket, osAccessKey, osSecretKey, osRegion] = await Promise.all([
+      db.config.findUnique({ where: { key: 'objectStorageEndpoint' } }),
+      db.config.findUnique({ where: { key: 'objectStorageBucket' } }),
+      db.config.findUnique({ where: { key: 'objectStorageAccessKey' } }),
+      db.config.findUnique({ where: { key: 'objectStorageSecretKey' } }),
+      db.config.findUnique({ where: { key: 'objectStorageRegion' } }),
+    ]);
+    const endpoint = (osEndpoint?.valueJson as string)?.trim();
+    const bucket = (osBucket?.valueJson as string)?.trim();
+    const accessKey = (osAccessKey?.valueJson as string)?.trim();
+    const secretKey = (osSecretKey?.valueJson as string)?.trim();
+    const region = (osRegion?.valueJson as string)?.trim() || undefined;
+
+    if (endpoint && bucket && accessKey && secretKey) {
+      const { ObjectStorageService } = await import('@ai-engine/object-storage');
+      return new ObjectStorageService({ endpoint, bucket, accessKey, secretKey, region });
+    }
+  } catch { /* Object storage not configured */ }
+  return null;
+}
+
+/**
  * Upload attachments for planning mode
  * Supports images, PDFs, and documents
  */
@@ -42,35 +70,43 @@ export async function POST(request: NextRequest) {
       attachmentType = 'document';
     }
 
-    // Save file to storage
-    const uploadsDir = join(process.cwd(), 'uploads', 'projects', projectId);
-    if (!existsSync(uploadsDir)) {
-      await mkdir(uploadsDir, { recursive: true });
-    }
-
-    const filename = `${Date.now()}-${file.name}`;
-    const filepath = join(uploadsDir, filename);
-    const storageUrl = `/uploads/projects/${projectId}/${filename}`;
-
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
-    await writeFile(filepath, buffer);
+
+    // Try object storage first, fall back to local filesystem
+    let storageUrl: string;
+    const storage = await getObjectStorage();
+
+    if (storage) {
+      const { ObjectStorageService } = await import('@ai-engine/object-storage');
+      const key = ObjectStorageService.projectAttachmentKey(projectId, file.name);
+      storageUrl = await storage.upload(key, buffer, mimeType);
+    } else {
+      // Fallback: local filesystem
+      const uploadsDir = join(process.cwd(), 'uploads', 'projects', projectId);
+      if (!existsSync(uploadsDir)) {
+        await mkdir(uploadsDir, { recursive: true });
+      }
+      const filename = `${Date.now()}-${file.name}`;
+      const filepath = join(uploadsDir, filename);
+      storageUrl = `/uploads/projects/${projectId}/${filename}`;
+      await writeFile(filepath, buffer);
+    }
 
     // Analyze if it's an image or PDF
-    let analysis = null;
-    if (attachmentType === 'image') {
-      // Convert to base64 for LLM vision analysis
+    let analysis: Record<string, unknown> | null = null;
+    if (attachmentType === 'image' && !storage) {
+      // Only store base64 in analysis when using local storage (no object storage)
       const base64 = buffer.toString('base64');
       analysis = {
         base64Data: base64,
-        width: null, // Could extract image dimensions here
+        width: null,
         height: null,
-        analyzed: false, // Will be analyzed when AI sees it
+        analyzed: false,
       };
     } else if (attachmentType === 'pdf') {
-      // For PDFs, we'd extract text here (using pdf-parse or similar)
       analysis = {
-        textExtracted: false, // Placeholder - would extract PDF text
+        textExtracted: false,
         pageCount: null,
       };
     }

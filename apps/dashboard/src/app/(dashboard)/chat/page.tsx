@@ -215,6 +215,9 @@ function isImageUrl(url: string): boolean {
   if (/\.vecteezy\.com.*\.(jpg|png|jpeg)/i.test(lower)) return true;
   if (/\.hearstapps\.com.*\.(jpg|png|jpeg)/i.test(lower)) return true;
   if (/\.pethelpful\.com\/.image\//i.test(lower)) return true;
+  // S3-compatible object storage (Vultr, AWS, MinIO) — artifact URLs contain image type markers
+  if (/vultrobjects\.com.*\.(png|jpg|jpeg|gif|webp)/i.test(lower)) return true;
+  if (/artifacts\/.*-(screenshot|image)-.*\.(png|jpg|jpeg|gif|webp)/i.test(lower)) return true;
   return false;
 }
 
@@ -1667,6 +1670,26 @@ export default function ChatPage() {
           break;
         }
 
+        case 'artifact': {
+          const artifactSlot: string = data?.slot ?? '__default__';
+          const msgId = slotMessagesRef.current.get(artifactSlot);
+          if (msgId && data.url) {
+            const att: Attachment = {
+              id: crypto.randomUUID(),
+              name: data.filename || 'artifact',
+              type: data.mimeType || 'application/octet-stream',
+              url: data.url,
+              size: data.size ?? 0,
+            };
+            setMessages((msgs) => msgs.map((m) =>
+              m.id === msgId
+                ? { ...m, attachments: [...(m.attachments ?? []), att] }
+                : m
+            ));
+          }
+          break;
+        }
+
         case 'tool':
         case 'status':
           break;
@@ -1913,6 +1936,41 @@ export default function ChatPage() {
   const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
   const ACCEPTED_TYPES = 'image/*,video/*,.pdf,.txt,.csv,.json,.md,.html,.xml,.doc,.docx,.xls,.xlsx';
 
+  const uploadFileToStorage = useCallback(async (file: File, attId: string, attName: string) => {
+    // Show local preview immediately using blob URL
+    const localUrl = URL.createObjectURL(file);
+    setAttachments((prev) => [
+      ...prev,
+      {
+        id: attId,
+        name: attName,
+        type: file.type || 'application/octet-stream',
+        url: localUrl,
+        size: file.size,
+      },
+    ]);
+
+    // Upload to server in background
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('sessionId', sessionId || 'general');
+      const res = await fetch('/api/chat/upload', { method: 'POST', body: formData });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.url) {
+          // Replace local blob URL with permanent storage URL
+          setAttachments((prev) => prev.map((a) =>
+            a.id === attId ? { ...a, url: data.url } : a
+          ));
+          URL.revokeObjectURL(localUrl);
+        }
+      }
+    } catch {
+      // Keep the local blob URL as fallback — will be converted to data URL on send
+    }
+  }, [sessionId]);
+
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (!files.length) return;
@@ -1922,29 +1980,20 @@ export default function ChatPage() {
         setSnack({ open: true, message: `File "${file.name}" exceeds 20 MB limit`, severity: 'error' });
         continue;
       }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        setAttachments((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            name: file.name,
-            type: file.type || 'application/octet-stream',
-            url: dataUrl,
-            size: file.size,
-          },
-        ]);
-      };
-      reader.readAsDataURL(file);
+      const attId = crypto.randomUUID();
+      uploadFileToStorage(file, attId, file.name);
     }
 
     // Reset file input so the same file can be re-selected
     e.target.value = '';
-  }, []);
+  }, [uploadFileToStorage]);
 
   const removeAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachments((prev) => {
+      const att = prev.find((a) => a.id === id);
+      if (att?.url.startsWith('blob:')) URL.revokeObjectURL(att.url);
+      return prev.filter((a) => a.id !== id);
+    });
   }, []);
 
   // Handle paste events (paste images from clipboard)
@@ -1964,22 +2013,11 @@ export default function ChatPage() {
         setSnack({ open: true, message: `Pasted file exceeds 20 MB limit`, severity: 'error' });
         continue;
       }
-      const reader = new FileReader();
-      reader.onload = () => {
-        setAttachments((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            name: file.name || `pasted-${file.type.split('/')[1] || 'file'}`,
-            type: file.type || 'application/octet-stream',
-            url: reader.result as string,
-            size: file.size,
-          },
-        ]);
-      };
-      reader.readAsDataURL(file);
+      const attId = crypto.randomUUID();
+      const attName = file.name || `pasted-${file.type.split('/')[1] || 'file'}`;
+      uploadFileToStorage(file, attId, attName);
     }
-  }, []);
+  }, [uploadFileToStorage]);
 
   // Handle drag and drop
   const [isDragOver, setIsDragOver] = useState(false);
@@ -2596,6 +2634,24 @@ export default function ChatPage() {
                         type: 'image/png',
                         url: `data:image/png;base64,${data.base64}`,
                         size: data.base64.length,
+                      };
+                      setMessages((msgs) => msgs.map((m) =>
+                        m.id === msgId
+                          ? { ...m, attachments: [...(m.attachments ?? []), att] }
+                          : m
+                      ));
+                    }
+                    break;
+                  }
+                  case 'artifact': {
+                    const msgId = slotMessages.get(slot);
+                    if (msgId && data.url) {
+                      const att: Attachment = {
+                        id: crypto.randomUUID(),
+                        name: data.filename || 'artifact',
+                        type: data.mimeType || 'application/octet-stream',
+                        url: data.url,
+                        size: data.size ?? 0,
                       };
                       setMessages((msgs) => msgs.map((m) =>
                         m.id === msgId

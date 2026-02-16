@@ -121,6 +121,24 @@ function buildToolDefs(bt: BrowserTools): ToolDef[] {
       },
     },
     {
+      name: 'browser_setViewport',
+      description: 'Set the browser viewport size. Use for testing responsive layouts. Common sizes: mobile (375x812), tablet (768x1024), desktop (1920x1080). Default is 1920x1080.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          width: { type: 'number', description: 'Viewport width in pixels' },
+          height: { type: 'number', description: 'Viewport height in pixels' },
+        },
+        required: ['width', 'height'],
+      },
+      execute: async (input) => {
+        const width = input.width as number;
+        const height = input.height as number;
+        await bt.setViewport(width, height);
+        return { success: true, output: `Viewport set to ${width}x${height}` };
+      },
+    },
+    {
       name: 'browser_click',
       description: 'Click an element on the page.',
       inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'] },
