@@ -342,8 +342,12 @@ function dockerFinalizeTool(dispatcher: DockerDispatcher): Tool {
     name: 'docker_finalize',
     description:
       'Finalize a Docker container task: stage all changes, commit, push the branch, ' +
-      'and merge to main. The container is destroyed after finalization. ' +
-      'Call this when the task inside the container is complete.',
+      'pull latest main, and merge to main. The container is destroyed after successful merge.\n\n' +
+      'If there is a merge conflict, the tool returns success=false with mergeConflict=true and ' +
+      'the list of conflicting files. The container stays alive so you can:\n' +
+      '1. Fix the conflicts on your branch using docker_exec\n' +
+      '2. Test the fixes\n' +
+      '3. Call docker_finalize again to retry the merge',
     inputSchema: {
       type: 'object',
       properties: {
@@ -364,15 +368,24 @@ function dockerFinalizeTool(dispatcher: DockerDispatcher): Tool {
 
       try {
         const result = await dispatcher.finalizeContainer(taskId, commitMessage);
+        const resultData: Record<string, unknown> = {
+          merged: result.merged,
+          branchName: result.branchName,
+          filesChanged: result.filesChanged,
+          commitsCreated: result.commitsCreated,
+          output: result.output,
+        };
+
+        // Pass through merge conflict details if present
+        const rawResult = result as any;
+        if (rawResult.mergeConflict) {
+          resultData.mergeConflict = true;
+          resultData.conflictFiles = rawResult.conflictFiles;
+        }
+
         return {
           success: result.merged,
-          output: JSON.stringify({
-            merged: result.merged,
-            branchName: result.branchName,
-            filesChanged: result.filesChanged,
-            commitsCreated: result.commitsCreated,
-            output: result.output,
-          }),
+          output: JSON.stringify(resultData),
         };
       } catch (err: any) {
         return { success: false, output: `Finalization failed: ${err.message}` };

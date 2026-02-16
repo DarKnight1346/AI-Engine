@@ -62,6 +62,13 @@ export class WorkerHub {
   private pendingToolCalls = new Map<string, PendingToolCall>();
   private pendingDockerToolCalls = new Map<string, PendingToolCall>();
 
+  /** Pending docker finalization calls waiting for docker:task:complete from worker. */
+  private pendingDockerFinalizations = new Map<string, {
+    resolve: (result: any) => void;
+    reject: (err: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+
   /** Track which worker hosts containers for each project (affinity). */
   private projectWorkerAffinity = new Map<string, string>(); // projectId → workerId
 
@@ -1183,19 +1190,28 @@ export class WorkerHub {
 
   /**
    * Finalize a Docker task container: commit, push, merge, cleanup.
-   * Sends finalize command and waits for result via Redis.
+   * Sends finalize command to the worker and waits for the docker:task:complete result.
    */
-  async finalizeDockerContainer(taskId: string, commitMessage: string): Promise<void> {
+  async finalizeDockerContainer(taskId: string, commitMessage: string): Promise<any> {
     const workerId = this.dockerTaskWorkers.get(taskId);
     if (!workerId) throw new Error(`No worker assigned for task ${taskId}`);
 
     const worker = this.workers.get(workerId);
     if (!worker) throw new Error(`Worker ${workerId} not connected`);
 
-    this.send(worker.ws, {
-      type: 'docker:task:finalize',
-      taskId,
-      commitMessage,
+    return new Promise<any>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingDockerFinalizations.delete(taskId);
+        reject(new Error(`Docker finalization timed out after 120s for task ${taskId}`));
+      }, 120_000);
+
+      this.pendingDockerFinalizations.set(taskId, { resolve, reject, timeout });
+
+      this.send(worker.ws, {
+        type: 'docker:task:finalize',
+        taskId,
+        commitMessage,
+      });
     });
   }
 
@@ -1246,8 +1262,8 @@ export class WorkerHub {
 
   /**
    * Handle Docker task completion from a worker.
-   * Forwards the result to the orchestrator via Redis so the swarm agent
-   * can continue with the next task.
+   * Resolves any pending finalization promise, and also forwards the
+   * result to the orchestrator via Redis.
    */
   private async handleDockerTaskComplete(
     workerId: string,
@@ -1263,6 +1279,14 @@ export class WorkerHub {
     }
 
     console.log(`[hub] Docker task ${msg.taskId} ${result.success ? 'completed' : 'failed'} on worker ${workerId}`);
+
+    // Resolve pending finalization promise if one exists
+    const pending = this.pendingDockerFinalizations.get(msg.taskId);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      this.pendingDockerFinalizations.delete(msg.taskId);
+      pending.resolve({ ...result, workerId });
+    }
 
     // Forward result to the orchestrator via Redis
     await this.publishDockerResult(msg.taskId, {

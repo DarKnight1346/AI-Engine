@@ -728,21 +728,34 @@ class SwarmAgent {
 - Branch: **${branchName}**
 - Working directory: /workspace/project
 - Repository: ${this.repoUrl}
+- The container is a minimal Ubuntu 22.04 with Git and Node.js pre-installed. Install any additional tools you need with apt-get or npm.
 
 ## Available Docker Tools
-You have access to Docker tools to interact with the container:
 - **docker_exec**: Run shell commands inside the container (install deps, compile, test, etc.)
 - **docker_read_file**: Read file contents from the container
 - **docker_write_file**: Write/create files inside the container
 - **docker_list_files**: List directory contents
-- **docker_finalize**: When done, commit all changes, push, and merge to main
-- **docker_destroy**: Destroy the container without finalizing (for cleanup on failure)
+- **docker_finalize**: Commit, push branch, merge to main, push main, and destroy the container
+- **docker_destroy**: Destroy the container without committing (for cleanup on failure)
 
-## Workflow
-1. Use docker_exec to explore the codebase and understand the current state
-2. Make changes using docker_write_file or docker_exec
-3. Test your changes with docker_exec
-4. When everything works, call docker_finalize with a descriptive commit message
+## Required Workflow
+1. **Explore**: Use docker_exec to understand the codebase and current state
+2. **Implement**: Make your changes using docker_write_file or docker_exec
+3. **Test**: You MUST test your changes before finalizing. Run linters, type checks, build commands, or test suites as appropriate for the project. Verify the code compiles and works.
+4. **Finalize**: Call docker_finalize with a descriptive commit message. This will:
+   - Commit all changes on your branch
+   - Push the branch to the remote
+   - Pull the latest main (other agents may have pushed changes)
+   - Merge your branch into main
+   - Push main to the remote
+   - Destroy the container
+
+## Handling Merge Conflicts
+If docker_finalize reports a merge conflict (mergeConflict: true), the container stays alive. You must:
+1. Read the conflicting files listed in the response
+2. Fix the conflicts on your branch (the merge was aborted, you are back on your branch)
+3. Re-run your tests to make sure everything still works after resolving conflicts
+4. Call docker_finalize again to retry the merge
 
 IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
 `;
@@ -783,6 +796,53 @@ IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
       const duration = Date.now() - startTime;
 
       if (result.success) {
+        // Safety net: if the container is still alive (agent didn't call docker_finalize),
+        // auto-finalize to commit and push changes so work isn't lost.
+        let autoFinalized = false;
+        try {
+          const containers = await this.dockerDispatcher!.listProjectContainers(this.projectId);
+          const containerStillAlive = containers.some(c => c.taskId === task.id && c.status === 'running');
+
+          if (containerStillAlive) {
+            console.log(`[orchestrator] Auto-finalizing container for task ${task.id} (agent did not call docker_finalize)`);
+            await db.projectLog.create({
+              data: {
+                projectId: this.projectId,
+                agentId: this.agentId,
+                taskId: task.id,
+                level: 'warn',
+                message: `Auto-finalizing: ${task.title} — agent completed without calling docker_finalize`,
+              },
+            });
+
+            try {
+              const finalizeResult = await this.dockerDispatcher!.finalizeContainer(
+                task.id,
+                `${task.title}\n\nAutomated commit by AI Engine agent (task: ${task.id})`,
+              );
+              autoFinalized = true;
+
+              const raw = finalizeResult as any;
+              if (finalizeResult.merged) {
+                console.log(`[orchestrator] Auto-finalize succeeded: ${finalizeResult.filesChanged} files, merged to main`);
+              } else if (raw.mergeConflict) {
+                // Merge conflict during auto-finalize — branch is pushed but not merged.
+                // We can't resolve conflicts without the agent, so destroy container and move on.
+                console.warn(`[orchestrator] Auto-finalize hit merge conflict for task ${task.id}`);
+                try { await this.dockerDispatcher!.destroyContainer(task.id); } catch { /* best effort */ }
+              } else {
+                console.log(`[orchestrator] Auto-finalize: branch pushed, merge status: ${finalizeResult.merged}`);
+              }
+            } catch (finalizeErr: any) {
+              console.error(`[orchestrator] Auto-finalize failed for task ${task.id}:`, finalizeErr.message);
+              try { await this.dockerDispatcher!.destroyContainer(task.id); } catch { /* best effort */ }
+            }
+          }
+        } catch (checkErr: any) {
+          console.warn(`[orchestrator] Could not check container status for auto-finalize:`, checkErr.message);
+          try { await this.dockerDispatcher!.destroyContainer(task.id); } catch { /* best effort */ }
+        }
+
         await db.projectTask.update({
           where: { id: task.id },
           data: {
@@ -798,7 +858,7 @@ IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
             agentId: this.agentId,
             taskId: task.id,
             level: 'success',
-            message: `Completed task via Docker: ${task.title} (${(duration / 1000).toFixed(1)}s, worker: ${workerId})`,
+            message: `Completed task via Docker: ${task.title} (${(duration / 1000).toFixed(1)}s, worker: ${workerId})${autoFinalized ? ' [auto-finalized]' : ''}`,
             metadata: { branchName, workerId },
           },
         });

@@ -50,19 +50,17 @@ export class DockerDispatcherImpl implements DockerDispatcher {
     taskId: string,
     commitMessage: string,
   ): Promise<DockerTaskResult> {
-    await this.hub.finalizeDockerContainer(taskId, commitMessage);
+    const result = await this.hub.finalizeDockerContainer(taskId, commitMessage);
 
-    // The actual result comes back asynchronously via docker:task:complete.
-    // We return a placeholder; the orchestrator listens on Redis for the real result.
     return {
-      containerId: taskId,
+      containerId: result?.containerId ?? taskId,
       taskId,
-      branchName: '',
-      exitCode: 0,
-      merged: false,
-      output: 'Finalization command sent. Awaiting worker result.',
-      filesChanged: 0,
-      commitsCreated: 0,
+      branchName: result?.branchName ?? '',
+      exitCode: result?.merged ? 0 : 1,
+      merged: result?.merged ?? false,
+      output: result?.output ?? '',
+      filesChanged: result?.filesChanged ?? 0,
+      commitsCreated: result?.commitsCreated ?? 0,
     };
   }
 

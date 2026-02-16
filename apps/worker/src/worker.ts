@@ -509,7 +509,16 @@ export class Worker {
 
   /**
    * Handle finalization of a Docker task.
-   * Commits all changes, merges to main, cleans up the container.
+   *
+   * Workflow:
+   *   1. Stage and commit all changes on the feature branch
+   *   2. Push the feature branch to remote
+   *   3. Pull latest main from remote (other agents may have pushed)
+   *   4. Merge the branch into main
+   *      - If merge conflict: abort, return to branch, report conflict
+   *        (container stays alive so agent can resolve and retry)
+   *   5. Push main to remote
+   *   6. Clean up the container
    */
   private async handleDockerTaskFinalize(
     msg: { type: 'docker:task:finalize'; taskId: string; commitMessage?: string },
@@ -529,11 +538,12 @@ export class Worker {
 
     const { containerName, branchName } = container;
     const commitMsg = msg.commitMessage ?? `Task ${msg.taskId} completed`;
+    const sshCmd = 'GIT_SSH_COMMAND="ssh -i /tmp/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"';
 
     try {
-      this.client?.sendLog('info', `Finalizing task ${msg.taskId}: committing and merging...`, msg.taskId);
+      this.client?.sendLog('info', `Finalizing task ${msg.taskId}: committing and pushing...`, msg.taskId);
 
-      // Stage and commit changes
+      // Step 1: Stage and commit all changes on the feature branch
       const commitScript = [
         'cd /workspace/project',
         'git add -A',
@@ -542,7 +552,7 @@ export class Worker {
 
       await this.dockerExec(containerName, ['sh', '-c', commitScript], 30_000);
 
-      // Count files changed and commits on this branch
+      // Gather stats (best-effort)
       let filesChanged = 0;
       let commitsCreated = 0;
       try {
@@ -562,50 +572,103 @@ export class Worker {
         commitsCreated = parseInt(logCount.trim(), 10) || 0;
       } catch { /* stats are best-effort */ }
 
-      // Merge branch into main
-      let merged = false;
+      // Step 2: Push the feature branch to remote
       try {
-        const mergeScript = [
+        await this.dockerExec(
+          containerName,
+          ['sh', '-c', `cd /workspace/project && ${sshCmd} git push -u origin "${branchName}"`],
+          60_000,
+        );
+        console.log(`[worker] Pushed branch ${branchName} for task ${msg.taskId}`);
+      } catch (pushErr: any) {
+        console.error(`[worker] Branch push failed for ${branchName}:`, pushErr.message);
+        this.client?.sendLog('error', `Failed to push branch ${branchName}: ${pushErr.message}`, msg.taskId);
+      }
+
+      // Step 3: Pull latest main from remote (other agents may have pushed)
+      try {
+        const pullScript = [
           'cd /workspace/project',
           'git checkout main',
-          `git merge --no-ff "${branchName}" -m "Merge ${branchName}"`,
+          `${sshCmd} git pull origin main`,
         ].join(' && ');
-
-        await this.dockerExec(containerName, ['sh', '-c', mergeScript], 30_000);
-        merged = true;
-      } catch (mergeErr: any) {
-        console.error(`[worker] Merge failed for ${branchName}:`, mergeErr.message);
-        // Abort the merge if it failed
+        await this.dockerExec(containerName, ['sh', '-c', pullScript], 60_000);
+      } catch (pullErr: any) {
+        console.warn(`[worker] Pull main failed (may be first push): ${pullErr.message}`);
+        // Ensure we're on main even if pull failed
         try {
-          await this.dockerExec(containerName, ['sh', '-c', 'cd /workspace/project && git merge --abort'], 10_000);
+          await this.dockerExec(containerName, ['sh', '-c', 'cd /workspace/project && git checkout main'], 10_000);
         } catch { /* ignore */ }
       }
 
-      // Push changes back to the bare repo (main branch)
+      // Step 4: Merge the branch into main
+      let merged = false;
+      let mergeConflict = false;
+      let conflictFiles = '';
+      try {
+        await this.dockerExec(
+          containerName,
+          ['sh', '-c', `cd /workspace/project && git merge --no-ff "${branchName}" -m "Merge ${branchName}"`],
+          30_000,
+        );
+        merged = true;
+      } catch (mergeErr: any) {
+        console.error(`[worker] Merge failed for ${branchName}:`, mergeErr.message);
+
+        // Check if this is a merge conflict (vs other error)
+        try {
+          const { stdout: status } = await this.dockerExec(
+            containerName,
+            ['sh', '-c', 'cd /workspace/project && git diff --name-only --diff-filter=U 2>/dev/null'],
+            10_000,
+          );
+          conflictFiles = status.trim();
+          mergeConflict = conflictFiles.length > 0;
+        } catch { /* ignore */ }
+
+        // Abort the failed merge and return to branch
+        try {
+          await this.dockerExec(containerName, ['sh', '-c', 'cd /workspace/project && git merge --abort 2>/dev/null; true'], 10_000);
+          await this.dockerExec(containerName, ['sh', '-c', `cd /workspace/project && git checkout "${branchName}"`], 10_000);
+        } catch { /* ignore */ }
+
+        if (mergeConflict) {
+          // Report conflict — container stays alive so agent can resolve and retry
+          this.client?.sendLog('warn', `Merge conflict in ${branchName}: ${conflictFiles}`, msg.taskId);
+          this.client?.sendDockerTaskComplete(msg.taskId, {
+            success: false,
+            merged: false,
+            mergeConflict: true,
+            conflictFiles,
+            filesChanged,
+            commitsCreated,
+            branchName,
+            error: `Merge conflict with main. Conflicting files: ${conflictFiles}`,
+            output: `Merge conflict detected. Branch ${branchName} is pushed. Conflicting files:\n${conflictFiles}`,
+          });
+          console.log(`[worker] Merge conflict for task ${msg.taskId} — container kept alive for resolution`);
+          return; // Container stays alive — agent can resolve and call finalize again
+        }
+
+        this.client?.sendLog('error', `Merge of ${branchName} into main failed: ${mergeErr.message}`, msg.taskId);
+      }
+
+      // Step 5: Push main to remote
       if (merged) {
         try {
-          const pushScript = [
-            'cd /workspace/project',
-            'GIT_SSH_COMMAND="ssh -i /tmp/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git push origin main',
-          ].join(' && ');
-          await this.dockerExec(containerName, ['sh', '-c', pushScript], 30_000);
+          await this.dockerExec(
+            containerName,
+            ['sh', '-c', `cd /workspace/project && ${sshCmd} git push origin main`],
+            60_000,
+          );
+          console.log(`[worker] Pushed main for task ${msg.taskId}`);
         } catch (pushErr: any) {
-          console.error(`[worker] Push failed for task ${msg.taskId}:`, pushErr.message);
+          console.error(`[worker] Push main failed for task ${msg.taskId}:`, pushErr.message);
+          this.client?.sendLog('error', `Failed to push main after merge: ${pushErr.message}`, msg.taskId);
         }
       }
 
-      // Get the output summary
-      let output = '';
-      try {
-        const { stdout } = await this.dockerExec(
-          containerName,
-          ['sh', '-c', `cd /workspace/project && git log --oneline main...${branchName} 2>/dev/null || echo "No commits"`],
-          10_000,
-        );
-        output = stdout.trim();
-      } catch { /* ignore */ }
-
-      // Clean up the container
+      // Step 6: Clean up the container
       await this.removeContainer(containerName);
       this.activeContainers.delete(msg.taskId);
 
@@ -615,7 +678,7 @@ export class Worker {
         filesChanged,
         commitsCreated,
         branchName,
-        output: output || `Completed with ${filesChanged} file(s) changed`,
+        output: `${filesChanged} file(s) changed, ${commitsCreated} commit(s), merged: ${merged}`,
       });
 
       console.log(`[worker] Task ${msg.taskId} finalized: ${filesChanged} files, ${commitsCreated} commits, merged: ${merged}`);
