@@ -224,6 +224,7 @@ export function createProjectOverviewTools(db: PlanningDbClient, projectId: stri
         'Get a comprehensive snapshot of the ENTIRE current project state in a single call: ' +
         'the PRD document, ALL tasks (with descriptions, priorities, types, statuses, and dependency titles), ' +
         'and ALL wireframes (with element summaries, composition tree, and feature tags). ' +
+        'Also shows the configured repository URL if one has been set. ' +
         'Use this as your FIRST call when resuming a conversation on an existing project, or any time you need ' +
         'to understand the full picture before making changes. Much more efficient than calling list_tasks, ' +
         'get_prd, list_wireframes, and get_wireframe_tree separately.',
@@ -234,7 +235,7 @@ export function createProjectOverviewTools(db: PlanningDbClient, projectId: stri
       execute: async () => {
         // Fetch everything in parallel
         const [project, tasks, wireframes] = await Promise.all([
-          db.project.findUnique({ where: { id: projectId }, select: { name: true, description: true, prd: true } }),
+          db.project.findUnique({ where: { id: projectId }, select: { name: true, description: true, prd: true, repoUrl: true } }),
           db.projectTask.findMany({ where: { projectId }, orderBy: { priority: 'desc' } }),
           db.projectWireframe.findMany({ where: { projectId }, orderBy: { sortOrder: 'asc' } }),
         ]);
@@ -245,6 +246,9 @@ export function createProjectOverviewTools(db: PlanningDbClient, projectId: stri
         sections.push(`# Project: ${project?.name || '(unnamed)'}`);
         if (project?.description) {
           sections.push(`Description: ${project.description}`);
+        }
+        if ((project as any)?.repoUrl) {
+          sections.push(`Repository: ${(project as any).repoUrl}`);
         }
 
         // ── PRD ──
@@ -340,6 +344,41 @@ export function createProjectOverviewTools(db: PlanningDbClient, projectId: stri
           success: true,
           output: sections.join('\n'),
         };
+      },
+    },
+    {
+      name: 'set_repo_url',
+      description:
+        'Set or update the Git repository URL for this project. ' +
+        'This is the remote repository (e.g. GitHub, GitLab, Bitbucket) that agents will clone from and push to during the build phase. ' +
+        'Accepts SSH URLs (git@github.com:user/repo.git) or HTTPS URLs (https://github.com/user/repo.git). ' +
+        'Pass an empty string to clear the repository URL.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoUrl: {
+            type: 'string',
+            description: 'The Git repository URL (SSH or HTTPS). Pass empty string to clear.',
+          },
+        },
+        required: ['repoUrl'],
+      },
+      execute: async (input) => {
+        const url = (input.repoUrl as string).trim();
+        try {
+          await db.project.update({
+            where: { id: projectId },
+            data: { repoUrl: url || null } as any,
+          });
+          return {
+            success: true,
+            output: url
+              ? `Repository URL set to: ${url}`
+              : 'Repository URL cleared.',
+          };
+        } catch (err: any) {
+          return { success: false, output: `Failed to update repository URL: ${err.message}` };
+        }
       },
     },
   ];

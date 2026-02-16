@@ -75,6 +75,16 @@ export async function register() {
       }, 8000);
     }
 
+    // ── Project Orchestrator (swarm build agents) ─────────────────
+    if (!(globalThis as any).__orchestratorStarted) {
+      (globalThis as any).__orchestratorStarted = true;
+
+      // Start after a delay to give Redis, DB, and WorkerHub time to initialise
+      setTimeout(async () => {
+        await startProjectOrchestrator();
+      }, 10000);
+    }
+
     // ── Memory Consolidation (periodic "sleep" cycle) ────────────
     if (!(globalThis as any).__consolidationStarted) {
       (globalThis as any).__consolidationStarted = true;
@@ -157,6 +167,123 @@ async function startScheduler() {
     console.log('[scheduler] Subscribed to task-fired events');
   } catch (err: any) {
     console.error('[scheduler] Failed to start:', err.message);
+  }
+}
+
+/**
+ * Start the ProjectOrchestrator — subscribes to Redis `project:start` /
+ * `project:stop` events so that when the build API publishes them the
+ * orchestrator spawns swarm agents to execute the project tasks.
+ *
+ * Creates a DockerDispatcher adapter from the WorkerHub so agents can
+ * dispatch Docker tool calls to workers.
+ */
+async function startProjectOrchestrator() {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    console.warn('[orchestrator] REDIS_URL not set — project orchestrator disabled');
+    return;
+  }
+
+  try {
+    const Redis = (await import('ioredis')).default;
+    const { ProjectOrchestrator } = await import('@ai-engine/agent-runtime');
+    const { LLMPool } = await import('@ai-engine/llm');
+    const { ContextBuilder, MemoryService, GoalTracker, EmbeddingService } = await import('@ai-engine/memory');
+    const { getDb } = await import('@ai-engine/db');
+    const { WorkerHub } = await import('./lib/worker-hub');
+
+    const db = getDb();
+    const nodeId = `dashboard-${process.env.HOSTNAME || 'main'}`;
+
+    // Create a dedicated Redis client for the orchestrator (subscriber)
+    const orchestratorRedis = new Redis(redisUrl, {
+      maxRetriesPerRequest: 3,
+      lazyConnect: true,
+    });
+    await orchestratorRedis.connect();
+
+    // Build LLM pool from active API keys
+    const apiKeys = await db.apiKey.findMany({ where: { isActive: true } });
+    if (apiKeys.length === 0) {
+      console.warn('[orchestrator] No API keys configured — project orchestrator deferred');
+      await orchestratorRedis.quit().catch(() => {});
+      return;
+    }
+
+    let nvidiaFallback: { provider: 'nvidia'; apiKey: string } | undefined;
+    try {
+      const nvidiaConfig = await db.config.findUnique({ where: { key: 'nvidiaApiKey' } });
+      if (nvidiaConfig?.valueJson && typeof nvidiaConfig.valueJson === 'string' && nvidiaConfig.valueJson.trim()) {
+        nvidiaFallback = { provider: 'nvidia', apiKey: nvidiaConfig.valueJson.trim() };
+      }
+    } catch { /* Config not found */ }
+
+    const pool = new LLMPool({
+      keys: apiKeys.map((k: any) => {
+        const stats = k.usageStats as any;
+        return {
+          id: k.id,
+          apiKey: k.keyEncrypted,
+          keyType: (stats?.keyType as 'api-key' | 'bearer' | undefined) ?? 'api-key',
+          provider: (stats?.provider as 'anthropic' | 'openai-compatible' | undefined) ?? 'anthropic',
+          baseUrl: stats?.baseUrl as string | undefined,
+        };
+      }),
+      strategy: 'round-robin',
+      fallback: nvidiaFallback,
+    });
+
+    // Build context builder (memory service + goal tracker)
+    const embeddings = new EmbeddingService();
+    const memoryService = new MemoryService(embeddings);
+    const goalTracker = new GoalTracker();
+    const contextBuilder = new ContextBuilder(memoryService, goalTracker);
+
+    // Create a DockerDispatcher adapter from the WorkerHub
+    const workerHub = WorkerHub.getInstance();
+
+    // Initialise WorkerHub's Redis pub/sub for Docker task orchestration
+    // (needed for forwarding Docker task results between workers and orchestrator)
+    await workerHub.initRedis().catch((err: any) => {
+      console.warn('[orchestrator] WorkerHub Redis init failed (Docker dispatch may be unavailable):', err.message);
+    });
+
+    const dockerDispatcher = {
+      executeDockerTool: (taskId: string, toolName: string, input: Record<string, unknown>, timeoutMs?: number) =>
+        workerHub.executeDockerToolOnWorker(taskId, toolName, input, timeoutMs),
+      createContainer: (opts: { projectId: string; taskId: string; config: Record<string, unknown>; repoUrl: string }) =>
+        workerHub.createDockerContainer(opts),
+      finalizeContainer: async (taskId: string, commitMessage: string) => {
+        await workerHub.finalizeDockerContainer(taskId, commitMessage);
+        return { success: true, branchName: '', commitHash: '', filesChanged: 0, commitsCreated: 0 };
+      },
+      destroyContainer: (taskId: string) =>
+        workerHub.destroyDockerContainer(taskId),
+      listProjectContainers: async (projectId: string) =>
+        workerHub.getProjectContainers(projectId).map((c: any) => ({
+          containerId: c.taskId,
+          taskId: c.taskId,
+          workerId: c.workerId,
+          status: 'running' as const,
+          branchName: '',
+          createdAt: new Date(),
+        })),
+    };
+
+    // Initialise the orchestrator — it subscribes to Redis in its constructor
+    const orchestrator = new ProjectOrchestrator(
+      pool,
+      contextBuilder,
+      orchestratorRedis,
+      nodeId,
+      dockerDispatcher as any,
+    );
+
+    (globalThis as any).__projectOrchestrator = orchestrator;
+    console.log('[orchestrator] Project orchestrator started — listening for project:start events');
+  } catch (err: any) {
+    console.error('[orchestrator] Failed to start project orchestrator:', err.message);
   }
 }
 

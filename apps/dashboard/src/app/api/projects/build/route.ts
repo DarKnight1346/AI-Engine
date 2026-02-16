@@ -55,13 +55,15 @@ export async function POST(request: NextRequest) {
     }
 
     // 3. Update project status to building, store Git config
+    //    If the project has an external repoUrl, store it alongside the local repo
     const existingConfig = (project.config as Record<string, unknown>) ?? {};
+    const externalRepoUrl = project.repoUrl || null;
     const updatedConfig = {
       ...existingConfig,
       ...(gitConfig ? {
         git: {
           repoPath: gitConfig.localPath,
-          remoteUrl: gitConfig.remoteUrl,
+          remoteUrl: externalRepoUrl ?? gitConfig.remoteUrl,
           defaultBranch: gitConfig.defaultBranch,
         },
       } : {}),
@@ -87,22 +89,27 @@ export async function POST(request: NextRequest) {
     });
 
     // Log the start
+    const repoLabel = externalRepoUrl
+      ? `external repo ${externalRepoUrl}`
+      : gitConfig
+        ? `local repo at ${gitConfig.localPath}`
+        : 'no Git (fallback mode)';
     await db.projectLog.create({
       data: {
         projectId: body.projectId,
         level: 'info',
-        message: gitConfig
-          ? `Project build started — Git repo created at ${gitConfig.localPath}`
-          : 'Project build started (Git repo creation failed, running in fallback mode)',
+        message: `Project build started — ${repoLabel}`,
         metadata: {
           agentCount: body.agentCount ?? 4,
           config: updatedConfig,
           gitRepoPath: gitConfig?.localPath ?? null,
+          externalRepoUrl,
         },
       },
     });
 
     // 4. Trigger the project orchestrator via Redis pub/sub
+    //    Pass the external repoUrl so the orchestrator + workers can pull/push from it
     try {
       const Redis = (await import('ioredis')).default;
       const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
@@ -112,6 +119,7 @@ export async function POST(request: NextRequest) {
         config: {
           agentCount: body.agentCount ?? 4,
           model: 'standard',
+          repoUrl: externalRepoUrl,
           ...(gitConfig ? { git: gitConfig } : {}),
         },
       }));
@@ -134,6 +142,112 @@ export async function POST(request: NextRequest) {
         path: gitConfig.localPath,
         defaultBranch: gitConfig.defaultBranch,
       } : null,
+    });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+/**
+ * Resume a paused project.
+ *
+ * This endpoint:
+ *   1. Verifies the project is in 'paused' status
+ *   2. Resets any stuck tasks (locked / in_progress) back to 'pending'
+ *   3. Clears stale agent records from the previous run
+ *   4. Updates project status to 'building'
+ *   5. Publishes project:start so the orchestrator spawns a new swarm
+ */
+export async function PATCH(request: NextRequest) {
+  try {
+    const db = getDb();
+    const body = await request.json();
+
+    if (!body.projectId) {
+      return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
+    }
+
+    const project = await db.project.findUnique({
+      where: { id: body.projectId },
+    });
+
+    if (!project) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    }
+
+    if (project.status !== 'paused') {
+      return NextResponse.json(
+        { error: `Project must be in paused status to resume. Current status: ${project.status}` },
+        { status: 400 },
+      );
+    }
+
+    // 1. Reset stuck tasks back to pending so agents can pick them up
+    await db.projectTask.updateMany({
+      where: {
+        projectId: body.projectId,
+        status: { in: ['locked', 'in_progress'] },
+      },
+      data: {
+        status: 'pending',
+        lockedBy: null,
+        lockedAt: null,
+        assignedAgentId: null,
+        startedAt: null,
+      },
+    });
+
+    // 2. Remove old agent records — the orchestrator will create fresh ones
+    await db.projectAgent.deleteMany({
+      where: { projectId: body.projectId },
+    });
+
+    // 3. Update project status to building
+    const updatedProject = await db.project.update({
+      where: { id: body.projectId },
+      data: { status: 'building' },
+    });
+
+    // 4. Log the resume
+    await db.projectLog.create({
+      data: {
+        projectId: body.projectId,
+        level: 'info',
+        message: 'Project resumed by user',
+      },
+    });
+
+    // 5. Publish project:start so the orchestrator spawns a new swarm
+    //    Re-use the existing Git config (repo was already created on first build)
+    const existingConfig = (project.config as Record<string, unknown>) ?? {};
+    try {
+      const Redis = (await import('ioredis')).default;
+      const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+
+      await redis.publish('project:start', JSON.stringify({
+        projectId: body.projectId,
+        config: {
+          agentCount: body.agentCount ?? 4,
+          model: 'standard',
+          repoUrl: project.repoUrl ?? null,
+          ...(existingConfig.git ? { git: existingConfig.git } : {}),
+        },
+      }));
+
+      await redis.quit();
+    } catch (redisError) {
+      console.error('Failed to publish project resume event:', redisError);
+    }
+
+    return NextResponse.json({
+      success: true,
+      project: {
+        ...updatedProject,
+        createdAt: updatedProject.createdAt.toISOString(),
+        updatedAt: updatedProject.updatedAt.toISOString(),
+        startedAt: updatedProject.startedAt?.toISOString() ?? null,
+        completedAt: updatedProject.completedAt?.toISOString() ?? null,
+      },
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

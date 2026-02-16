@@ -90,6 +90,7 @@ export async function GET(request: NextRequest) {
         name: project.name,
         description: project.description,
         status: project.status,
+        repoUrl: project.repoUrl ?? null,
         createdAt: project.createdAt.toISOString(),
         updatedAt: project.updatedAt.toISOString(),
         startedAt: project.startedAt?.toISOString() ?? null,
@@ -120,6 +121,7 @@ export async function POST(request: NextRequest) {
         description: body.description ?? null,
         prd: body.prd ?? null,
         status: body.status ?? 'planning',
+        repoUrl: body.repoUrl ?? null,
         config: body.config ?? {},
         planningSessionId: body.planningSessionId ?? null,
         teamId: body.teamId ?? null,
@@ -154,6 +156,7 @@ export async function PUT(request: NextRequest) {
     if (body.description !== undefined) updateData.description = body.description;
     if (body.prd !== undefined) updateData.prd = body.prd;
     if (body.status !== undefined) updateData.status = body.status;
+    if (body.repoUrl !== undefined) updateData.repoUrl = body.repoUrl;
     if (body.config !== undefined) updateData.config = body.config;
     
     // Handle status transitions

@@ -18,6 +18,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import PendingIcon from '@mui/icons-material/Pending';
 import CloseIcon from '@mui/icons-material/Close';
+import GitHubIcon from '@mui/icons-material/GitHub';
 import dynamic from 'next/dynamic';
 
 // Lazy load heavy components
@@ -28,6 +29,7 @@ interface Project {
   id: string;
   name: string;
   description: string | null;
+  repoUrl: string | null;
   status: 'planning' | 'building' | 'qa' | 'completed' | 'failed' | 'paused';
   createdAt: string;
   updatedAt: string;
@@ -72,6 +74,7 @@ export default function ProjectsPage() {
   // Form fields
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [repoUrl, setRepoUrl] = useState('');
 
   const reload = useCallback(() => {
     fetch('/api/projects')
@@ -88,6 +91,7 @@ export default function ProjectsPage() {
   const openCreate = () => {
     setName('');
     setDescription('');
+    setRepoUrl('');
     setCreateDialogOpen(true);
   };
 
@@ -101,6 +105,7 @@ export default function ProjectsPage() {
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim() || null,
+          repoUrl: repoUrl.trim() || null,
           status: 'planning',
         }),
       });
@@ -121,7 +126,7 @@ export default function ProjectsPage() {
     } finally {
       setSaving(false);
     }
-  }, [name, description, reload]);
+  }, [name, description, repoUrl, reload]);
 
   const handleDelete = useCallback(
     async (id: string) => {
@@ -180,6 +185,29 @@ export default function ProjectsPage() {
           setSnack({ open: true, message: result.error, severity: 'error' });
         } else {
           setSnack({ open: true, message: 'Project paused', severity: 'success' });
+          reload();
+        }
+      } catch (err: any) {
+        setSnack({ open: true, message: err.message, severity: 'error' });
+      }
+    },
+    [reload]
+  );
+
+  const handleResumeBuild = useCallback(
+    async (projectId: string) => {
+      if (!confirm('Resume this project? Stuck tasks will be reset and agents will be re-launched.')) return;
+      try {
+        const res = await fetch('/api/projects/build', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId, agentCount: 4 }),
+        });
+        const result = await res.json();
+        if (result.error) {
+          setSnack({ open: true, message: result.error, severity: 'error' });
+        } else {
+          setSnack({ open: true, message: 'Project resumed!', severity: 'success' });
           reload();
         }
       } catch (err: any) {
@@ -273,6 +301,19 @@ export default function ProjectsPage() {
                       {project.agentCount}
                     </Typography>
                   </Box>
+                  {project.repoUrl && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Typography variant="caption" color="text.secondary">
+                        <GitHubIcon sx={{ fontSize: 14, mr: 0.5, verticalAlign: 'text-bottom' }} />
+                        Repo
+                      </Typography>
+                      <Tooltip title={project.repoUrl}>
+                        <Typography variant="caption" sx={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {project.repoUrl.replace(/^.*[:/]([^/]+\/[^/]+?)(?:\.git)?$/, '$1')}
+                        </Typography>
+                      </Tooltip>
+                    </Box>
+                  )}
                   {project.startedAt && (
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <Typography variant="caption" color="text.secondary">
@@ -318,6 +359,17 @@ export default function ProjectsPage() {
                     Pause
                   </Button>
                 )}
+                {project.status === 'paused' && (
+                  <Button
+                    fullWidth
+                    size="small"
+                    variant="contained"
+                    startIcon={<PlayArrowIcon />}
+                    onClick={() => handleResumeBuild(project.id)}
+                  >
+                    Resume
+                  </Button>
+                )}
               </Box>
             </Card>
           </Grid>
@@ -343,6 +395,14 @@ export default function ProjectsPage() {
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+            />
+            <TextField
+              label="Repository URL"
+              fullWidth
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              placeholder="git@github.com:user/repo.git or https://github.com/user/repo.git"
+              helperText="Optional — Git repository that agents will push to and pull from"
             />
             <Typography variant="body2" color="text.secondary">
               After creating the project, you'll enter planning mode to generate a PRD and define tasks.

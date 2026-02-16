@@ -491,6 +491,7 @@ model Project {
   description      String?
   prd              String?  // Product Requirements Document
   status           String   @default("planning") // planning | building | qa | completed | failed | paused
+  repoUrl          String?  @map("repo_url") // External Git repository URL (GitHub, GitLab, etc.)
   config           Json     @default("{}") // Project configuration (models, settings, etc.)
   planningSessionId String? @map("planning_session_id")
   teamId           String?  @map("team_id")

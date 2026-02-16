@@ -86,7 +86,7 @@ export class ProjectOrchestrator {
    * The Git repo is created by the build API before this is called.
    * Docker containers are created on workers, not the dashboard.
    */
-  async startProject(projectId: string, config: { agentCount?: number; model?: string } = {}) {
+  async startProject(projectId: string, config: { agentCount?: number; model?: string; repoUrl?: string } = {}) {
     if (this.activeProjects.has(projectId)) {
       console.log(`Project ${projectId} is already running`);
       return;
@@ -107,9 +107,19 @@ export class ProjectOrchestrator {
     const sshKeyService = SshKeyService.getInstance();
     await sshKeyService.ensureKeyPair();
 
-    // Get Git repo path (created by the build API)
+    // Get Git repo path (local bare repo created by the build API)
     const projectConfig = (project.config as any) ?? {};
     const repoPath = projectConfig.git?.repoPath ?? this.gitService.getRepoPath(projectId);
+
+    // Resolve the effective repo URL that workers/agents use to clone and push.
+    // Priority: project.repoUrl (DB column) > config.repoUrl (from Redis event) >
+    //           config.git.remoteUrl > local repoPath as fallback.
+    const externalRepoUrl: string | null =
+      (project as any).repoUrl
+      ?? config.repoUrl
+      ?? projectConfig.git?.remoteUrl
+      ?? null;
+    const effectiveRepoUrl = externalRepoUrl || repoPath;
 
     const agentCount = config.agentCount ?? 4;
     const pub = await this.getPublisher();
@@ -124,6 +134,7 @@ export class ProjectOrchestrator {
       this.nodeId,
       config,
       repoPath,
+      effectiveRepoUrl,
       this.dockerDispatcher,
     );
 
@@ -133,11 +144,14 @@ export class ProjectOrchestrator {
     await swarm.start();
 
     // Log
+    const repoLabel = externalRepoUrl
+      ? `remote repo ${externalRepoUrl}`
+      : `local repo ${repoPath}`;
     await db.projectLog.create({
       data: {
         projectId,
         level: 'info',
-        message: `Started project with ${agentCount} agents (Git: ${repoPath}). Docker containers will run on workers.`,
+        message: `Started project with ${agentCount} agents (${repoLabel}). Docker containers will run on workers.`,
       },
     });
   }
@@ -208,6 +222,8 @@ class ProjectSwarm {
     private nodeId: string,
     private config: any,
     private repoPath: string,
+    /** Effective repo URL for cloning/pushing — external URL when available, otherwise local path */
+    private repoUrl: string,
     private dockerDispatcher?: DockerDispatcher,
   ) {}
 
@@ -251,6 +267,7 @@ class ProjectSwarm {
         this.nodeId,
         this.config,
         this.repoPath,
+        this.repoUrl,
         this.dockerDispatcher,
       );
 
@@ -361,6 +378,8 @@ class SwarmAgent {
     private nodeId: string,
     private config: any,
     private repoPath: string,
+    /** Effective repo URL for cloning/pushing — external URL when available, otherwise local path */
+    private repoUrl: string,
     private dockerDispatcher?: DockerDispatcher,
   ) {}
 
@@ -644,8 +663,9 @@ class SwarmAgent {
 
     const image = (this.config?.docker?.image as string) ?? 'ai-engine-worker:latest';
 
-    // Create Docker tools bound to this dispatcher and project
-    const dockerTools = createDockerTools(this.dockerDispatcher, this.projectId, this.repoPath);
+    // Create Docker tools bound to this dispatcher and project.
+    // Use the effective repoUrl so Docker tools push/pull from the correct remote.
+    const dockerTools = createDockerTools(this.dockerDispatcher, this.projectId, this.repoUrl);
 
     // Step 1: Create the container on a worker
     let containerId: string;
@@ -663,11 +683,12 @@ class SwarmAgent {
             PROJECT_NAME: project?.name ?? 'unknown',
             TASK_TITLE: task.title,
             TASK_TYPE: task.taskType,
+            REPO_URL: this.repoUrl,
           },
           memoryLimit: (this.config?.docker?.memoryLimit as string) ?? '4g',
           cpuLimit: (this.config?.docker?.cpuLimit as string) ?? '2.0',
         },
-        repoUrl: this.repoPath,
+        repoUrl: this.repoUrl,
       });
 
       containerId = containerResult.containerId;
@@ -706,6 +727,7 @@ class SwarmAgent {
 - Task ID: ${task.id}
 - Branch: **${branchName}**
 - Working directory: /workspace/project
+- Repository: ${this.repoUrl}
 
 ## Available Docker Tools
 You have access to Docker tools to interact with the container:
@@ -1012,11 +1034,15 @@ Key principles:
       // Attachments not available
     }
 
+    const repoSection = this.repoUrl
+      ? `## Git Repository\n- **Repository:** ${this.repoUrl}\n- Push all changes to this repository.\n\n`
+      : '';
+
     return `
 # Project: ${project?.name ?? 'Unknown'}
 
 ${project?.prd ? `## PRD\n${project.prd}\n\n` : ''}
-${attachmentsSection}
+${repoSection}${attachmentsSection}
 ## Your Role
 You are an autonomous agent working as part of a swarm on this project. Multiple agents are working in parallel on different tasks. Your job is to complete your assigned task with high quality, then you'll automatically receive the next task.
 

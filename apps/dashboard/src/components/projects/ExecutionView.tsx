@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
   Box, Typography, Paper, Grid, LinearProgress, Chip, Card,
   CardContent, List, ListItem, ListItemText, Divider, Stack,
-  CircularProgress, IconButton, Tooltip, Button, Alert,
+  CircularProgress, IconButton, Tooltip, Button, Alert, TextField,
 } from '@mui/material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
@@ -13,6 +13,10 @@ import SmartToyIcon from '@mui/icons-material/SmartToy';
 import LockIcon from '@mui/icons-material/Lock';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import GitHubIcon from '@mui/icons-material/GitHub';
+import EditIcon from '@mui/icons-material/Edit';
+import CheckIcon from '@mui/icons-material/Check';
+import CloseIcon from '@mui/icons-material/Close';
 
 interface ExecutionViewProps {
   projectId: string;
@@ -22,6 +26,7 @@ interface ProjectDetail {
   id: string;
   name: string;
   status: string;
+  repoUrl: string | null;
   tasks: ProjectTask[];
   agents: ProjectAgent[];
   iterations: ProjectIteration[];
@@ -92,6 +97,10 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [resuming, setResuming] = useState(false);
+  const [editingRepoUrl, setEditingRepoUrl] = useState(false);
+  const [repoUrlDraft, setRepoUrlDraft] = useState('');
+  const [savingRepoUrl, setSavingRepoUrl] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   const loadProject = async () => {
@@ -105,6 +114,56 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
       console.error('Failed to load project:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!confirm('Resume this project? Stuck tasks will be reset and agents will be re-launched.')) return;
+    setResuming(true);
+    try {
+      const res = await fetch('/api/projects/build', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, agentCount: 4 }),
+      });
+      const result = await res.json();
+      if (!result.error) {
+        await loadProject();
+      }
+    } catch (err) {
+      console.error('Failed to resume project:', err);
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  const startEditingRepoUrl = () => {
+    setRepoUrlDraft(project?.repoUrl ?? '');
+    setEditingRepoUrl(true);
+  };
+
+  const cancelEditingRepoUrl = () => {
+    setEditingRepoUrl(false);
+    setRepoUrlDraft('');
+  };
+
+  const saveRepoUrl = async () => {
+    setSavingRepoUrl(true);
+    try {
+      const res = await fetch(`/api/projects?id=${projectId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: repoUrlDraft.trim() || null }),
+      });
+      const result = await res.json();
+      if (!result.error) {
+        setEditingRepoUrl(false);
+        await loadProject();
+      }
+    } catch (err) {
+      console.error('Failed to save repo URL:', err);
+    } finally {
+      setSavingRepoUrl(false);
     }
   };
 
@@ -147,9 +206,69 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
       {/* Header Stats */}
       <Paper sx={{ p: 2 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-          <Typography variant="h6">{project.name}</Typography>
-          <Stack direction="row" spacing={1}>
-            <Chip label={project.status} color="primary" />
+          <Box>
+            <Typography variant="h6">{project.name}</Typography>
+            {editingRepoUrl ? (
+              <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.5 }}>
+                <GitHubIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+                <TextField
+                  size="small"
+                  variant="outlined"
+                  value={repoUrlDraft}
+                  onChange={(e) => setRepoUrlDraft(e.target.value)}
+                  placeholder="git@github.com:user/repo.git"
+                  sx={{ minWidth: 350, '& .MuiInputBase-input': { fontSize: '0.8rem', fontFamily: 'monospace', py: 0.5 } }}
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveRepoUrl();
+                    if (e.key === 'Escape') cancelEditingRepoUrl();
+                  }}
+                  disabled={savingRepoUrl}
+                />
+                <IconButton size="small" onClick={saveRepoUrl} disabled={savingRepoUrl} color="primary">
+                  <CheckIcon fontSize="small" />
+                </IconButton>
+                <IconButton size="small" onClick={cancelEditingRepoUrl} disabled={savingRepoUrl}>
+                  <CloseIcon fontSize="small" />
+                </IconButton>
+              </Stack>
+            ) : project.repoUrl ? (
+              <Stack direction="row" spacing={0.5} alignItems="center">
+                <GitHubIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+                <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                  {project.repoUrl}
+                </Typography>
+                {project.status === 'paused' && (
+                  <IconButton size="small" onClick={startEditingRepoUrl} sx={{ ml: 0.5 }}>
+                    <EditIcon sx={{ fontSize: 14 }} />
+                  </IconButton>
+                )}
+              </Stack>
+            ) : project.status === 'paused' ? (
+              <Button
+                size="small"
+                variant="text"
+                startIcon={<GitHubIcon sx={{ fontSize: 14 }} />}
+                onClick={startEditingRepoUrl}
+                sx={{ mt: 0.5, textTransform: 'none', fontSize: '0.75rem' }}
+              >
+                Set repository URL
+              </Button>
+            ) : null}
+          </Box>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Chip label={project.status} color={project.status === 'paused' ? 'default' : 'primary'} />
+            {project.status === 'paused' && (
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={<PlayArrowIcon />}
+                onClick={handleResume}
+                disabled={resuming}
+              >
+                {resuming ? 'Resuming...' : 'Resume'}
+              </Button>
+            )}
             <IconButton size="small" onClick={loadProject}>
               <RefreshIcon />
             </IconButton>
