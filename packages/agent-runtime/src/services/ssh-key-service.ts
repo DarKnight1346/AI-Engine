@@ -52,13 +52,22 @@ export class SshKeyService {
   /**
    * Ensure a key pair exists and is in valid OpenSSH format.
    * Generates a new one if missing or in an incompatible format (e.g. PKCS8 PEM).
-   * This should be called during dashboard startup / setup.
+   * All code paths that need a key pair should go through this method.
    */
   async ensureKeyPair(): Promise<SshKeyPair> {
-    if (this.cachedKeyPair) return this.cachedKeyPair;
+    // Validate cached key is in OpenSSH format (not stale PKCS8)
+    if (this.cachedKeyPair) {
+      if (this.cachedKeyPair.privateKey.includes('OPENSSH PRIVATE KEY')) {
+        return this.cachedKeyPair;
+      }
+      // Cached key is in wrong format — clear and regenerate
+      console.warn('[ssh-keys] Cached private key is not in OpenSSH format — regenerating');
+      this.cachedKeyPair = null;
+      return this.generateKeyPair();
+    }
 
     if (await this.exists()) {
-      // Validate the private key is in OpenSSH format (not PKCS8 PEM)
+      // Validate the private key on disk is in OpenSSH format (not PKCS8 PEM)
       const privateKeyContent = await readFile(PRIVATE_KEY_PATH, 'utf-8');
       if (!privateKeyContent.includes('OPENSSH PRIVATE KEY')) {
         console.warn('[ssh-keys] Existing private key is not in OpenSSH format — regenerating');
@@ -165,8 +174,16 @@ export class SshKeyService {
    * Get public key info (safe for API responses, no private key).
    */
   async getPublicKeyInfo(): Promise<SshKeyInfo> {
-    const keyExists = await this.exists();
-    if (!keyExists) {
+    try {
+      const keyPair = await this.ensureKeyPair();
+      return {
+        publicKey: keyPair.publicKey,
+        fingerprint: keyPair.fingerprint,
+        algorithm: keyPair.algorithm,
+        createdAt: keyPair.createdAt.toISOString(),
+        exists: true,
+      };
+    } catch {
       return {
         publicKey: '',
         fingerprint: '',
@@ -175,29 +192,24 @@ export class SshKeyService {
         exists: false,
       };
     }
-
-    const keyPair = await this.loadKeyPair();
-    return {
-      publicKey: keyPair.publicKey,
-      fingerprint: keyPair.fingerprint,
-      algorithm: keyPair.algorithm,
-      createdAt: keyPair.createdAt.toISOString(),
-      exists: true,
-    };
   }
 
   /**
    * Get the full key pair (including private key) for distribution to workers.
+   * Ensures the key is in valid OpenSSH format before returning.
    * Only call this server-side, never expose the private key in API responses.
    */
   async getKeyPairForWorker(): Promise<{ publicKey: string; privateKey: string; fingerprint: string } | null> {
-    if (!(await this.exists())) return null;
-    const keyPair = await this.loadKeyPair();
-    return {
-      publicKey: keyPair.publicKey,
-      privateKey: keyPair.privateKey,
-      fingerprint: keyPair.fingerprint,
-    };
+    try {
+      const keyPair = await this.ensureKeyPair();
+      return {
+        publicKey: keyPair.publicKey,
+        privateKey: keyPair.privateKey,
+        fingerprint: keyPair.fingerprint,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
