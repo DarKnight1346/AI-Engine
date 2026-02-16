@@ -17,6 +17,7 @@ import GitHubIcon from '@mui/icons-material/GitHub';
 import EditIcon from '@mui/icons-material/Edit';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
 
 interface ExecutionViewProps {
   projectId: string;
@@ -98,6 +99,7 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [resuming, setResuming] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [editingRepoUrl, setEditingRepoUrl] = useState(false);
   const [repoUrlDraft, setRepoUrlDraft] = useState('');
   const [savingRepoUrl, setSavingRepoUrl] = useState(false);
@@ -134,6 +136,26 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
       console.error('Failed to resume project:', err);
     } finally {
       setResuming(false);
+    }
+  };
+
+  const handleRestart = async () => {
+    if (!confirm('Restart this project from scratch? This will reset ALL tasks to pending, wipe the repository, and clear all logs. This cannot be undone.')) return;
+    setRestarting(true);
+    try {
+      const res = await fetch('/api/projects/restart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, agentCount: 4 }),
+      });
+      const result = await res.json();
+      if (!result.error) {
+        await loadProject();
+      }
+    } catch (err) {
+      console.error('Failed to restart project:', err);
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -259,15 +281,27 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
           <Stack direction="row" spacing={1} alignItems="center">
             <Chip label={project.status} color={project.status === 'paused' ? 'default' : 'primary'} />
             {project.status === 'paused' && (
-              <Button
-                size="small"
-                variant="contained"
-                startIcon={<PlayArrowIcon />}
-                onClick={handleResume}
-                disabled={resuming}
-              >
-                {resuming ? 'Resuming...' : 'Resume'}
-              </Button>
+              <>
+                <Button
+                  size="small"
+                  variant="contained"
+                  startIcon={<PlayArrowIcon />}
+                  onClick={handleResume}
+                  disabled={resuming || restarting}
+                >
+                  {resuming ? 'Resuming...' : 'Resume'}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  startIcon={<RestartAltIcon />}
+                  onClick={handleRestart}
+                  disabled={resuming || restarting}
+                >
+                  {restarting ? 'Restarting...' : 'Restart'}
+                </Button>
+              </>
             )}
             <IconButton size="small" onClick={loadProject}>
               <RefreshIcon />
@@ -387,7 +421,7 @@ export default function ExecutionView({ projectId }: ExecutionViewProps) {
             <Divider sx={{ mb: 2 }} />
             <Box sx={{ flexGrow: 1, overflow: 'auto' }}>
               <List dense>
-                {project.logs.map((log) => (
+                {[...project.logs].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()).map((log) => (
                   <ListItem key={log.id} sx={{ px: 0 }}>
                     <Box sx={{ width: '100%' }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

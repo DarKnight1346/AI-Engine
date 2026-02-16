@@ -420,6 +420,18 @@ export class Worker {
       // ---------------------------------------------------------------
       // 2. Create and start the container
       // ---------------------------------------------------------------
+      // Clamp CPU limit to available host CPUs (Docker rejects --cpus > available)
+      let cpuLimitArgs: string[] = [];
+      if (msg.containerConfig?.cpuLimit) {
+        const requested = parseFloat(msg.containerConfig.cpuLimit);
+        const available = os.cpus().length || 1;
+        const clamped = Math.min(requested, available);
+        cpuLimitArgs = ['--cpus', String(clamped)];
+        if (clamped < requested) {
+          console.log(`[worker] Clamped CPU limit from ${requested} to ${clamped} (host has ${available} CPU(s))`);
+        }
+      }
+
       const dockerArgs = [
         'run', '-d',
         '--name', containerName,
@@ -430,7 +442,7 @@ export class Worker {
         '-e', `BRANCH_NAME=${branchName}`,
         '-e', 'GIT_SSH_COMMAND=ssh -i /tmp/git_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null',
         ...(msg.containerConfig?.memoryLimit ? ['--memory', msg.containerConfig.memoryLimit] : []),
-        ...(msg.containerConfig?.cpuLimit ? ['--cpus', msg.containerConfig.cpuLimit] : []),
+        ...cpuLimitArgs,
         image,
         'tail', '-f', '/dev/null', // keep container alive
       ];
@@ -785,12 +797,11 @@ export class Worker {
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \\
-    git curl wget openssh-client build-essential \\
-    python3 python3-pip \\
+    git curl wget openssh-client ca-certificates gnupg \\
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \\
     && apt-get install -y nodejs \\
-    && npm install -g pnpm
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 `.trim();
 

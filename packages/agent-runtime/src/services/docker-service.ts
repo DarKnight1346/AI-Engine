@@ -17,7 +17,7 @@ import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
 import { mkdir, writeFile, rm } from 'fs/promises';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, cpus } from 'os';
 import type {
   DockerContainerConfig,
   DockerContainerInfo,
@@ -121,7 +121,14 @@ export class DockerService {
       args.push('--memory', config.memoryLimit);
     }
     if (config.cpuLimit) {
-      args.push('--cpus', config.cpuLimit);
+      // Clamp CPU limit to available host CPUs (Docker rejects --cpus > available)
+      const requested = parseFloat(config.cpuLimit);
+      const available = cpus().length || 1;
+      const clamped = Math.min(requested, available);
+      args.push('--cpus', String(clamped));
+      if (clamped < requested) {
+        console.log(`[docker] Clamped CPU limit from ${requested} to ${clamped} (host has ${available} CPU(s))`);
+      }
     }
 
     // Additional environment variables
@@ -432,15 +439,12 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install essential tools
+# Install minimal tools — agents can install additional software as needed
 RUN apt-get update && apt-get install -y \\
     git \\
     curl \\
     wget \\
     openssh-client \\
-    build-essential \\
-    python3 \\
-    python3-pip \\
     ca-certificates \\
     gnupg \\
     && rm -rf /var/lib/apt/lists/*
@@ -449,9 +453,6 @@ RUN apt-get update && apt-get install -y \\
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \\
     && apt-get install -y nodejs \\
     && rm -rf /var/lib/apt/lists/*
-
-# Install pnpm
-RUN npm install -g pnpm
 
 # Setup workspace
 RUN mkdir -p /workspace
