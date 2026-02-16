@@ -10,11 +10,15 @@
  * ensuring consistent Git access without per-node SSH setup.
  */
 
-import { generateKeyPairSync, createHash } from 'crypto';
-import { readFile, writeFile, mkdir, access, constants } from 'fs/promises';
+import { createHash } from 'crypto';
+import { execFile as execFileCb } from 'child_process';
+import { promisify } from 'util';
+import { readFile, writeFile, mkdir, access, constants, rm } from 'fs/promises';
 import { join } from 'path';
-import { homedir, hostname } from 'os';
+import { homedir, hostname, tmpdir } from 'os';
 import type { SshKeyPair, SshKeyInfo } from '@ai-engine/shared';
+
+const execFile = promisify(execFileCb);
 
 const KEYS_DIR = join(homedir(), '.ai-engine', 'keys');
 const PRIVATE_KEY_PATH = join(KEYS_DIR, 'id_ed25519');
@@ -46,13 +50,20 @@ export class SshKeyService {
   }
 
   /**
-   * Ensure a key pair exists. Generates one if it doesn't.
+   * Ensure a key pair exists and is in valid OpenSSH format.
+   * Generates a new one if missing or in an incompatible format (e.g. PKCS8 PEM).
    * This should be called during dashboard startup / setup.
    */
   async ensureKeyPair(): Promise<SshKeyPair> {
     if (this.cachedKeyPair) return this.cachedKeyPair;
 
     if (await this.exists()) {
+      // Validate the private key is in OpenSSH format (not PKCS8 PEM)
+      const privateKeyContent = await readFile(PRIVATE_KEY_PATH, 'utf-8');
+      if (!privateKeyContent.includes('OPENSSH PRIVATE KEY')) {
+        console.warn('[ssh-keys] Existing private key is not in OpenSSH format — regenerating');
+        return this.generateKeyPair();
+      }
       return this.loadKeyPair();
     }
 
@@ -60,47 +71,60 @@ export class SshKeyService {
   }
 
   /**
-   * Generate a new Ed25519 SSH key pair.
-   * Overwrites any existing key pair.
+   * Generate a new Ed25519 SSH key pair using ssh-keygen.
+   * This produces keys in native OpenSSH format, which is the only format
+   * that OpenSSH supports for Ed25519 keys. Overwrites any existing key pair.
    */
   async generateKeyPair(): Promise<SshKeyPair> {
     await mkdir(KEYS_DIR, { recursive: true });
 
-    const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
-      publicKeyEncoding: { type: 'spki', format: 'pem' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    });
+    // Generate using ssh-keygen for guaranteed OpenSSH-compatible format.
+    // Use a temp path to avoid partial writes to the real key files.
+    const tempKeyPath = join(tmpdir(), `ai-engine-keygen-${Date.now()}`);
+    const comment = `ai-engine@${hostname()}`;
 
-    // Convert PEM to OpenSSH format for the public key
-    const sshPublicKey = this.pemToOpenSsh(publicKey);
-    const fingerprint = this.computeFingerprint(publicKey);
+    try {
+      await execFile('ssh-keygen', [
+        '-t', 'ed25519',
+        '-f', tempKeyPath,
+        '-N', '',        // no passphrase
+        '-C', comment,   // comment
+        '-q',            // quiet
+      ], { timeout: 15_000 });
 
-    // Write private key (PEM format, used by Git/SSH)
-    const sshPrivateKey = privateKey;
-    await writeFile(PRIVATE_KEY_PATH, sshPrivateKey, { mode: 0o600 });
+      const sshPrivateKey = await readFile(tempKeyPath, 'utf-8');
+      const sshPublicKey = (await readFile(`${tempKeyPath}.pub`, 'utf-8')).trim();
 
-    // Write public key (OpenSSH format for adding to GitHub/GitLab)
-    await writeFile(PUBLIC_KEY_PATH, sshPublicKey + '\n', { mode: 0o644 });
+      // Write to final locations
+      await writeFile(PRIVATE_KEY_PATH, sshPrivateKey, { mode: 0o600 });
+      await writeFile(PUBLIC_KEY_PATH, sshPublicKey + '\n', { mode: 0o644 });
 
-    // Write metadata
-    const meta = {
-      algorithm: 'ed25519',
-      fingerprint,
-      createdAt: new Date().toISOString(),
-    };
-    await writeFile(META_PATH, JSON.stringify(meta, null, 2), { mode: 0o644 });
+      const fingerprint = this.computeFingerprintFromSshPubKey(sshPublicKey);
 
-    const keyPair: SshKeyPair = {
-      publicKey: sshPublicKey,
-      privateKey: sshPrivateKey,
-      fingerprint,
-      algorithm: 'ed25519',
-      createdAt: new Date(),
-    };
+      // Write metadata
+      const meta = {
+        algorithm: 'ed25519',
+        fingerprint,
+        createdAt: new Date().toISOString(),
+      };
+      await writeFile(META_PATH, JSON.stringify(meta, null, 2), { mode: 0o644 });
 
-    this.cachedKeyPair = keyPair;
-    console.log(`[ssh-keys] Generated new Ed25519 key pair (fingerprint: ${fingerprint})`);
-    return keyPair;
+      const keyPair: SshKeyPair = {
+        publicKey: sshPublicKey,
+        privateKey: sshPrivateKey,
+        fingerprint,
+        algorithm: 'ed25519',
+        createdAt: new Date(),
+      };
+
+      this.cachedKeyPair = keyPair;
+      console.log(`[ssh-keys] Generated new Ed25519 key pair (fingerprint: ${fingerprint})`);
+      return keyPair;
+    } finally {
+      // Clean up temp files
+      await rm(tempKeyPath, { force: true }).catch(() => {});
+      await rm(`${tempKeyPath}.pub`, { force: true }).catch(() => {});
+    }
   }
 
   /**
@@ -188,47 +212,6 @@ export class SshKeyService {
    */
   getKeysDir(): string {
     return KEYS_DIR;
-  }
-
-  /**
-   * Convert PEM public key to OpenSSH format.
-   * Format: ssh-ed25519 <base64-encoded-key> ai-engine@<hostname>
-   */
-  private pemToOpenSsh(pemPublicKey: string): string {
-    // Extract the raw key bytes from the PEM-encoded SPKI structure
-    const base64 = pemPublicKey
-      .replace(/-----BEGIN PUBLIC KEY-----/, '')
-      .replace(/-----END PUBLIC KEY-----/, '')
-      .replace(/\s/g, '');
-    const derBuffer = Buffer.from(base64, 'base64');
-
-    // For Ed25519 SPKI, the raw 32-byte public key starts at offset 12
-    // (after the ASN.1 header: 30 2a 30 05 06 03 2b 65 70 03 21 00)
-    const rawKey = derBuffer.subarray(12);
-
-    // Build the OpenSSH key blob: string "ssh-ed25519" + string <raw-key>
-    const keyType = 'ssh-ed25519';
-    const keyTypeLen = Buffer.alloc(4);
-    keyTypeLen.writeUInt32BE(keyType.length);
-
-    const rawKeyLen = Buffer.alloc(4);
-    rawKeyLen.writeUInt32BE(rawKey.length);
-
-    const blob = Buffer.concat([keyTypeLen, Buffer.from(keyType), rawKeyLen, rawKey]);
-    return `ssh-ed25519 ${blob.toString('base64')} ai-engine@${hostname()}`;
-  }
-
-  /**
-   * Compute SHA-256 fingerprint from PEM public key.
-   */
-  private computeFingerprint(pemPublicKey: string): string {
-    const base64 = pemPublicKey
-      .replace(/-----BEGIN PUBLIC KEY-----/, '')
-      .replace(/-----END PUBLIC KEY-----/, '')
-      .replace(/\s/g, '');
-    const der = Buffer.from(base64, 'base64');
-    const hash = createHash('sha256').update(der).digest('base64');
-    return `SHA256:${hash.replace(/=+$/, '')}`;
   }
 
   /**
