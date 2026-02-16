@@ -40,6 +40,16 @@ export async function POST(request: NextRequest) {
 
     const keyPair = await sshKeyService.generateKeyPair();
 
+    // Notify workers to pick up the new key via Redis → WorkerHub
+    try {
+      const Redis = (await import('ioredis')).default;
+      const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+      await redis.publish('keys:resync', JSON.stringify({ fingerprint: keyPair.fingerprint }));
+      await redis.quit();
+    } catch (redisError) {
+      console.error('[keys] Failed to publish keys:resync event:', redisError);
+    }
+
     return NextResponse.json({
       success: true,
       publicKey: keyPair.publicKey,

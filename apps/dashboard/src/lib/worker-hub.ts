@@ -104,6 +104,7 @@ export class WorkerHub {
         'docker:task:finalize',
         'docker:cleanup',
         'docker:task:cleanup',
+        'keys:resync',
       );
 
       this.redisSub.on('message', async (channel: string, message: string) => {
@@ -167,6 +168,13 @@ export class WorkerHub {
       case 'docker:cleanup': {
         // Tell ALL workers to clean up containers for a project
         this.broadcastDockerCleanup(data.projectId);
+        break;
+      }
+
+      case 'keys:resync': {
+        // SSH keys were regenerated — push new keys to all connected workers
+        console.log('[hub] SSH keys regenerated — syncing to all workers');
+        await this.syncKeysToAllWorkers();
         break;
       }
 
