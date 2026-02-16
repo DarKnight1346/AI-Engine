@@ -41,7 +41,7 @@ export class DockerDispatcherImpl implements DockerDispatcher {
     return this.hub.createDockerContainer({
       projectId: opts.projectId,
       taskId: opts.taskId,
-      config: opts.config as Record<string, unknown>,
+      config: opts.config as unknown as Record<string, unknown>,
       repoUrl: opts.repoUrl,
     });
   }
