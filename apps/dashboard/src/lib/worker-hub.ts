@@ -1264,21 +1264,30 @@ export class WorkerHub {
    * Handle Docker task completion from a worker.
    * Resolves any pending finalization promise, and also forwards the
    * result to the orchestrator via Redis.
+   *
+   * If the result indicates a merge conflict, the container is still alive
+   * on the worker — we preserve the task→worker tracking so the agent can
+   * resolve the conflict and call docker_finalize again.
    */
   private async handleDockerTaskComplete(
     workerId: string,
     msg: any,
   ): Promise<void> {
     const result = msg.result ?? {};
+    const isMergeConflict = result.mergeConflict === true;
 
-    // Clean up tracking
-    this.dockerTaskWorkers.delete(msg.taskId);
-    const worker = this.workers.get(workerId);
-    if (worker) {
-      worker.activeTasks = Math.max(0, worker.activeTasks - 1);
+    if (isMergeConflict) {
+      // Container is still alive — keep tracking so agent can retry after resolving
+      console.log(`[hub] Docker task ${msg.taskId} has merge conflict on worker ${workerId} — container kept alive`);
+    } else {
+      // Container was destroyed — clean up tracking
+      this.dockerTaskWorkers.delete(msg.taskId);
+      const worker = this.workers.get(workerId);
+      if (worker) {
+        worker.activeTasks = Math.max(0, worker.activeTasks - 1);
+      }
+      console.log(`[hub] Docker task ${msg.taskId} ${result.success ? 'completed' : 'failed'} on worker ${workerId}`);
     }
-
-    console.log(`[hub] Docker task ${msg.taskId} ${result.success ? 'completed' : 'failed'} on worker ${workerId}`);
 
     // Resolve pending finalization promise if one exists
     const pending = this.pendingDockerFinalizations.get(msg.taskId);

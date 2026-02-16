@@ -796,22 +796,23 @@ IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
       const duration = Date.now() - startTime;
 
       if (result.success) {
-        // Safety net: if the container is still alive (agent didn't call docker_finalize),
+        // Safety net: if the container is still alive (agent didn't call docker_finalize
+        // or docker_finalize reported a merge conflict the agent didn't resolve),
         // auto-finalize to commit and push changes so work isn't lost.
-        let autoFinalized = false;
+        let merged = false;
         try {
           const containers = await this.dockerDispatcher!.listProjectContainers(this.projectId);
           const containerStillAlive = containers.some(c => c.taskId === task.id && c.status === 'running');
 
           if (containerStillAlive) {
-            console.log(`[orchestrator] Auto-finalizing container for task ${task.id} (agent did not call docker_finalize)`);
+            console.log(`[orchestrator] Auto-finalizing container for task ${task.id} (container still alive after agent loop)`);
             await db.projectLog.create({
               data: {
                 projectId: this.projectId,
                 agentId: this.agentId,
                 taskId: task.id,
                 level: 'warn',
-                message: `Auto-finalizing: ${task.title} — agent completed without calling docker_finalize`,
+                message: `Auto-finalizing: ${task.title} — container still running after agent completed`,
               },
             });
 
@@ -820,50 +821,77 @@ IMPORTANT: Always pass taskId="${task.id}" to all Docker tools.
                 task.id,
                 `${task.title}\n\nAutomated commit by AI Engine agent (task: ${task.id})`,
               );
-              autoFinalized = true;
 
+              merged = finalizeResult.merged;
               const raw = finalizeResult as any;
-              if (finalizeResult.merged) {
+
+              if (merged) {
                 console.log(`[orchestrator] Auto-finalize succeeded: ${finalizeResult.filesChanged} files, merged to main`);
               } else if (raw.mergeConflict) {
-                // Merge conflict during auto-finalize — branch is pushed but not merged.
-                // We can't resolve conflicts without the agent, so destroy container and move on.
-                console.warn(`[orchestrator] Auto-finalize hit merge conflict for task ${task.id}`);
+                // Can't resolve conflicts without the agent — destroy container, branch is pushed
+                console.warn(`[orchestrator] Auto-finalize hit merge conflict for task ${task.id} — branch pushed but not merged`);
                 try { await this.dockerDispatcher!.destroyContainer(task.id); } catch { /* best effort */ }
               } else {
-                console.log(`[orchestrator] Auto-finalize: branch pushed, merge status: ${finalizeResult.merged}`);
+                console.log(`[orchestrator] Auto-finalize: branch pushed, merge: ${merged}`);
               }
             } catch (finalizeErr: any) {
               console.error(`[orchestrator] Auto-finalize failed for task ${task.id}:`, finalizeErr.message);
               try { await this.dockerDispatcher!.destroyContainer(task.id); } catch { /* best effort */ }
             }
+          } else {
+            // Container was already destroyed (agent called docker_finalize successfully)
+            merged = true;
           }
         } catch (checkErr: any) {
           console.warn(`[orchestrator] Could not check container status for auto-finalize:`, checkErr.message);
           try { await this.dockerDispatcher!.destroyContainer(task.id); } catch { /* best effort */ }
         }
 
-        await db.projectTask.update({
-          where: { id: task.id },
-          data: {
-            status: 'completed',
-            completedAt: new Date(),
-            result: result.output,
-          },
-        });
+        if (merged) {
+          await db.projectTask.update({
+            where: { id: task.id },
+            data: {
+              status: 'completed',
+              completedAt: new Date(),
+              result: result.output,
+            },
+          });
 
-        await db.projectLog.create({
-          data: {
-            projectId: this.projectId,
-            agentId: this.agentId,
-            taskId: task.id,
-            level: 'success',
-            message: `Completed task via Docker: ${task.title} (${(duration / 1000).toFixed(1)}s, worker: ${workerId})${autoFinalized ? ' [auto-finalized]' : ''}`,
-            metadata: { branchName, workerId },
-          },
-        });
+          await db.projectLog.create({
+            data: {
+              projectId: this.projectId,
+              agentId: this.agentId,
+              taskId: task.id,
+              level: 'success',
+              message: `Completed task via Docker: ${task.title} (${(duration / 1000).toFixed(1)}s, worker: ${workerId})`,
+              metadata: { branchName, workerId },
+            },
+          });
+        } else {
+          // Branch is pushed but merge failed — mark task as failed so it can be retried
+          await db.projectTask.update({
+            where: { id: task.id },
+            data: {
+              status: 'failed',
+              completedAt: new Date(),
+              result: result.output,
+              errorMessage: `Branch ${branchName} pushed but merge to main failed (likely merge conflict). Branch needs manual merge or task retry.`,
+            },
+          });
 
-        await this.updateStats(result.tokensUsed, duration, true);
+          await db.projectLog.create({
+            data: {
+              projectId: this.projectId,
+              agentId: this.agentId,
+              taskId: task.id,
+              level: 'error',
+              message: `Task work done but merge failed: ${task.title} — branch ${branchName} pushed, needs manual merge or retry`,
+              metadata: { branchName, workerId },
+            },
+          });
+        }
+
+        await this.updateStats(result.tokensUsed, duration, merged);
       } else {
         // Agent loop failed — clean up the container
         try {
